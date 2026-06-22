@@ -1,7 +1,10 @@
-const { contextBridge, ipcRenderer, webUtils } = require('electron');
+const { contextBridge, ipcRenderer, webUtils, clipboard } = require('electron');
 contextBridge.exposeInMainWorld('api', {
+  clipboardWriteText: (text) => clipboard.writeText(String(text ?? '')),
+  clipboardReadText: () => clipboard.readText(),
   getConfig: () => ipcRenderer.invoke('config:get'),
   readTree: (args) => ipcRenderer.invoke('tree:read', args),
+  treeSignature: (args) => ipcRenderer.invoke('tree:signature', args),
   readFile: (args) => ipcRenderer.invoke('file:read', args),
   writeFile: (args) => ipcRenderer.invoke('file:write', args),
   move: (args) => ipcRenderer.invoke('fs:move', args),
@@ -12,6 +15,9 @@ contextBridge.exposeInMainWorld('api', {
   copyExternal: (args) => ipcRenderer.invoke('fs:copyExternal', args),
   getPathForFile: (file) => webUtils.getPathForFile(file),
   pickFolder: () => ipcRenderer.invoke('folder:pick'),
+  openWorkspace: () => ipcRenderer.invoke('workspace:openDirectory'),
+  openWorkspaceFile: () => ipcRenderer.invoke('workspace:openFile'),
+  resyncWorkspace: (payload) => ipcRenderer.invoke('workspace:resync', payload),
   newWindow: (workspace) => ipcRenderer.invoke('window:new', workspace),
   terminalStart: (args) => ipcRenderer.send('terminal:start', args),
   terminalWrite: (data) => ipcRenderer.send('terminal:write', data),

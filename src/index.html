@@ -12,7 +12,7 @@
     <span id="cwd"></span>
     <button id="refreshBtn">Refresh</button>
     <button id="saveBtn" disabled>Save</button>
-    <button id="claudeBtn">Start Claude</button>
+    <button id="claudeBtn" title="Runs: claude --dangerously-skip-permissions (skips permission prompts)">Start Claude</button>
   </div>
   <div id="layout">
     <aside id="treePane">
@@ -42,6 +42,26 @@
     <div class="menu-separator"></div>
     <button data-action="reveal">Reveal in Explorer</button>
     <button data-action="open-new-window">Open in New Window</button>
+  </div>
+  <div id="landing" class="landing">
+    <div class="landing-box">
+      <div class="landing-title">Nix Workbench Lite</div>
+      <div class="landing-subtitle">Open a workspace to get started</div>
+      <div class="landing-actions">
+        <button id="landingOpenWorkspace" class="primary">Open Workspace…</button>
+        <button id="landingOpenFile">Open Workspace File…</button>
+      </div>
+    </div>
+  </div>
+  <div id="promptModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-message" id="promptMessage"></div>
+      <input type="text" id="promptInput" spellcheck="false" autocomplete="off" />
+      <div class="modal-actions">
+        <button id="promptCancel">Cancel</button>
+        <button id="promptOk" class="primary">OK</button>
+      </div>
+    </div>
   </div>
   <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>

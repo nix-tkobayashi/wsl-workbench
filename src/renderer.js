@@ -17,6 +17,44 @@ const saveBtn = document.getElementById('saveBtn');
 const editorTitle = document.getElementById('editorTitle');
 const dirtyMark = document.getElementById('dirtyMark');
 
+const landing = document.getElementById('landing');
+
+const promptModal = document.getElementById('promptModal');
+const promptMessage = document.getElementById('promptMessage');
+const promptInput = document.getElementById('promptInput');
+const promptOk = document.getElementById('promptOk');
+const promptCancel = document.getElementById('promptCancel');
+
+// Promise-based replacement for the unsupported window.prompt() in Electron.
+function askPrompt(message, defaultValue = '') {
+  return new Promise((resolve) => {
+    promptMessage.textContent = message;
+    promptInput.value = defaultValue;
+    promptModal.classList.remove('hidden');
+    promptInput.focus();
+    promptInput.select();
+
+    const cleanup = () => {
+      promptModal.classList.add('hidden');
+      promptOk.removeEventListener('click', onOk);
+      promptCancel.removeEventListener('click', onCancel);
+      promptModal.removeEventListener('keydown', onKey);
+    };
+    const onOk = () => { const value = promptInput.value; cleanup(); resolve(value); };
+    const onCancel = () => { cleanup(); resolve(null); };
+    // Listen on the modal (not just the input) so Enter/Escape work even when a button has focus,
+    // and stop propagation so Escape does not also reach the document-level handlers.
+    const onKey = (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); onOk(); }
+      else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onCancel(); }
+    };
+
+    promptOk.addEventListener('click', onOk);
+    promptCancel.addEventListener('click', onCancel);
+    promptModal.addEventListener('keydown', onKey);
+  });
+}
+
 function terminalResize() {
   fitAddon.fit();
   window.api.terminalResize({ cols: term.cols, rows: term.rows });
@@ -24,6 +62,41 @@ function terminalResize() {
 window.addEventListener('resize', terminalResize);
 term.onData((data) => window.api.terminalWrite(data));
 window.api.onTerminalData((data) => term.write(data));
+
+// Ctrl+C copies the selection (falls back to interrupt when nothing is selected),
+// Ctrl+V pastes the clipboard into the shell. Ctrl+Shift+C/V always copy/paste.
+term.attachCustomKeyEventHandler((event) => {
+  if (event.type !== 'keydown' || !(event.ctrlKey || event.metaKey)) return true;
+  const key = event.key.toLowerCase();
+  if (key === 'c') {
+    if (event.shiftKey || term.hasSelection()) {
+      const selection = term.getSelection();
+      if (selection) window.api.clipboardWriteText(selection);
+      event.preventDefault();
+      return false; // do not also send SIGINT
+    }
+    return true; // no selection: let Ctrl+C interrupt the process
+  }
+  if (key === 'v') {
+    const text = window.api.clipboardReadText();
+    if (text) window.api.terminalWrite(text);
+    event.preventDefault();
+    return false;
+  }
+  return true;
+});
+
+// Path of the tree item currently being dragged within the app. This is the authoritative
+// internal-origin signal: it is only set during a genuine tree dragstart, so external drags
+// (text/URLs/files from other apps) cannot trigger terminal insertion or fs:move.
+let currentTreeDragPath = null;
+
+// Quote a path for the shell only when it contains characters that need it.
+function shellQuotePath(p) {
+  if (!p) return p;
+  if (/^[\w@%+=:,./-]+$/.test(p)) return p;
+  return `'${p.replace(/'/g, `'\\''`)}'`;
+}
 
 function setDirty(value) {
   editorDirty = value;
@@ -111,7 +184,7 @@ async function handleContextAction(action) {
       const parentDirPath = parentDirFor(node);
       const type = action === 'new-folder' ? 'directory' : 'file';
       const defaultName = type === 'directory' ? 'new-folder' : 'new-file.txt';
-      const name = prompt(type === 'directory' ? 'New folder name:' : 'New file name:', defaultName);
+      const name = await askPrompt(type === 'directory' ? 'New folder name:' : 'New file name:', defaultName);
       if (!name) return;
       await window.api.createFsItem({ distro: config.distro, parentDirPath, name, type });
       expanded.add(parentDirPath);
@@ -121,7 +194,7 @@ async function handleContextAction(action) {
 
     if (action === 'rename') {
       const currentName = basenameFor(node.path);
-      const newName = prompt('New name:', currentName);
+      const newName = await askPrompt('New name:', currentName);
       if (!newName || newName === currentName) return;
       const result = await window.api.renameFsItem({ distro: config.distro, sourcePath: node.path, newName });
       if (selectedPath === node.path) {
@@ -167,6 +240,7 @@ function rowFor(node) {
   row.draggable = true;
   row.dataset.path = node.path;
   row.dataset.type = node.type;
+  if (node.path === selectedPath) row.classList.add('selected');
 
   const twisty = document.createElement('span');
   twisty.className = 'twisty';
@@ -203,9 +277,12 @@ function rowFor(node) {
   });
 
   row.addEventListener('dragstart', (event) => {
+    currentTreeDragPath = node.path;
     event.dataTransfer.setData('text/plain', node.path);
-    event.dataTransfer.effectAllowed = 'move';
+    // 'copyMove' lets the tree accept it as a move and the terminal accept it as a path insert.
+    event.dataTransfer.effectAllowed = 'copyMove';
   });
+  row.addEventListener('dragend', () => { currentTreeDragPath = null; });
 
   row.addEventListener('dragover', (event) => {
     if (node.type !== 'directory') return;
@@ -235,7 +312,7 @@ function rowFor(node) {
       return;
     }
 
-    const sourcePath = event.dataTransfer.getData('text/plain');
+    const sourcePath = currentTreeDragPath;
     if (!sourcePath || sourcePath === node.path) return;
     try {
       await window.api.move({ distro: config.distro, sourcePath, targetDirPath: node.path });
@@ -255,7 +332,7 @@ function rowFor(node) {
   return row;
 }
 
-async function buildNode(node, depth = 0) {
+async function buildNode(node, cfg, depth = 0) {
   const wrapper = document.createElement('div');
   wrapper.className = 'tree-node';
   wrapper.appendChild(rowFor(node));
@@ -265,8 +342,8 @@ async function buildNode(node, depth = 0) {
     children.className = `children ${expanded.has(node.path) ? 'open' : ''}`;
     if (expanded.has(node.path)) {
       try {
-        const tree = await window.api.readTree({ distro: config.distro, wslPath: node.path });
-        for (const child of tree.children) children.appendChild(await buildNode(child, depth + 1));
+        const tree = await window.api.readTree({ distro: cfg.distro, wslPath: node.path });
+        for (const child of tree.children) children.appendChild(await buildNode(child, cfg, depth + 1));
       } catch (error) {
         const err = document.createElement('div');
         err.className = 'row';
@@ -280,12 +357,24 @@ async function buildNode(node, depth = 0) {
 }
 
 async function renderTree() {
-  const root = await window.api.readTree(config);
+  if (!config) return; // no active workspace (landing screen)
+  const myGen = ++renderGeneration;
+  const cfg = config; // snapshot: stay consistent even if the workspace switches mid-render
   const tree = document.getElementById('tree');
+  const prevScroll = tree.scrollTop;
+  // Read and build into a detached node first; touch the live DOM only at the end.
+  const root = await window.api.readTree(cfg);
+  // Keep the root open so its children build; skip if the workspace already switched
+  // (cfg===config is checked synchronously, so this never re-adds a stale root path).
+  if (cfg === config) expanded.add(root.path);
+  const wrapper = await buildNode(root, cfg);
+  if (myGen !== renderGeneration) return; // a newer render started; let it publish instead
   tree.innerHTML = '';
-  expanded.add(root.path);
-  tree.appendChild(await buildNode(root));
-  document.getElementById('cwd').textContent = `${config.distro}:${config.wslPath}`;
+  tree.appendChild(wrapper);
+  tree.scrollTop = prevScroll;
+  document.getElementById('cwd').textContent = `${cfg.distro}:${cfg.wslPath}`;
+  // Invalidate the poll baseline so a just-rendered state is not re-detected as a change.
+  lastTreeSignature = null;
 }
 
 async function toggle(wslPath) {
@@ -294,7 +383,15 @@ async function toggle(wslPath) {
 }
 
 async function applyWorkspace(nextConfig) {
-  if (editorDirty && !confirm('Unsaved changes will be discarded. Continue?')) return;
+  if (editorDirty && !confirm('Unsaved changes will be discarded. Continue?')) {
+    // Main already committed the new workspace; put it back in sync with what we still show.
+    if (config) window.api.resyncWorkspace({ workspace: config, showLanding: false });
+    return;
+  }
+  // Snapshot so we can fully roll back if the new workspace fails to load.
+  const prevConfig = config;
+  const prevExpanded = new Set(expanded);
+  const prevEditor = { selectedPath, value: editor.value, title: editorTitle.textContent, disabled: editor.disabled, dirty: editorDirty };
   config = nextConfig;
   selectedPath = null;
   editor.value = '';
@@ -302,7 +399,28 @@ async function applyWorkspace(nextConfig) {
   setDirty(false);
   expanded.clear();
   expanded.add(config.wslPath);
-  await renderTree();
+  try {
+    await renderTree(); // builds detached and publishes only on success; landing stays as a loading cover
+  } catch (error) {
+    alert(error.message || String(error));
+    // Roll back: the live tree/CWD/editor were never replaced, so restore the matching state.
+    config = prevConfig;
+    expanded.clear();
+    for (const p of prevExpanded) expanded.add(p);
+    selectedPath = prevEditor.selectedPath;
+    editor.value = prevEditor.value;
+    editorTitle.textContent = prevEditor.title;
+    editor.disabled = prevEditor.disabled;
+    setDirty(prevEditor.dirty);
+    if (prevConfig) {
+      window.api.resyncWorkspace({ workspace: prevConfig, showLanding: false });
+    } else {
+      landing.classList.remove('hidden');
+      window.api.resyncWorkspace({ showLanding: true });
+    }
+    return;
+  }
+  landing.classList.add('hidden');
   window.api.terminalStart({ ...config, command: '' });
   setTimeout(terminalResize, 300);
 }
@@ -353,20 +471,106 @@ document.getElementById('contextMenu').addEventListener('click', async (event) =
   await handleContextAction(button.dataset.action);
 });
 
+// Landing screen: the two buttons trigger the same main-process dialogs as the Workspace menu.
+// On success the main process sends 'workspace:changed', which applyWorkspace() handles (and hides the screen).
+function initLanding() {
+  document.getElementById('landingOpenWorkspace').addEventListener('click', () => window.api.openWorkspace());
+  document.getElementById('landingOpenFile').addEventListener('click', () => window.api.openWorkspaceFile());
+}
+
+// Dropping a tree file/directory onto the terminal inserts its WSL path at the prompt,
+// so the AI CLI can pick it up.
+function initTerminalDropTarget() {
+  const terminalPane = document.getElementById('terminalPane');
+
+  terminalPane.addEventListener('dragover', (event) => {
+    // Only react to genuine internal tree drags, never to external text/URL/file drags.
+    if (!currentTreeDragPath) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    terminalPane.classList.add('drag-over');
+  });
+  terminalPane.addEventListener('dragleave', (event) => {
+    // Ignore moves between child elements inside the pane to avoid highlight flicker.
+    if (terminalPane.contains(event.relatedTarget)) return;
+    terminalPane.classList.remove('drag-over');
+  });
+  terminalPane.addEventListener('drop', (event) => {
+    terminalPane.classList.remove('drag-over');
+    if (!currentTreeDragPath) return;
+    event.preventDefault();
+    window.api.terminalWrite(shellQuotePath(currentTreeDragPath) + ' ');
+    term.focus();
+  });
+}
+
+// Periodically refresh the tree so changes made outside the app (e.g. files created from the
+// terminal) appear without a manual Refresh. Polls a cheap signature and re-renders only on change.
+let lastTreeSignature = null;
+let pollingTree = false;
+let renderGeneration = 0;
+
+function treeInteractionBusy() {
+  return currentTreeDragPath !== null
+    || !document.getElementById('contextMenu').classList.contains('hidden')
+    || !promptModal.classList.contains('hidden');
+}
+
+async function pollTreeChanges() {
+  if (pollingTree || !config || document.hidden || treeInteractionBusy()) return;
+  pollingTree = true;
+  const configAtStart = config;
+  const genAtStart = renderGeneration;
+  try {
+    let signature;
+    try {
+      signature = await window.api.treeSignature({ distro: configAtStart.distro, paths: Array.from(expanded) });
+    } catch {
+      return;
+    }
+    if (config !== configAtStart) return; // workspace switched mid-poll; let the next tick resync
+    if (lastTreeSignature !== null && signature !== lastTreeSignature) {
+      await renderTree();
+    }
+    // Trust this signature as the baseline only if no render (poll- or app-initiated) intervened;
+    // otherwise force a fresh recompute next tick so we never store a stale baseline.
+    lastTreeSignature = (renderGeneration === genAtStart) ? signature : null;
+  } finally {
+    pollingTree = false;
+  }
+}
+
 document.getElementById('refreshBtn').addEventListener('click', renderTree);
 window.api.onWorkspaceChanged(async (nextConfig) => {
   await applyWorkspace(nextConfig);
 });
 
 document.getElementById('claudeBtn').addEventListener('click', () => {
-  window.api.terminalStart({ ...config, command: 'claude' });
+  if (!config) return;
+  // Run the WSL-native claude, never the Windows one that WSL's PATH interop also exposes
+  // under /mnt/c. Pick the first claude on PATH not under /mnt/; if none exists, fail loudly
+  // rather than falling back to the Windows claude.
+  const startClaude = 'c=$(type -aP claude | grep -v "^/mnt/" | head -n1); if [ -n "$c" ]; then "$c" --dangerously-skip-permissions; else echo "Error: WSL claude not found on PATH (only a Windows claude under /mnt is available). Install claude inside WSL."; fi';
+  window.api.terminalStart({ ...config, command: startClaude });
   setTimeout(terminalResize, 300);
 });
 
 (async function init() {
-  config = await window.api.getConfig();
-  expanded.add(config.wslPath);
+  // One-time wiring that does not depend on a chosen workspace. pollTreeChanges no-ops while config is null.
   initResizers();
+  initTerminalDropTarget();
+  initLanding();
+  setInterval(pollTreeChanges, 1500);
+
+  const initial = await window.api.getConfig();
+  if (initial.showLanding) {
+    config = null; // no active workspace yet; the landing screen drives the next step
+    landing.classList.remove('hidden');
+    return;
+  }
+  landing.classList.add('hidden');
+  config = initial;
+  expanded.add(config.wslPath);
   await renderTree();
   window.api.terminalStart({ ...config, command: '' });
   setTimeout(terminalResize, 300);

@@ -69,6 +69,7 @@ function setCurrentWorkspaceForWindow(win, next) {
   const state = windowState.get(win.id);
   if (!state) return;
   state.workspace = normalizeWorkspace(next, state.workspace);
+  state.showLanding = false;
   if (!win.isDestroyed()) {
     win.webContents.send('workspace:changed', { ...state.workspace });
   }
@@ -228,7 +229,7 @@ function readDirTree({ distro = DEFAULT_DISTRO, wslPath = DEFAULT_WSL_PATH }) {
   return { name: path.posix.basename(wslPath) || '/', path: wslPath, type: 'directory', children: entries };
 }
 
-function createWindow(initialWorkspace = defaultWorkspace()) {
+function createWindow(initialWorkspace = defaultWorkspace(), { showLanding = false } = {}) {
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -243,7 +244,8 @@ function createWindow(initialWorkspace = defaultWorkspace()) {
 
   windowState.set(win.id, {
     workspace: normalizeWorkspace(initialWorkspace),
-    shellPty: null
+    shellPty: null,
+    showLanding
   });
 
   win.on('closed', () => {
@@ -259,6 +261,39 @@ function createWindow(initialWorkspace = defaultWorkspace()) {
   return win;
 }
 
+async function openWorkspaceDialog(win, state) {
+  if (!win || !state) return;
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Open Workspace',
+    defaultPath: getDefaultOpenWorkspacePath(state.workspace.distro),
+    properties: ['openDirectory']
+  });
+  if (result.canceled || !result.filePaths[0]) return;
+  const selected = result.filePaths[0];
+  setCurrentWorkspaceForWindow(win, {
+    distro: state.workspace.distro,
+    wslPath: uncToWsl(state.workspace.distro, selected)
+  });
+}
+
+async function openWorkspaceFileDialog(win, state) {
+  if (!win || !state) return;
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Open Workspace File',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Nix Workbench Workspace', extensions: ['nwl-workspace', 'json'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+  if (result.canceled || !result.filePaths[0]) return;
+  try {
+    setCurrentWorkspaceForWindow(win, readWorkspaceFile(result.filePaths[0], state.workspace));
+  } catch (error) {
+    dialog.showErrorBox('Open Workspace File failed', error.message || String(error));
+  }
+}
+
 function buildAppMenu() {
   const template = [
     {
@@ -268,49 +303,23 @@ function buildAppMenu() {
           label: 'New Window',
           accelerator: 'CmdOrCtrl+N',
           click: () => {
-            const { state } = getFocusedWindowAndState();
-            createWindow(state?.workspace || defaultWorkspace());
+            createWindow(defaultWorkspace(), { showLanding: true });
           }
         },
         {
           label: 'Open Workspace...',
           accelerator: 'CmdOrCtrl+O',
-          click: async () => {
+          click: () => {
             const { win, state } = getFocusedWindowAndState();
-            if (!win || !state) return;
-            const result = await dialog.showOpenDialog(win, {
-              title: 'Open Workspace',
-              defaultPath: getDefaultOpenWorkspacePath(state.workspace.distro),
-              properties: ['openDirectory']
-            });
-            if (result.canceled || !result.filePaths[0]) return;
-            const selected = result.filePaths[0];
-            setCurrentWorkspaceForWindow(win, {
-              distro: state.workspace.distro,
-              wslPath: uncToWsl(state.workspace.distro, selected)
-            });
+            openWorkspaceDialog(win, state);
           }
         },
         {
           label: 'Open Workspace File...',
           accelerator: 'CmdOrCtrl+Shift+O',
-          click: async () => {
+          click: () => {
             const { win, state } = getFocusedWindowAndState();
-            if (!win || !state) return;
-            const result = await dialog.showOpenDialog(win, {
-              title: 'Open Workspace File',
-              properties: ['openFile'],
-              filters: [
-                { name: 'Nix Workbench Workspace', extensions: ['nwl-workspace', 'json'] },
-                { name: 'All Files', extensions: ['*'] }
-              ]
-            });
-            if (result.canceled || !result.filePaths[0]) return;
-            try {
-              setCurrentWorkspaceForWindow(win, readWorkspaceFile(result.filePaths[0], state.workspace));
-            } catch (error) {
-              dialog.showErrorBox('Open Workspace File failed', error.message || String(error));
-            }
+            openWorkspaceFileDialog(win, state);
           }
         },
         {
@@ -332,7 +341,16 @@ function buildAppMenu() {
           }
         },
         { type: 'separator' },
-        { role: 'quit' }
+        {
+          label: 'Exit',
+          accelerator: 'CmdOrCtrl+W',
+          // Close only the window this menu acted on, not the whole app. When the last window
+          // closes, the existing window-all-closed handler quits the app.
+          click: (_item, focusedWindow) => {
+            const win = focusedWindow || BrowserWindow.getFocusedWindow();
+            if (win && !win.isDestroyed()) win.close();
+          }
+        }
       ]
     },
     { role: 'editMenu' },
@@ -345,28 +363,75 @@ app.whenReady().then(() => {
   const workspaceFile = findWorkspaceArg(process.argv);
   if (workspaceFile) {
     try {
-      createWindow(readWorkspaceFile(workspaceFile));
+      // Launched via a workspace file (e.g. file association): open it directly.
+      createWindow(readWorkspaceFile(workspaceFile), { showLanding: false });
       return;
     } catch (error) {
       dialog.showErrorBox('Open Workspace File failed', error.message || String(error));
     }
   }
-  createWindow();
+  // Normal launch: start on the landing screen so the user picks a workspace.
+  createWindow(defaultWorkspace(), { showLanding: true });
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(defaultWorkspace(), { showLanding: true }); });
 
 ipcMain.handle('window:new', (_event, workspace) => {
-  createWindow(normalizeWorkspace(workspace));
+  // Used by the tree's "Open in New Window": the directory is already chosen, so skip landing.
+  createWindow(normalizeWorkspace(workspace), { showLanding: false });
   return { ok: true };
 });
 
 ipcMain.handle('config:get', (event) => {
   const { win } = getStateForWebContents(event.sender);
-  return getCurrentWorkspaceForWindow(win);
+  const state = windowState.get(win.id);
+  return { ...getCurrentWorkspaceForWindow(win), showLanding: !!state?.showLanding };
+});
+
+ipcMain.handle('workspace:openDirectory', (event) => {
+  const { win, state } = getStateForWebContents(event.sender);
+  return openWorkspaceDialog(win, state);
+});
+
+ipcMain.handle('workspace:openFile', (event) => {
+  const { win, state } = getStateForWebContents(event.sender);
+  return openWorkspaceFileDialog(win, state);
+});
+
+// Re-assert renderer state as the source of truth (e.g. the user cancelled a discard prompt, or a
+// workspace failed to load) without re-broadcasting or restarting the terminal.
+ipcMain.handle('workspace:resync', (event, { workspace, showLanding = false } = {}) => {
+  const { win } = getStateForWebContents(event.sender);
+  const state = windowState.get(win.id);
+  if (state) {
+    if (workspace) state.workspace = normalizeWorkspace(workspace, state.workspace);
+    state.showLanding = !!showLanding;
+  }
+  return { ok: true };
 });
 
 ipcMain.handle('tree:read', (_event, args) => readDirTree(args));
+
+// Cheap fingerprint of the given directories' entries, used by the renderer to detect
+// changes made outside the app (e.g. files created from the terminal) and refresh the tree.
+// fs.watch does not work over \\wsl.localhost UNC paths, so the renderer polls this instead.
+ipcMain.handle('tree:signature', async (_event, { distro = DEFAULT_DISTRO, paths = [] }) => {
+  const parts = [];
+  for (const wslPath of paths) {
+    const fullPath = wslPathToWindowsFsPath(distro, wslPath);
+    try {
+      const entries = await fs.promises.readdir(fullPath, { withFileTypes: true });
+      const names = entries
+        .filter((entry) => !entry.name.startsWith('.git'))
+        .map((entry) => `${entry.isDirectory() ? 'd' : 'f'}:${entry.name}`)
+        .sort();
+      parts.push(`${wslPath}|${names.join(',')}`);
+    } catch {
+      parts.push(`${wslPath}|MISSING`);
+    }
+  }
+  return parts.join('\n');
+});
 
 ipcMain.handle('file:read', (_event, { distro = DEFAULT_DISTRO, wslPath }) => {
   const fullPath = wslPathToWindowsFsPath(distro, wslPath);
