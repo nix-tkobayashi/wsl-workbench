@@ -23,5 +23,7 @@ contextBridge.exposeInMainWorld('api', {
   terminalWrite: (data) => ipcRenderer.send('terminal:write', data),
   terminalResize: (size) => ipcRenderer.send('terminal:resize', size),
   onTerminalData: (cb) => ipcRenderer.on('terminal:data', (_event, data) => cb(data)),
-  onWorkspaceChanged: (cb) => ipcRenderer.on('workspace:changed', (_event, data) => cb(data))
+  onWorkspaceChanged: (cb) => ipcRenderer.on('workspace:changed', (_event, data) => cb(data)),
+  onMenuSaveFile: (cb) => ipcRenderer.on('menu:saveFile', () => cb()),
+  onMenuRefreshTree: (cb) => ipcRenderer.on('menu:refreshTree', () => cb())
 });

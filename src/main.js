@@ -54,6 +54,13 @@ function getFocusedWindowAndState() {
   return { win, state: windowState.get(win.id) };
 }
 
+// Forward a menu action to the focused window's renderer (for actions that live in the renderer,
+// e.g. saving the open editor file or refreshing the tree).
+function sendToFocusedWindow(channel) {
+  const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+  if (win && !win.isDestroyed()) win.webContents.send(channel);
+}
+
 function getCurrentWorkspaceForWindow(win) {
   const state = windowState.get(win.id);
   return normalizeWorkspace(state?.workspace);
@@ -322,9 +329,20 @@ function buildAppMenu() {
             openWorkspaceFileDialog(win, state);
           }
         },
+        { type: 'separator' },
+        {
+          label: 'Save File',
+          accelerator: 'CmdOrCtrl+S',
+          click: () => sendToFocusedWindow('menu:saveFile')
+        },
+        {
+          label: 'Refresh',
+          accelerator: 'F5',
+          click: () => sendToFocusedWindow('menu:refreshTree')
+        },
         {
           label: 'Save Workspace...',
-          accelerator: 'CmdOrCtrl+S',
+          accelerator: 'CmdOrCtrl+Shift+S',
           click: async () => {
             const { win, state } = getFocusedWindowAndState();
             if (!win || !state) return;

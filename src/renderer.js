@@ -13,7 +13,6 @@ let contextNode = null;
 const layout = document.getElementById('layout');
 const rightPane = document.getElementById('rightPane');
 const editor = document.getElementById('editor');
-const saveBtn = document.getElementById('saveBtn');
 const editorTitle = document.getElementById('editorTitle');
 const dirtyMark = document.getElementById('dirtyMark');
 
@@ -120,7 +119,6 @@ function shellQuotePath(p) {
 
 function setDirty(value) {
   editorDirty = value;
-  saveBtn.disabled = !selectedPath || !editorDirty;
   dirtyMark.textContent = editorDirty ? '● unsaved' : '';
 }
 
@@ -142,22 +140,17 @@ editor.addEventListener('input', () => {
   if (selectedPath) setDirty(true);
 });
 
-saveBtn.addEventListener('click', async () => {
-  if (!selectedPath) return;
+// Save the current editor file. Triggered from the Workspace > Save File menu (Ctrl+S);
+// the toolbar Save button was removed in favor of the menu.
+async function saveCurrentFile() {
+  if (!selectedPath || !config) return;
   try {
     await window.api.writeFile({ distro: config.distro, wslPath: selectedPath, content: editor.value });
     setDirty(false);
   } catch (error) {
     alert(error.message || String(error));
   }
-});
-
-window.addEventListener('keydown', async (event) => {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
-    event.preventDefault();
-    saveBtn.click();
-  }
-});
+}
 
 
 function parentDirFor(node) {
@@ -185,6 +178,11 @@ function showContextMenu(event, node) {
   document.querySelectorAll('.row.selected').forEach((el) => el.classList.remove('selected'));
   event.currentTarget.classList.add('selected');
   const menu = document.getElementById('contextMenu');
+  // The workspace root has no row; its menu offers create/reveal but not rename/delete.
+  const isRoot = !!config && node.path === config.wslPath;
+  menu.querySelector('[data-action="rename"]').style.display = isRoot ? 'none' : '';
+  menu.querySelector('[data-action="delete"]').style.display = isRoot ? 'none' : '';
+  document.getElementById('ctxSepEdit').style.display = isRoot ? 'none' : '';
   menu.classList.remove('hidden');
   const x = Math.min(event.clientX, window.innerWidth - menu.offsetWidth - 8);
   const y = Math.min(event.clientY, window.innerHeight - menu.offsetHeight - 8);
@@ -313,6 +311,7 @@ function rowFor(node) {
   row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
   row.addEventListener('drop', async (event) => {
     event.preventDefault();
+    event.stopPropagation(); // a drop handled by a row must not also bubble to the root drop target
     row.classList.remove('drag-over');
     if (node.type !== 'directory') return;
 
@@ -387,10 +386,16 @@ async function renderTree() {
   // Keep the root open so its children build; skip if the workspace already switched
   // (cfg===config is checked synchronously, so this never re-adds a stale root path).
   if (cfg === config) expanded.add(root.path);
-  const wrapper = await buildNode(root, cfg);
+  // Render the workspace root's children directly; the root row itself is omitted since the
+  // toolbar breadcrumb already shows the workspace path. Dropping onto empty tree space moves
+  // an item to the workspace root (see initTreeRootDropTarget).
+  const fragment = document.createDocumentFragment();
+  for (const child of root.children) {
+    fragment.appendChild(await buildNode(child, cfg));
+  }
   if (myGen !== renderGeneration) return; // a newer render started; let it publish instead
   tree.innerHTML = '';
-  tree.appendChild(wrapper);
+  tree.appendChild(fragment);
   tree.scrollTop = prevScroll;
   document.getElementById('cwd').textContent = `${cfg.distro}:${cfg.wslPath}`;
   // Invalidate the poll baseline so a just-rendered state is not re-detected as a change.
@@ -491,11 +496,72 @@ document.getElementById('contextMenu').addEventListener('click', async (event) =
   await handleContextAction(button.dataset.action);
 });
 
+// Right-clicking empty tree-pane space targets the workspace root (rows stop propagation and
+// show their own menu). This is the only way to create a file/folder at the root now that the
+// root row is omitted.
+document.getElementById('treePane').addEventListener('contextmenu', (event) => {
+  if (!config || event.target.closest('.row')) return;
+  const rootName = config.wslPath.split('/').filter(Boolean).pop() || config.wslPath;
+  showContextMenu(event, { path: config.wslPath, type: 'directory', name: rootName });
+});
+
 // Landing screen: the two buttons trigger the same main-process dialogs as the Workspace menu.
 // On success the main process sends 'workspace:changed', which applyWorkspace() handles (and hides the screen).
 function initLanding() {
   document.getElementById('landingOpenWorkspace').addEventListener('click', () => window.api.openWorkspace());
   document.getElementById('landingOpenFile').addEventListener('click', () => window.api.openWorkspaceFile());
+}
+
+// Dropping onto empty tree-pane space targets the workspace root: internal drags move there,
+// external files are copied in. Row drops are handled by the rows themselves (and stop
+// propagation), so this only fires for empty space — it replaces the move/copy-to-root target
+// the (now omitted) root row used to provide. Attached to #treePane (not #tree) because #tree
+// only spans its rendered rows; the empty area below is the pane.
+function initTreeRootDropTarget() {
+  const pane = document.getElementById('treePane');
+  pane.addEventListener('dragover', (event) => {
+    if (!config || event.target.closest('.row')) return; // rows manage their own drop affordance
+    const external = !!event.dataTransfer.files?.length;
+    if (!currentTreeDragPath && !external) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = external ? 'copy' : 'move';
+  });
+  pane.addEventListener('drop', async (event) => {
+    if (!config || event.target.closest('.row')) return;
+    const rootPath = config.wslPath;
+
+    const externalFiles = Array.from(event.dataTransfer.files || []);
+    if (externalFiles.length > 0) {
+      event.preventDefault();
+      const sourcePaths = externalFiles.map((file) => window.api.getPathForFile(file)).filter(Boolean);
+      if (sourcePaths.length === 0) return;
+      try {
+        await window.api.copyExternal({ distro: config.distro, sourcePaths, targetDirPath: rootPath });
+        await renderTree();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+      return;
+    }
+
+    if (!currentTreeDragPath) return;
+    event.preventDefault();
+    const sourcePath = currentTreeDragPath;
+    const sourceParent = sourcePath.split('/').slice(0, -1).join('/') || '/';
+    if (sourceParent === rootPath) return; // already directly under the workspace root
+    try {
+      await window.api.move({ distro: config.distro, sourcePath, targetDirPath: rootPath });
+      if (selectedPath === sourcePath || selectedPath?.startsWith(sourcePath + '/')) {
+        selectedPath = null;
+        editor.value = '';
+        editorTitle.textContent = 'Editor';
+        setDirty(false);
+      }
+      await renderTree();
+    } catch (error) {
+      alert(error.message || String(error));
+    }
+  });
 }
 
 // Dropping a tree file/directory onto the terminal inserts its WSL path at the prompt,
@@ -560,7 +626,8 @@ async function pollTreeChanges() {
   }
 }
 
-document.getElementById('refreshBtn').addEventListener('click', renderTree);
+window.api.onMenuSaveFile(() => saveCurrentFile());
+window.api.onMenuRefreshTree(() => renderTree());
 window.api.onWorkspaceChanged(async (nextConfig) => {
   await applyWorkspace(nextConfig);
 });
@@ -580,6 +647,7 @@ document.getElementById('claudeBtn').addEventListener('click', () => {
   // One-time wiring that does not depend on a chosen workspace. pollTreeChanges no-ops while config is null.
   initResizers();
   initTerminalDropTarget();
+  initTreeRootDropTarget();
   initLanding();
   setInterval(pollTreeChanges, 1500);
 
