@@ -63,6 +63,15 @@ window.addEventListener('resize', terminalResize);
 term.onData((data) => window.api.terminalWrite(data));
 window.api.onTerminalData((data) => term.write(data));
 
+function copyTerminalSelection() {
+  const selection = term.getSelection();
+  if (selection) window.api.clipboardWriteText(selection);
+}
+function pasteIntoTerminal() {
+  const text = window.api.clipboardReadText();
+  if (text) window.api.terminalWrite(text);
+}
+
 // Ctrl+C copies the selection (falls back to interrupt when nothing is selected),
 // Ctrl+V pastes the clipboard into the shell. Ctrl+Shift+C/V always copy/paste.
 term.attachCustomKeyEventHandler((event) => {
@@ -70,20 +79,31 @@ term.attachCustomKeyEventHandler((event) => {
   const key = event.key.toLowerCase();
   if (key === 'c') {
     if (event.shiftKey || term.hasSelection()) {
-      const selection = term.getSelection();
-      if (selection) window.api.clipboardWriteText(selection);
+      copyTerminalSelection();
       event.preventDefault();
       return false; // do not also send SIGINT
     }
     return true; // no selection: let Ctrl+C interrupt the process
   }
   if (key === 'v') {
-    const text = window.api.clipboardReadText();
-    if (text) window.api.terminalWrite(text);
+    pasteIntoTerminal();
     event.preventDefault();
     return false;
   }
   return true;
+});
+
+// Right-click mirrors Ctrl+C / Ctrl+V (Windows Terminal / PuTTY style):
+// copy when there is a selection, paste when there is none.
+document.getElementById('terminal').addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+  if (term.hasSelection()) {
+    copyTerminalSelection();
+    term.clearSelection();
+  } else {
+    pasteIntoTerminal();
+    term.focus();
+  }
 });
 
 // Path of the tree item currently being dragged within the app. This is the authoritative
