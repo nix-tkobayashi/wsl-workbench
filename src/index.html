@@ -10,8 +10,6 @@
   <div id="toolbar">
     <span class="title">Nix Workbench Lite</span>
     <span id="cwd"></span>
-    <button id="refreshBtn">Refresh</button>
-    <button id="saveBtn" disabled>Save</button>
     <button id="claudeBtn" title="Runs: claude --dangerously-skip-permissions (skips permission prompts)">Start Claude</button>
   </div>
   <div id="layout">
@@ -36,7 +34,7 @@
   <div id="contextMenu" class="context-menu hidden">
     <button data-action="new-file">New File</button>
     <button data-action="new-folder">New Folder</button>
-    <div class="menu-separator"></div>
+    <div class="menu-separator" id="ctxSepEdit"></div>
     <button data-action="rename">Rename</button>
     <button data-action="delete" class="danger">Delete</button>
     <div class="menu-separator"></div>
