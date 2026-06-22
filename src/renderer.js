@@ -547,10 +547,11 @@ window.api.onWorkspaceChanged(async (nextConfig) => {
 
 document.getElementById('claudeBtn').addEventListener('click', () => {
   if (!config) return;
-  // Run the WSL-native claude, never the Windows one that WSL's PATH interop also exposes
-  // under /mnt/c. Pick the first claude on PATH not under /mnt/; if none exists, fail loudly
-  // rather than falling back to the Windows claude.
-  const startClaude = 'c=$(type -aP claude | grep -v "^/mnt/" | head -n1); if [ -n "$c" ]; then "$c" --dangerously-skip-permissions; else echo "Error: WSL claude not found on PATH (only a Windows claude under /mnt is available). Install claude inside WSL."; fi';
+  // Resolve claude exactly as the user's own interactive shell does: run inside `bash -ic` so
+  // ~/.bashrc (nvm/fnm/etc.) is sourced — otherwise the non-interactive `bash -lc` the terminal
+  // uses misses nvm and would pick an old /usr/local/bin/claude. Still exclude the Windows claude
+  // exposed under /mnt by WSL PATH interop, and fail loudly if no WSL claude is found.
+  const startClaude = `bash -ic 'c=$(type -aP claude | grep -v "^/mnt/" | head -n1); if [ -n "$c" ]; then "$c" --dangerously-skip-permissions; else echo "Error: claude not found in WSL PATH (only a Windows claude under /mnt, if any). Install it inside WSL: npm i -g @anthropic-ai/claude-code"; fi'`;
   window.api.terminalStart({ ...config, command: startClaude });
   setTimeout(terminalResize, 300);
 });
