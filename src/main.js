@@ -315,11 +315,6 @@ function buildAppMenu() {
         },
         { type: 'separator' },
         {
-          label: tr('menu.saveFile'),
-          accelerator: 'CmdOrCtrl+S',
-          click: () => sendToFocusedWindow('menu:saveFile')
-        },
-        {
           label: tr('menu.refresh'),
           accelerator: 'F5',
           click: () => sendToFocusedWindow('menu:refreshTree')

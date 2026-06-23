@@ -122,6 +122,10 @@ term.attachCustomKeyEventHandler((event) => {
     event.preventDefault();
     return false;
   }
+  if (key === 's' && !event.shiftKey) {
+    // Let the window-level Ctrl+S handler save the file; don't send XOFF to the shell.
+    return false;
+  }
   return true;
 });
 
@@ -202,8 +206,17 @@ editor.addEventListener('input', () => {
   if (selectedPath) setDirty(true);
 });
 
-// Save the current editor file. Triggered from the Workspace > Save File menu (Ctrl+S);
-// the toolbar Save button was removed in favor of the menu.
+// Ctrl+S (not Ctrl+Shift+S, which is Save Workspace) saves the open file. The toolbar button and
+// the menu item were removed; Ctrl+S is the single save affordance.
+window.addEventListener('keydown', (event) => {
+  if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 's') {
+    event.preventDefault();
+    saveCurrentFile();
+  }
+});
+
+// Save the current editor file. Triggered by Ctrl+S (the toolbar button and the menu item were
+// removed; Ctrl+S is the single save affordance).
 async function saveCurrentFile() {
   // Skip when there's no editable text buffer: no file, an image preview, or an error/read-failure
   // view (editor.disabled) — otherwise Ctrl+S would write the error text over the file.
@@ -701,7 +714,6 @@ async function pollTreeChanges() {
   }
 }
 
-window.api.onMenuSaveFile(() => saveCurrentFile());
 window.api.onMenuRefreshTree(() => renderTree());
 window.api.onMenuRestartTerminal(() => restartTerminal());
 window.api.onLangChanged((lang) => {
