@@ -1,7 +1,7 @@
 {
-  "name": "nix-workbench-lite",
+  "name": "wsl-workbench",
   "version": "0.4.0",
-  "description": "Lightweight WSL file tree, editor, and terminal workbench for Claude Code",
+  "description": "Lightweight WSL file tree, editor, and terminal workbench for AI CLIs",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
@@ -21,8 +21,8 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "com.local.nixworkbenchlite",
-    "productName": "Nix Workbench Lite",
+    "appId": "com.wslworkbench.app",
+    "productName": "WSL Workbench",
     "npmRebuild": false,
     "files": [
       "src/**/*",
@@ -37,8 +37,8 @@
     "fileAssociations": [
       {
         "ext": "nwl-workspace",
-        "name": "Nix Workbench Workspace",
-        "description": "Nix Workbench Lite workspace file",
+        "name": "WSL Workbench Workspace",
+        "description": "WSL Workbench workspace file",
         "role": "Editor"
       }
     ]

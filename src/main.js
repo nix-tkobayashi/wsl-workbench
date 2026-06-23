@@ -7,8 +7,8 @@ const i18n = require('./i18n');
 const { imageMimeForPath } = require('./file-types');
 const { normalizeVersion, isNewer } = require('./version');
 
-const RELEASES_API = 'https://api.github.com/repos/nix-tkobayashi/nix-workbench-lite/releases/latest';
-const RELEASES_PAGE = 'https://github.com/nix-tkobayashi/nix-workbench-lite/releases/latest';
+const RELEASES_API = 'https://api.github.com/repos/nix-tkobayashi/wsl-workbench/releases/latest';
+const RELEASES_PAGE = 'https://github.com/nix-tkobayashi/wsl-workbench/releases/latest';
 
 const DEFAULT_DISTRO = process.env.NWL_DISTRO || process.env.CWL_DISTRO || 'Ubuntu';
 const DEFAULT_WSL_PATH = process.env.NWL_WSL_PATH || process.env.CWL_WSL_PATH || `/home/${os.userInfo().username}/projects`;
@@ -308,7 +308,7 @@ async function fetchLatestRelease() {
   const timer = setTimeout(() => controller.abort(), 6000);
   try {
     const res = await fetch(RELEASES_API, {
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'nix-workbench-lite' },
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'wsl-workbench' },
       signal: controller.signal
     });
     if (!res.ok) return null;
@@ -350,7 +350,7 @@ async function showAboutDialog(win) {
   const opts = {
     type: 'info',
     title: tr('menu.about'),
-    message: 'Nix Workbench Lite',
+    message: 'WSL Workbench',
     detail: lines.join('\n'),
     buttons,
     defaultId: 0,
@@ -408,14 +408,14 @@ function buildAppMenu() {
             if (!win || !state) return;
             const result = await dialog.showSaveDialog(win, {
               title: tr('dialog.saveWorkspace'),
-              defaultPath: 'nix-workbench-lite.nwl-workspace',
+              defaultPath: 'wsl-workbench.nwl-workspace',
               filters: [
                 { name: tr('filter.workspace'), extensions: ['nwl-workspace', 'json'] },
                 { name: tr('filter.allFiles'), extensions: ['*'] }
               ]
             });
             if (result.canceled || !result.filePath) return;
-            fs.writeFileSync(result.filePath, JSON.stringify({ ...state.workspace, app: 'Nix Workbench Lite', version: 1 }, null, 2), 'utf8');
+            fs.writeFileSync(result.filePath, JSON.stringify({ ...state.workspace, app: 'WSL Workbench', version: 1 }, null, 2), 'utf8');
           }
         },
         { type: 'separator' },

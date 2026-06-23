@@ -1,4 +1,4 @@
-﻿# Nix Workbench Lite
+﻿# WSL Workbench
 
 Lightweight Windows Electron app for working in WSL:
 
@@ -17,15 +17,15 @@ Lightweight Windows Electron app for working in WSL:
 
 ## Download (Windows)
 
-No Node.js needed to run. Grab one of these from the [**latest release**](https://github.com/nix-tkobayashi/nix-workbench-lite/releases/latest):
+No Node.js needed to run. Grab one of these from the [**latest release**](https://github.com/nix-tkobayashi/wsl-workbench/releases/latest):
 
-- **Installer** — `Nix Workbench Lite Setup <version>.exe` (NSIS). Installs per-user, adds Start Menu / desktop shortcuts, and registers `.nwl-workspace` files. Recommended.
-- **Portable** — `Nix Workbench Lite <version>.exe`. A single self-contained exe; just run it.
-- **Zip** — `Nix Workbench Lite-<version>-win.zip`. Extract anywhere and run `Nix Workbench Lite.exe`.
+- **Installer** — `WSL Workbench Setup <version>.exe` (NSIS). Installs per-user, adds Start Menu / desktop shortcuts, and registers `.nwl-workspace` files. Recommended.
+- **Portable** — `WSL Workbench <version>.exe`. A single self-contained exe; just run it.
+- **Zip** — `WSL Workbench-<version>-win.zip`. Extract anywhere and run `WSL Workbench.exe`.
 
 Requires WSL. On first launch, choose a workspace (Open Workspace / Open Workspace File).
 The builds are unsigned, so Windows SmartScreen may warn on first run — choose **More info → Run anyway**.
-Check **Help > About Nix Workbench Lite** for your version and update notifications.
+Check **Help > About WSL Workbench** for your version and update notifications.
 
 ## Run from source
 
@@ -44,16 +44,16 @@ npm test
 
 ```powershell
 npm install
-npm run dist:zip   # extract-and-run zip -> dist/Nix Workbench Lite-<version>-win.zip
+npm run dist:zip   # extract-and-run zip -> dist/WSL Workbench-<version>-win.zip
 npm run dist       # NSIS installer + portable exe
 ```
 
 Output examples:
 
 ```text
-dist/Nix Workbench Lite-0.3.11-win.zip
-dist/Nix Workbench Lite Setup 0.3.11.exe
-dist/Nix Workbench Lite 0.3.11.exe
+dist/WSL Workbench-0.4.0-win.zip
+dist/WSL Workbench Setup 0.4.0.exe
+dist/WSL Workbench 0.4.0.exe
 ```
 
 ## Defaults
@@ -83,6 +83,13 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 ```
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
+
+## v0.4.0
+
+- Renamed the app to **WSL Workbench** (repo `wsl-workbench`).
+- Added Help > About with version display and update check.
+- Added image preview, terminal right-click copy/paste, terminal restart after exit, English/Japanese UI, and non-default WSL distro support.
+- Added a test suite (`npm test`) and a `dist:zip` build target.
 
 ## v0.3.0
 
@@ -160,7 +167,7 @@ The editor is intentionally minimal. Test file editing and drag/drop operations 
 
 - `Workspace > Save Workspace...` saves the current workspace as `*.nwl-workspace`.
 - `Workspace > Open Workspace File...` loads a saved workspace and switches the current window to that directory.
-- When the NSIS installer build is installed, `*.nwl-workspace` is registered as a Nix Workbench Lite workspace file. Double-clicking it starts the app with that workspace.
+- When the NSIS installer build is installed, `*.nwl-workspace` is registered as a WSL Workbench workspace file. Double-clicking it starts the app with that workspace.
 - Portable builds may not register the file association automatically; use `Open Workspace File...` in that case.
 
 
