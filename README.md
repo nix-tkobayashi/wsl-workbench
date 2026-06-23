@@ -24,7 +24,7 @@ No Node.js needed to run. Grab one of these from the [**latest release**](https:
 - **Zip** — `WSL Workbench-<version>-win.zip`. Extract anywhere and run `WSL Workbench.exe`.
 
 Requires WSL. On first launch, choose a workspace (Open Workspace / Open Workspace File).
-The builds are unsigned, so Windows SmartScreen may warn on first run — choose **More info → Run anyway**.
+The builds are **self-signed**, so Windows SmartScreen may still warn on first run — choose **More info → Run anyway**, or trust the publisher once (see [Code signing](#code-signing)).
 Check **Help > About WSL Workbench** for your version and update notifications.
 
 ## Run from source
@@ -55,6 +55,29 @@ dist/WSL Workbench-0.4.0-win.zip
 dist/WSL Workbench Setup 0.4.0.exe
 dist/WSL Workbench 0.4.0.exe
 ```
+
+## Code signing
+
+Release builds are signed with a **self-signed** certificate (publisher `WSL Workbench`). This is
+enough for trusted/internal distribution but does not clear SmartScreen for the general public.
+
+Trust the publisher once per machine (downloads the `wsl-workbench.cer` from the release):
+
+```powershell
+Import-Certificate -FilePath .\wsl-workbench.cer -CertStoreLocation Cert:\CurrentUser\Root
+Import-Certificate -FilePath .\wsl-workbench.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher
+```
+
+To produce signed builds yourself, create a code-signing cert, export a `.pfx`, and point
+electron-builder at it via env vars (never commit the `.pfx`):
+
+```powershell
+$env:CSC_LINK="C:\path\to\wsl-workbench.pfx"
+$env:CSC_KEY_PASSWORD="<pfx password>"
+npm run dist        # and/or: npm run dist:zip
+```
+
+For public distribution without the trust step, use a CA-issued OV/EV certificate or Azure Trusted Signing.
 
 ## Defaults
 
