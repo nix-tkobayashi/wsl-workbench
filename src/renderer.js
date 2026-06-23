@@ -24,6 +24,21 @@ const promptInput = document.getElementById('promptInput');
 const promptOk = document.getElementById('promptOk');
 const promptCancel = document.getElementById('promptCancel');
 
+// --- i18n ---
+let currentLang = 'en';
+const t = (key) => window.i18n.t(currentLang, key);
+
+// Apply the current language to all static markup (data-i18n*) and the dynamic editor bits.
+function applyLanguage() {
+  document.documentElement.lang = currentLang;
+  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+  document.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle); });
+  // editorTitle shows a file path when a file is open; only localize it when idle.
+  if (!selectedPath) editorTitle.textContent = t('editor.title');
+  setDirty(editorDirty); // refresh the unsaved indicator label
+}
+
 // Promise-based replacement for the unsupported window.prompt() in Electron.
 function askPrompt(message, defaultValue = '') {
   return new Promise((resolve) => {
@@ -119,7 +134,7 @@ function shellQuotePath(p) {
 
 function setDirty(value) {
   editorDirty = value;
-  dirtyMark.textContent = editorDirty ? '● unsaved' : '';
+  dirtyMark.textContent = editorDirty ? t('editor.unsaved') : '';
 }
 
 async function loadFile(node) {
@@ -165,7 +180,7 @@ function clearEditorIfAffected(targetPath) {
   if (selectedPath === targetPath || selectedPath?.startsWith(targetPath + '/')) {
     selectedPath = null;
     editor.value = '';
-    editorTitle.textContent = 'Editor';
+    editorTitle.textContent = t('editor.title');
     editor.disabled = false;
     setDirty(false);
   }
@@ -202,7 +217,7 @@ async function handleContextAction(action) {
       const parentDirPath = parentDirFor(node);
       const type = action === 'new-folder' ? 'directory' : 'file';
       const defaultName = type === 'directory' ? 'new-folder' : 'new-file.txt';
-      const name = await askPrompt(type === 'directory' ? 'New folder name:' : 'New file name:', defaultName);
+      const name = await askPrompt(type === 'directory' ? t('prompt.newFolderName') : t('prompt.newFileName'), defaultName);
       if (!name) return;
       await window.api.createFsItem({ distro: config.distro, parentDirPath, name, type });
       expanded.add(parentDirPath);
@@ -212,7 +227,7 @@ async function handleContextAction(action) {
 
     if (action === 'rename') {
       const currentName = basenameFor(node.path);
-      const newName = await askPrompt('New name:', currentName);
+      const newName = await askPrompt(t('prompt.newName'), currentName);
       if (!newName || newName === currentName) return;
       const result = await window.api.renameFsItem({ distro: config.distro, sourcePath: node.path, newName });
       if (selectedPath === node.path) {
@@ -227,8 +242,8 @@ async function handleContextAction(action) {
     }
 
     if (action === 'delete') {
-      const label = node.type === 'directory' ? 'directory and all contents' : 'file';
-      if (!confirm(`Delete this ${label}?\n\n${node.path}`)) return;
+      const message = node.type === 'directory' ? t('confirm.deleteDir') : t('confirm.deleteFile');
+      if (!confirm(`${message}\n\n${node.path}`)) return;
       await window.api.deleteFsItem({ distro: config.distro, targetPath: node.path });
       clearEditorIfAffected(node.path);
       await renderTree();
@@ -282,7 +297,7 @@ function rowFor(node) {
     if (node.type === 'directory') {
       toggle(node.path);
     } else {
-      if (editorDirty && !confirm('Unsaved changes will be discarded. Continue?')) return;
+      if (editorDirty && !confirm(t('confirm.discardChanges'))) return;
       await loadFile(node);
     }
   });
@@ -339,7 +354,7 @@ function rowFor(node) {
       if (selectedPath === sourcePath || selectedPath?.startsWith(sourcePath + '/')) {
         selectedPath = null;
         editor.value = '';
-        editorTitle.textContent = 'Editor';
+        editorTitle.textContent = t('editor.title');
         setDirty(false);
       }
       await renderTree();
@@ -408,7 +423,7 @@ async function toggle(wslPath) {
 }
 
 async function applyWorkspace(nextConfig) {
-  if (editorDirty && !confirm('Unsaved changes will be discarded. Continue?')) {
+  if (editorDirty && !confirm(t('confirm.discardChanges'))) {
     // Main already committed the new workspace; put it back in sync with what we still show.
     if (config) window.api.resyncWorkspace({ workspace: config, showLanding: false });
     return;
@@ -420,7 +435,7 @@ async function applyWorkspace(nextConfig) {
   config = nextConfig;
   selectedPath = null;
   editor.value = '';
-  editorTitle.textContent = 'Editor';
+  editorTitle.textContent = t('editor.title');
   setDirty(false);
   expanded.clear();
   expanded.add(config.wslPath);
@@ -554,7 +569,7 @@ function initTreeRootDropTarget() {
       if (selectedPath === sourcePath || selectedPath?.startsWith(sourcePath + '/')) {
         selectedPath = null;
         editor.value = '';
-        editorTitle.textContent = 'Editor';
+        editorTitle.textContent = t('editor.title');
         setDirty(false);
       }
       await renderTree();
@@ -628,6 +643,10 @@ async function pollTreeChanges() {
 
 window.api.onMenuSaveFile(() => saveCurrentFile());
 window.api.onMenuRefreshTree(() => renderTree());
+window.api.onLangChanged((lang) => {
+  currentLang = window.i18n.normalizeLang(lang);
+  applyLanguage();
+});
 window.api.onWorkspaceChanged(async (nextConfig) => {
   await applyWorkspace(nextConfig);
 });
@@ -638,7 +657,14 @@ document.getElementById('claudeBtn').addEventListener('click', () => {
   // ~/.bashrc (nvm/fnm/etc.) is sourced — otherwise the non-interactive `bash -lc` the terminal
   // uses misses nvm and would pick an old /usr/local/bin/claude. Still exclude the Windows claude
   // exposed under /mnt by WSL PATH interop, and fail loudly if no WSL claude is found.
-  const startClaude = `bash -ic 'c=$(type -aP claude | grep -v "^/mnt/" | head -n1); if [ -n "$c" ]; then "$c" --dangerously-skip-permissions; else echo "Error: claude not found in WSL PATH (only a Windows claude under /mnt, if any). Install it inside WSL: npm i -g @anthropic-ai/claude-code"; fi'`;
+  // The not-found message is embedded in double quotes inside the single-quoted bash body.
+  // Enforce shell-safety for ANY translation: drop chars that would break the single-quote or
+  // trigger expansion ('`$), and escape double quotes.
+  const notFound = t('claude.notFound')
+    .replace(/['`$]/g, '')   // drop chars that break the single-quoted bash body / trigger expansion
+    .replace(/\\/g, '\\\\')  // escape backslashes before quotes so the quote-escapes survive
+    .replace(/"/g, '\\"');   // escape double quotes (message sits inside echo "...")
+  const startClaude = `bash -ic 'c=$(type -aP claude | grep -v "^/mnt/" | head -n1); if [ -n "$c" ]; then "$c" --dangerously-skip-permissions; else echo "${notFound}"; fi'`;
   window.api.terminalStart({ ...config, command: startClaude });
   setTimeout(terminalResize, 300);
 });
@@ -652,6 +678,8 @@ document.getElementById('claudeBtn').addEventListener('click', () => {
   setInterval(pollTreeChanges, 1500);
 
   const initial = await window.api.getConfig();
+  currentLang = window.i18n.normalizeLang(initial.lang);
+  applyLanguage();
   if (initial.showLanding) {
     config = null; // no active workspace yet; the landing screen drives the next step
     landing.classList.remove('hidden');

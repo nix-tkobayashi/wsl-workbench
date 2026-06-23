@@ -3,12 +3,48 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const pty = require('node-pty');
+const i18n = require('./i18n');
 
 const DEFAULT_DISTRO = process.env.NWL_DISTRO || process.env.CWL_DISTRO || 'Ubuntu';
 const DEFAULT_WSL_PATH = process.env.NWL_WSL_PATH || process.env.CWL_WSL_PATH || `/home/${os.userInfo().username}/projects`;
 const DEFAULT_WSL_HOME_PATH = process.env.NWL_WSL_HOME_PATH || process.env.CWL_WSL_HOME_PATH || `/home/${os.userInfo().username}`;
 
 const windowState = new Map();
+
+// --- Language / settings persistence ---
+let currentLang = 'en';
+
+function settingsPath() {
+  return path.join(app.getPath('userData'), 'settings.json');
+}
+function readSettings() {
+  try { return JSON.parse(fs.readFileSync(settingsPath(), 'utf8')); } catch { return {}; }
+}
+function writeSettings(patch) {
+  try {
+    const next = { ...readSettings(), ...patch };
+    fs.writeFileSync(settingsPath(), JSON.stringify(next, null, 2), 'utf8');
+  } catch (error) {
+    console.error('Failed to write settings:', error);
+  }
+}
+function initLanguage() {
+  const saved = readSettings().lang;
+  if (saved) { currentLang = i18n.normalizeLang(saved); return; }
+  // First run: follow the OS/Electron locale, default to English.
+  currentLang = String(app.getLocale() || '').toLowerCase().startsWith('ja') ? 'ja' : 'en';
+}
+function setLanguage(lang) {
+  const next = i18n.normalizeLang(lang);
+  if (next === currentLang) return;
+  currentLang = next;
+  writeSettings({ lang: currentLang });
+  buildAppMenu();
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('lang:changed', currentLang);
+  }
+}
+const tr = (key) => i18n.t(currentLang, key);
 
 function defaultWorkspace() {
   return { distro: DEFAULT_DISTRO, wslPath: DEFAULT_WSL_PATH };
@@ -271,7 +307,7 @@ function createWindow(initialWorkspace = defaultWorkspace(), { showLanding = fal
 async function openWorkspaceDialog(win, state) {
   if (!win || !state) return;
   const result = await dialog.showOpenDialog(win, {
-    title: 'Open Workspace',
+    title: tr('dialog.openWorkspace'),
     defaultPath: getDefaultOpenWorkspacePath(state.workspace.distro),
     properties: ['openDirectory']
   });
@@ -286,35 +322,35 @@ async function openWorkspaceDialog(win, state) {
 async function openWorkspaceFileDialog(win, state) {
   if (!win || !state) return;
   const result = await dialog.showOpenDialog(win, {
-    title: 'Open Workspace File',
+    title: tr('dialog.openWorkspaceFile'),
     properties: ['openFile'],
     filters: [
-      { name: 'Nix Workbench Workspace', extensions: ['nwl-workspace', 'json'] },
-      { name: 'All Files', extensions: ['*'] }
+      { name: tr('filter.workspace'), extensions: ['nwl-workspace', 'json'] },
+      { name: tr('filter.allFiles'), extensions: ['*'] }
     ]
   });
   if (result.canceled || !result.filePaths[0]) return;
   try {
     setCurrentWorkspaceForWindow(win, readWorkspaceFile(result.filePaths[0], state.workspace));
   } catch (error) {
-    dialog.showErrorBox('Open Workspace File failed', error.message || String(error));
+    dialog.showErrorBox(tr('dialog.openFileFailed'), error.message || String(error));
   }
 }
 
 function buildAppMenu() {
   const template = [
     {
-      label: 'Workspace',
+      label: tr('menu.workspace'),
       submenu: [
         {
-          label: 'New Window',
+          label: tr('menu.newWindow'),
           accelerator: 'CmdOrCtrl+N',
           click: () => {
             createWindow(defaultWorkspace(), { showLanding: true });
           }
         },
         {
-          label: 'Open Workspace...',
+          label: tr('menu.openWorkspace'),
           accelerator: 'CmdOrCtrl+O',
           click: () => {
             const { win, state } = getFocusedWindowAndState();
@@ -322,7 +358,7 @@ function buildAppMenu() {
           }
         },
         {
-          label: 'Open Workspace File...',
+          label: tr('menu.openWorkspaceFile'),
           accelerator: 'CmdOrCtrl+Shift+O',
           click: () => {
             const { win, state } = getFocusedWindowAndState();
@@ -331,27 +367,27 @@ function buildAppMenu() {
         },
         { type: 'separator' },
         {
-          label: 'Save File',
+          label: tr('menu.saveFile'),
           accelerator: 'CmdOrCtrl+S',
           click: () => sendToFocusedWindow('menu:saveFile')
         },
         {
-          label: 'Refresh',
+          label: tr('menu.refresh'),
           accelerator: 'F5',
           click: () => sendToFocusedWindow('menu:refreshTree')
         },
         {
-          label: 'Save Workspace...',
+          label: tr('menu.saveWorkspace'),
           accelerator: 'CmdOrCtrl+Shift+S',
           click: async () => {
             const { win, state } = getFocusedWindowAndState();
             if (!win || !state) return;
             const result = await dialog.showSaveDialog(win, {
-              title: 'Save Workspace',
+              title: tr('dialog.saveWorkspace'),
               defaultPath: 'nix-workbench-lite.nwl-workspace',
               filters: [
-                { name: 'Nix Workbench Workspace', extensions: ['nwl-workspace', 'json'] },
-                { name: 'All Files', extensions: ['*'] }
+                { name: tr('filter.workspace'), extensions: ['nwl-workspace', 'json'] },
+                { name: tr('filter.allFiles'), extensions: ['*'] }
               ]
             });
             if (result.canceled || !result.filePath) return;
@@ -360,7 +396,7 @@ function buildAppMenu() {
         },
         { type: 'separator' },
         {
-          label: 'Exit',
+          label: tr('menu.exit'),
           accelerator: 'CmdOrCtrl+W',
           // Close only the window this menu acted on, not the whole app. When the last window
           // closes, the existing window-all-closed handler quits the app.
@@ -371,13 +407,55 @@ function buildAppMenu() {
         }
       ]
     },
-    { role: 'editMenu' },
-    { role: 'viewMenu' }
+    {
+      label: tr('menu.edit'),
+      submenu: [
+        { role: 'undo', label: tr('menu.undo') },
+        { role: 'redo', label: tr('menu.redo') },
+        { type: 'separator' },
+        { role: 'cut', label: tr('menu.cut') },
+        { role: 'copy', label: tr('menu.copy') },
+        { role: 'paste', label: tr('menu.paste') },
+        { role: 'selectAll', label: tr('menu.selectAll') }
+      ]
+    },
+    {
+      label: tr('menu.view'),
+      submenu: [
+        { role: 'reload', label: tr('menu.reload') },
+        { role: 'forceReload', label: tr('menu.forceReload') },
+        { role: 'toggleDevTools', label: tr('menu.toggleDevTools') },
+        { type: 'separator' },
+        { role: 'resetZoom', label: tr('menu.resetZoom') },
+        { role: 'zoomIn', label: tr('menu.zoomIn') },
+        { role: 'zoomOut', label: tr('menu.zoomOut') },
+        { type: 'separator' },
+        { role: 'togglefullscreen', label: tr('menu.toggleFullscreen') }
+      ]
+    },
+    {
+      label: tr('menu.language'),
+      submenu: [
+        {
+          label: tr('menu.english'),
+          type: 'radio',
+          checked: currentLang === 'en',
+          click: () => setLanguage('en')
+        },
+        {
+          label: tr('menu.japanese'),
+          type: 'radio',
+          checked: currentLang === 'ja',
+          click: () => setLanguage('ja')
+        }
+      ]
+    }
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 app.whenReady().then(() => {
+  initLanguage();
   const workspaceFile = findWorkspaceArg(process.argv);
   if (workspaceFile) {
     try {
@@ -385,7 +463,7 @@ app.whenReady().then(() => {
       createWindow(readWorkspaceFile(workspaceFile), { showLanding: false });
       return;
     } catch (error) {
-      dialog.showErrorBox('Open Workspace File failed', error.message || String(error));
+      dialog.showErrorBox(tr('dialog.openFileFailed'), error.message || String(error));
     }
   }
   // Normal launch: start on the landing screen so the user picks a workspace.
@@ -403,7 +481,7 @@ ipcMain.handle('window:new', (_event, workspace) => {
 ipcMain.handle('config:get', (event) => {
   const { win } = getStateForWebContents(event.sender);
   const state = windowState.get(win.id);
-  return { ...getCurrentWorkspaceForWindow(win), showLanding: !!state?.showLanding };
+  return { ...getCurrentWorkspaceForWindow(win), showLanding: !!state?.showLanding, lang: currentLang };
 });
 
 ipcMain.handle('workspace:openDirectory', (event) => {
@@ -551,7 +629,7 @@ ipcMain.handle('fs:copyExternal', (_event, { distro = DEFAULT_DISTRO, sourcePath
 ipcMain.handle('folder:pick', async (event) => {
   const { win, state } = getStateForWebContents(event.sender);
   const result = await dialog.showOpenDialog(win, {
-    title: 'Open Workspace',
+    title: tr('dialog.openWorkspace'),
     defaultPath: getDefaultOpenWorkspacePath(state.workspace.distro),
     properties: ['openDirectory']
   });
