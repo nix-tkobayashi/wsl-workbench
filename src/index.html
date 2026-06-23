@@ -10,44 +10,44 @@
   <div id="toolbar">
     <span class="title">Nix Workbench Lite</span>
     <span id="cwd"></span>
-    <button id="claudeBtn" title="Runs: claude --dangerously-skip-permissions (skips permission prompts)">Start Claude</button>
+    <button id="claudeBtn" data-i18n="toolbar.startClaude" data-i18n-title="toolbar.startClaudeTitle" title="Runs: claude --dangerously-skip-permissions (skips permission prompts)">Start Claude</button>
   </div>
   <div id="layout">
     <aside id="treePane">
       <div id="tree"></div>
     </aside>
-    <div id="verticalResizer" class="resizer vertical" title="Drag to resize"></div>
+    <div id="verticalResizer" class="resizer vertical" data-i18n-title="ui.dragToResize" title="Drag to resize"></div>
     <main id="rightPane">
       <section id="editorPane">
         <div id="editorBar">
           <span id="editorTitle">Editor</span>
           <span id="dirtyMark"></span>
         </div>
-        <textarea id="editor" spellcheck="false" placeholder="Select a text file from the left tree."></textarea>
+        <textarea id="editor" spellcheck="false" data-i18n-placeholder="editor.placeholder" placeholder="Select a text file from the left tree."></textarea>
       </section>
-      <div id="horizontalResizer" class="resizer horizontal" title="Drag to resize"></div>
+      <div id="horizontalResizer" class="resizer horizontal" data-i18n-title="ui.dragToResize" title="Drag to resize"></div>
       <section id="terminalPane">
         <div id="terminal"></div>
       </section>
     </main>
   </div>
   <div id="contextMenu" class="context-menu hidden">
-    <button data-action="new-file">New File</button>
-    <button data-action="new-folder">New Folder</button>
+    <button data-action="new-file" data-i18n="ctx.newFile">New File</button>
+    <button data-action="new-folder" data-i18n="ctx.newFolder">New Folder</button>
     <div class="menu-separator" id="ctxSepEdit"></div>
-    <button data-action="rename">Rename</button>
-    <button data-action="delete" class="danger">Delete</button>
+    <button data-action="rename" data-i18n="ctx.rename">Rename</button>
+    <button data-action="delete" class="danger" data-i18n="ctx.delete">Delete</button>
     <div class="menu-separator"></div>
-    <button data-action="reveal">Reveal in Explorer</button>
-    <button data-action="open-new-window">Open in New Window</button>
+    <button data-action="reveal" data-i18n="ctx.reveal">Reveal in Explorer</button>
+    <button data-action="open-new-window" data-i18n="ctx.openNewWindow">Open in New Window</button>
   </div>
   <div id="landing" class="landing">
     <div class="landing-box">
       <div class="landing-title">Nix Workbench Lite</div>
-      <div class="landing-subtitle">Open a workspace to get started</div>
+      <div class="landing-subtitle" data-i18n="landing.subtitle">Open a workspace to get started</div>
       <div class="landing-actions">
-        <button id="landingOpenWorkspace" class="primary">Open Workspace…</button>
-        <button id="landingOpenFile">Open Workspace File…</button>
+        <button id="landingOpenWorkspace" class="primary" data-i18n="landing.openWorkspace">Open Workspace…</button>
+        <button id="landingOpenFile" data-i18n="landing.openWorkspaceFile">Open Workspace File…</button>
       </div>
     </div>
   </div>
@@ -56,11 +56,12 @@
       <div class="modal-message" id="promptMessage"></div>
       <input type="text" id="promptInput" spellcheck="false" autocomplete="off" />
       <div class="modal-actions">
-        <button id="promptCancel">Cancel</button>
-        <button id="promptOk" class="primary">OK</button>
+        <button id="promptCancel" data-i18n="prompt.cancel">Cancel</button>
+        <button id="promptOk" class="primary" data-i18n="prompt.ok">OK</button>
       </div>
     </div>
   </div>
+  <script src="./i18n.js"></script>
   <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="./renderer.js"></script>
