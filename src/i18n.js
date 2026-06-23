@@ -1,5 +1,11 @@
 // Shared i18n dictionary for both the main process (require) and the renderer (window.i18n).
 // Keep keys stable; English is the fallback when a key is missing in another language.
+//
+// Wrapped in an IIFE so NONE of its names land in global scope. As a classic <script> in the
+// renderer, a top-level `const api` collided with the non-configurable `window.api` exposed by
+// the preload (SyntaxError: "Identifier 'api' has already been declared"), which broke i18n and
+// every t() call. The IIFE also avoids clashing with the renderer's own top-level `const t`.
+(function () {
 const translations = {
   en: {
     'menu.workspace': 'Workspace',
@@ -131,11 +137,12 @@ function t(lang, key) {
   return (translations[l] && translations[l][key]) || translations.en[key] || key;
 }
 
-const api = { translations, t, normalizeLang, SUPPORTED_LANGS };
+const i18nApi = { translations, t, normalizeLang, SUPPORTED_LANGS };
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = api; // main process: require('./i18n')
+  module.exports = i18nApi; // main process: require('./i18n')
 }
 if (typeof window !== 'undefined') {
-  window.i18n = api; // renderer: <script src="./i18n.js">
+  window.i18n = i18nApi; // renderer: <script src="./i18n.js">
 }
+})();
