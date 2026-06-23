@@ -1,34 +1,58 @@
 ﻿# Nix Workbench Lite
 
-Lightweight Windows Electron app:
+Lightweight Windows Electron app for working in WSL:
 
-- Left: WSL file explorer tree
-- Upper right: simple text editor with save
+- Left: WSL file explorer tree (shows the workspace contents directly)
+- Upper right: minimal text editor (`Ctrl+S` to save) with inline image preview
 - Lower right: WSL terminal for Claude Code
-- Directory toggle open/close
-- Drag and drop files/directories inside the tree to move them
-- Drag and drop files/directories from Windows Explorer into the tree to copy them
-- Resizable left/right panes and editor/terminal panes
+- Landing screen on startup / New Window to pick a workspace
+- **Start Claude** launches the WSL-native `claude --dangerously-skip-permissions`
+- Terminal: right-click to copy (selection) / paste, drag a tree item in to insert its path,
+  paste an image with `Alt+V` (Claude Code reads it), and press any key to restart after `exit`
+- Tree auto-refreshes (files created in the terminal appear without a manual refresh)
+- English / Japanese UI (Language menu)
+- Drag & drop to move within the tree, or copy in from Windows Explorer
+- Multi-window; Exit closes only the active window
+- Resizable left/right and editor/terminal panes
 
-## Run
+## Download (Windows)
+
+No Node.js needed to run:
+
+1. Open the [**latest release**](https://github.com/nix-tkobayashi/nix-workbench-lite/releases/latest).
+2. Download `Nix Workbench Lite-<version>-win.zip`.
+3. Extract it anywhere and run `Nix Workbench Lite.exe`.
+
+Requires WSL. On first launch, choose a workspace (Open Workspace / Open Workspace File).
+The build is unsigned, so Windows SmartScreen may warn on first run — choose **More info → Run anyway**.
+
+## Run from source
 
 ```powershell
 npm install
 npm start
 ```
 
-## Build EXE on Windows
+## Test
+
+```powershell
+npm test
+```
+
+## Build on Windows
 
 ```powershell
 npm install
-npm run dist
+npm run dist:zip   # extract-and-run zip -> dist/Nix Workbench Lite-<version>-win.zip
+npm run dist       # NSIS installer + portable exe
 ```
 
 Output examples:
 
 ```text
-dist/Nix Workbench Lite Setup 0.3.9.exe
-dist/Nix Workbench Lite 0.3.9.exe
+dist/Nix Workbench Lite-0.3.11-win.zip
+dist/Nix Workbench Lite Setup 0.3.11.exe
+dist/Nix Workbench Lite 0.3.11.exe
 ```
 
 ## Defaults
@@ -43,10 +67,11 @@ Override:
 ```powershell
 $env:NWL_DISTRO="Ubuntu"
 $env:NWL_WSL_PATH="/home/<user>/projects/my-repo"
+$env:NWL_WSL_HOME_PATH="/home/<user>"   # default location of the Open Workspace dialog
 npm start
 ```
 
-The old `CWL_DISTRO` and `CWL_WSL_PATH` environment variables are still accepted for compatibility.
+Opening a folder from another WSL distro (e.g. `Ubuntu-22.04`) is supported — the distro is taken from the selected path. The old `CWL_DISTRO` and `CWL_WSL_PATH` environment variables are still accepted for compatibility.
 
 ## Notes
 
