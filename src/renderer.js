@@ -1,8 +1,4 @@
-const term = new Terminal({ cursorBlink: true, fontFamily: 'Consolas, monospace', fontSize: 13 });
-const fitAddon = new FitAddon.FitAddon();
-term.loadAddon(fitAddon);
-term.open(document.getElementById('terminal'));
-fitAddon.fit();
+// Terminals are created per tab (see the terminal-tabs section below), not a single instance.
 
 let config = null;
 let selectedPath = null;
@@ -38,6 +34,11 @@ function applyLanguage() {
   // editorTitle shows a file path when a file is open; only localize it when idle.
   if (!selectedPath) editorTitle.textContent = t('editor.title');
   setDirty(editorDirty); // refresh the unsaved indicator label
+  // Re-label open terminal tabs in the new language.
+  for (const entry of terminals.values()) {
+    const lbl = entry.tab.querySelector('.term-tab-label');
+    if (lbl) lbl.textContent = `${t('terminal.tab')} ${entry.id}`;
+  }
 }
 
 // Promise-based replacement for the unsupported window.prompt() in Electron.
@@ -70,82 +71,166 @@ function askPrompt(message, defaultValue = '') {
   });
 }
 
-function terminalResize() {
-  fitAddon.fit();
-  window.api.terminalResize({ cols: term.cols, rows: term.rows });
-}
-window.addEventListener('resize', terminalResize);
-// After the shell exits (`exit`), the pty is gone. Instead of a dead terminal, let any keystroke
-// restart it (also available via the Workspace > Restart Terminal menu).
-let terminalExited = false;
-function restartTerminal() {
-  if (!config) return;
-  terminalExited = false;
-  term.clear();
-  window.api.terminalStart({ ...config, command: '' });
-  setTimeout(terminalResize, 200);
-}
-term.onData((data) => {
-  if (terminalExited) { restartTerminal(); return; }
-  window.api.terminalWrite(data);
-});
-window.api.onTerminalData((data) => term.write(data));
-window.api.onTerminalExit(() => {
-  terminalExited = true;
-  term.write(`\r\n\x1b[90m${t('terminal.restartHint')}\x1b[0m\r\n`);
-});
+// --- Terminal tabs: multiple terminals per window, each its own pty (keyed by id) ---
+const terminals = new Map(); // id -> { id, term, fit, host, tab, exited }
+let activeTermId = null;
+let nextTermId = 1;
+const terminalHost = document.getElementById('terminalHost');
+const terminalTabList = document.getElementById('terminalTabList');
 
-function copyTerminalSelection() {
-  const selection = term.getSelection();
-  if (selection) window.api.clipboardWriteText(selection);
+function activeTerminal() { return terminals.get(activeTermId) || null; }
+
+function fitTerminal(entry) {
+  // Only fit the visible (active) terminal; a hidden host has zero size and would resize the pty wrong.
+  if (!entry || entry.id !== activeTermId) return;
+  try { entry.fit.fit(); } catch {}
+  window.api.terminalResize({ id: entry.id, cols: entry.term.cols, rows: entry.term.rows });
 }
-function pasteIntoTerminal() {
-  const text = window.api.clipboardReadText();
-  if (text) window.api.terminalWrite(text);
+function fitActiveTerminal() { fitTerminal(activeTerminal()); }
+window.addEventListener('resize', fitActiveTerminal);
+
+function activateTerminal(id) {
+  const entry = terminals.get(id);
+  if (!entry) return;
+  activeTermId = id;
+  for (const [tid, e] of terminals) {
+    const on = tid === id;
+    e.host.style.display = on ? 'block' : 'none';
+    e.tab.classList.toggle('active', on);
+  }
+  setTimeout(() => { fitTerminal(entry); entry.term.focus(); }, 0);
 }
 
-// Ctrl+C copies the selection (falls back to interrupt when nothing is selected),
-// Ctrl+V pastes the clipboard into the shell. Ctrl+Shift+C/V always copy/paste.
-term.attachCustomKeyEventHandler((event) => {
-  if (event.type !== 'keydown' || !(event.ctrlKey || event.metaKey)) return true;
-  const key = event.key.toLowerCase();
-  if (key === 'c') {
-    if (event.shiftKey || term.hasSelection()) {
-      copyTerminalSelection();
-      event.preventDefault();
-      return false; // do not also send SIGINT
+function makeTermTab(entry) {
+  const tab = document.createElement('div');
+  tab.className = 'term-tab';
+  const label = document.createElement('span');
+  label.className = 'term-tab-label';
+  label.textContent = `${t('terminal.tab')} ${entry.id}`;
+  const close = document.createElement('span');
+  close.className = 'term-tab-close';
+  close.textContent = '×';
+  tab.append(label, close);
+  tab.addEventListener('mousedown', (event) => {
+    if (event.target === close) return;
+    activateTerminal(entry.id);
+  });
+  close.addEventListener('click', (event) => { event.stopPropagation(); closeTerminal(entry.id); });
+  terminalTabList.appendChild(tab);
+  return tab;
+}
+
+function wireTerminal(entry) {
+  const { id, term } = entry;
+  term.onData((data) => {
+    if (entry.exited) { restartTerminal(entry); return; }
+    window.api.terminalWrite({ id, data });
+  });
+  // Ctrl+C copies selection (else interrupt), Ctrl+V pastes; Ctrl+S is handled by the window handler.
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type !== 'keydown' || !(event.ctrlKey || event.metaKey)) return true;
+    const key = event.key.toLowerCase();
+    if (key === 'c') {
+      if (event.shiftKey || term.hasSelection()) {
+        const sel = term.getSelection();
+        if (sel) window.api.clipboardWriteText(sel);
+        event.preventDefault();
+        return false; // do not also send SIGINT
+      }
+      return true; // no selection: let Ctrl+C interrupt
     }
-    return true; // no selection: let Ctrl+C interrupt the process
+    if (key === 'v') {
+      const text = window.api.clipboardReadText();
+      if (text) window.api.terminalWrite({ id, data: text });
+      event.preventDefault();
+      return false;
+    }
+    if (key === 's' && !event.shiftKey) return false; // let window Ctrl+S save; no XOFF
+    return true;
+  });
+  // Right-click copy/paste via mousedown (xterm suppresses contextmenu). Logic in terminal-actions.js.
+  const io = {
+    hasSelection: () => term.hasSelection(),
+    getSelection: () => term.getSelection(),
+    clearSelection: () => term.clearSelection(),
+    readClipboard: () => window.api.clipboardReadText(),
+    writeClipboard: (text) => window.api.clipboardWriteText(text),
+    writePty: (text) => window.api.terminalWrite({ id, data: text })
+  };
+  entry.host.addEventListener('mousedown', (event) => {
+    if (event.button !== 2) return;
+    const result = window.terminalActions.terminalRightClick(io);
+    if (result.action === 'paste') term.focus();
+  });
+}
+
+function createTerminal({ command = '' } = {}) {
+  if (!config) return null;
+  const id = nextTermId++;
+  const host = document.createElement('div');
+  host.className = 'term-pane';
+  terminalHost.appendChild(host);
+  const term = new Terminal({ cursorBlink: true, fontFamily: 'Consolas, monospace', fontSize: 13 });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(host);
+  const entry = { id, term, fit, host, exited: false, tab: null };
+  entry.tab = makeTermTab(entry);
+  terminals.set(id, entry);
+  wireTerminal(entry);
+  activateTerminal(id);
+  window.api.terminalStart({ id, ...config, command });
+  setTimeout(() => fitTerminal(entry), 60);
+  return entry;
+}
+
+// After the shell exits, the pty is gone; any keystroke (or the menu) restarts that tab's shell.
+function restartTerminal(entry) {
+  if (!entry || !config) return;
+  entry.exited = false;
+  entry.term.clear();
+  window.api.terminalStart({ id: entry.id, ...config, command: '' });
+  setTimeout(() => fitTerminal(entry), 200);
+}
+
+function closeTerminal(id) {
+  const entry = terminals.get(id);
+  if (!entry) return;
+  window.api.terminalClose({ id });
+  entry.term.dispose();
+  entry.host.remove();
+  entry.tab.remove();
+  terminals.delete(id);
+  if (activeTermId === id) {
+    const next = terminals.keys().next().value;
+    if (next != null) activateTerminal(next);
+    else { activeTermId = null; createTerminal(); } // always keep at least one terminal
   }
-  if (key === 'v') {
-    pasteIntoTerminal();
-    event.preventDefault();
-    return false;
+}
+
+function disposeAllTerminals() {
+  for (const entry of terminals.values()) {
+    window.api.terminalClose({ id: entry.id });
+    entry.term.dispose();
+    entry.host.remove();
+    entry.tab.remove();
   }
-  if (key === 's' && !event.shiftKey) {
-    // Let the window-level Ctrl+S handler save the file; don't send XOFF to the shell.
-    return false;
-  }
-  return true;
+  terminals.clear();
+  activeTermId = null;
+}
+
+window.api.onTerminalData(({ id, data }) => {
+  const entry = terminals.get(id);
+  if (entry) entry.term.write(data);
+});
+window.api.onTerminalExit((id) => {
+  const entry = terminals.get(id);
+  if (!entry) return;
+  entry.exited = true;
+  entry.term.write(`\r\n\x1b[90m${t('terminal.restartHint')}\x1b[0m\r\n`);
 });
 
-// Right-click copy/paste (Windows Terminal / PuTTY style): copy the selection, or paste when
-// there's none. Handled on right-button MOUSEDOWN, not 'contextmenu' — xterm preventDefaults the
-// right-button mousedown, which suppresses the contextmenu event entirely (so a contextmenu
-// listener never fires). The decision/action logic lives in terminal-actions.js (unit-tested).
-const terminalRightClickIO = {
-  hasSelection: () => term.hasSelection(),
-  getSelection: () => term.getSelection(),
-  clearSelection: () => term.clearSelection(),
-  readClipboard: () => window.api.clipboardReadText(),
-  writeClipboard: (text) => window.api.clipboardWriteText(text),
-  writePty: (text) => window.api.terminalWrite(text)
-};
-document.getElementById('terminal').addEventListener('mousedown', (event) => {
-  if (event.button !== 2) return; // right button only
-  const result = window.terminalActions.terminalRightClick(terminalRightClickIO);
-  if (result.action === 'paste') term.focus();
-});
+document.getElementById('newTerminalBtn').addEventListener('click', () => createTerminal());
 
 // Path of the tree item currently being dragged within the app. This is the authoritative
 // internal-origin signal: it is only set during a genuine tree dragstart, so external drags
@@ -536,9 +621,8 @@ async function applyWorkspace(nextConfig) {
     return;
   }
   landing.classList.add('hidden');
-  terminalExited = false; // fresh terminal for the new workspace
-  window.api.terminalStart({ ...config, command: '' });
-  setTimeout(terminalResize, 300);
+  disposeAllTerminals(); // close the previous workspace's terminals, open one fresh
+  createTerminal();
 }
 
 function initResizers() {
@@ -550,7 +634,7 @@ function initResizers() {
     const onMove = (moveEvent) => {
       const width = Math.max(180, Math.min(700, moveEvent.clientX));
       layout.style.gridTemplateColumns = `${width}px 5px 1fr`;
-      terminalResize();
+      fitActiveTerminal();
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
@@ -566,7 +650,7 @@ function initResizers() {
       const rect = rightPane.getBoundingClientRect();
       const topHeight = Math.max(120, Math.min(rect.height - 140, moveEvent.clientY - rect.top));
       rightPane.style.gridTemplateRows = `${topHeight}px 5px 1fr`;
-      terminalResize();
+      fitActiveTerminal();
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
@@ -688,9 +772,11 @@ function initTerminalDropTarget() {
   terminalPane.addEventListener('drop', (event) => {
     terminalPane.classList.remove('drag-over');
     if (!currentTreeDragPath) return;
+    const entry = activeTerminal();
+    if (!entry) return;
     event.preventDefault();
-    window.api.terminalWrite(shellQuotePath(currentTreeDragPath) + ' ');
-    term.focus();
+    window.api.terminalWrite({ id: entry.id, data: shellQuotePath(currentTreeDragPath) + ' ' });
+    entry.term.focus();
   });
 }
 
@@ -731,7 +817,7 @@ async function pollTreeChanges() {
 }
 
 window.api.onMenuRefreshTree(() => renderTree());
-window.api.onMenuRestartTerminal(() => restartTerminal());
+window.api.onMenuRestartTerminal(() => restartTerminal(activeTerminal()));
 window.api.onLangChanged((lang) => {
   currentLang = window.i18n.normalizeLang(lang);
   applyLanguage();
@@ -754,8 +840,7 @@ document.getElementById('claudeBtn').addEventListener('click', () => {
     .replace(/\\/g, '\\\\')  // escape backslashes before quotes so the quote-escapes survive
     .replace(/"/g, '\\"');   // escape double quotes (message sits inside echo "...")
   const startClaude = `bash -ic 'c=$(type -aP claude | grep -v "^/mnt/" | head -n1); if [ -n "$c" ]; then "$c" --dangerously-skip-permissions; else echo "${notFound}"; fi'`;
-  window.api.terminalStart({ ...config, command: startClaude });
-  setTimeout(terminalResize, 300);
+  createTerminal({ command: startClaude }); // open Claude in a new terminal tab
 });
 
 (async function init() {
@@ -779,6 +864,5 @@ document.getElementById('claudeBtn').addEventListener('click', () => {
   config = initial;
   expanded.add(config.wslPath);
   await renderTree();
-  window.api.terminalStart({ ...config, command: '' });
-  setTimeout(terminalResize, 300);
+  createTerminal();
 })();

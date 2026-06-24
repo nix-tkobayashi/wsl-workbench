@@ -242,14 +242,16 @@ function createWindow(initialWorkspace = defaultWorkspace(), { showLanding = fal
 
   windowState.set(win.id, {
     workspace: normalizeWorkspace(initialWorkspace),
-    shellPty: null,
+    terminals: new Map(), // terminal id -> pty (multiple tabs per window)
     showLanding
   });
 
   win.on('closed', () => {
     const state = windowState.get(win.id);
-    if (state?.shellPty) {
-      try { state.shellPty.kill(); } catch {}
+    if (state) {
+      for (const ptyProc of state.terminals.values()) {
+        try { ptyProc.kill(); } catch {}
+      }
     }
     windowState.delete(win.id);
   });
@@ -713,39 +715,54 @@ ipcMain.handle('folder:pick', async (event) => {
   return { windowsPath: selected, wslPath: parsed.wslPath, distro: parsed.distro || state.workspace.distro };
 });
 
-ipcMain.on('terminal:start', (event, { distro, wslPath, command = '' }) => {
+ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '' }) => {
   const { win, state } = getStateForWebContents(event.sender);
   const workspace = normalizeWorkspace({ distro, wslPath }, state.workspace);
   state.workspace = workspace;
-  if (state.shellPty) {
-    try { state.shellPty.kill(); } catch {}
+  const existing = state.terminals.get(id);
+  if (existing) {
+    try { existing.kill(); } catch {}
   }
   const args = ['-d', workspace.distro, '--cd', workspace.wslPath, '--exec', 'bash', '-lc', command ? `${command}; exec bash` : 'exec bash'];
-  state.shellPty = pty.spawn('wsl.exe', args, {
+  const ptyProc = pty.spawn('wsl.exe', args, {
     name: 'xterm-256color',
     cols: 100,
     rows: 30,
     cwd: os.homedir(),
     env: process.env
   });
-  state.shellPty.onData((data) => {
-    if (!win.isDestroyed()) win.webContents.send('terminal:data', data);
+  state.terminals.set(id, ptyProc);
+  ptyProc.onData((data) => {
+    if (state.terminals.get(id) !== ptyProc) return; // ignore output from a superseded pty
+    if (!win.isDestroyed()) win.webContents.send('terminal:data', { id, data });
   });
-  state.shellPty.onExit(() => {
-    state.shellPty = null;
+  ptyProc.onExit(() => {
+    if (state.terminals.get(id) !== ptyProc) return; // superseded by a newer pty for this id; ignore its late exit
+    state.terminals.delete(id);
     if (!win.isDestroyed()) {
-      win.webContents.send('terminal:data', `\r\n\x1b[90m${tr('terminal.exited')}\x1b[0m\r\n`);
-      win.webContents.send('terminal:exit');
+      win.webContents.send('terminal:data', { id, data: `\r\n\x1b[90m${tr('terminal.exited')}\x1b[0m\r\n` });
+      win.webContents.send('terminal:exit', { id });
     }
   });
 });
 
-ipcMain.on('terminal:write', (event, data) => {
+ipcMain.on('terminal:write', (event, { id, data }) => {
   const { state } = getStateForWebContents(event.sender);
-  if (state.shellPty) state.shellPty.write(data);
+  const ptyProc = state.terminals.get(id);
+  if (ptyProc) ptyProc.write(data);
 });
 
-ipcMain.on('terminal:resize', (event, { cols, rows }) => {
+ipcMain.on('terminal:resize', (event, { id, cols, rows }) => {
   const { state } = getStateForWebContents(event.sender);
-  if (state.shellPty) state.shellPty.resize(cols, rows);
+  const ptyProc = state.terminals.get(id);
+  if (ptyProc && cols && rows) ptyProc.resize(cols, rows);
+});
+
+ipcMain.on('terminal:close', (event, { id }) => {
+  const { state } = getStateForWebContents(event.sender);
+  const ptyProc = state.terminals.get(id);
+  if (ptyProc) {
+    try { ptyProc.kill(); } catch {}
+  }
+  state.terminals.delete(id);
 });

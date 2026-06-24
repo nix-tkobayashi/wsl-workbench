@@ -18,9 +18,19 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 #dirtyMark { color:#ffcc66; }
 #editor { flex:1; width:100%; resize:none; border:0; outline:0; padding:10px; background:#181818; color:var(--text); font-family: Consolas, "Cascadia Mono", monospace; font-size:13px; line-height:1.45; white-space:pre; overflow:auto; tab-size:2; }
 #imagePreview { display:none; flex:1; min-height:0; width:100%; object-fit:contain; background:#181818; padding:10px; }
-#terminalPane { min-height:120px; overflow:hidden; }
+#terminalPane { min-height:120px; overflow:hidden; display:flex; flex-direction:column; }
 #terminalPane.drag-over { outline:2px dashed var(--accent); outline-offset:-2px; }
-#terminal { width:100%; height:100%; padding:6px; }
+#terminalTabs { display:flex; align-items:center; height:28px; background:#141414; border-bottom:1px solid var(--border); padding:0 4px; gap:2px; overflow-x:auto; }
+#terminalTabList { display:flex; gap:2px; min-width:0; }
+.term-tab { display:flex; align-items:center; gap:6px; height:22px; padding:0 8px; border-radius:4px 4px 0 0; background:transparent; color:var(--muted); font-size:12px; white-space:nowrap; cursor:pointer; }
+.term-tab:hover { background:var(--hover); }
+.term-tab.active { background:#181818; color:var(--text); }
+.term-tab .term-tab-close { width:14px; text-align:center; border-radius:3px; color:var(--muted); }
+.term-tab .term-tab-close:hover { background:#555; color:#fff; }
+#newTerminalBtn { background:transparent; border:0; color:var(--muted); font-size:16px; line-height:1; padding:2px 8px; border-radius:4px; cursor:pointer; }
+#newTerminalBtn:hover { background:var(--hover); color:var(--text); }
+#terminalHost { position:relative; flex:1; min-height:0; }
+.term-pane { position:absolute; inset:0; padding:6px; }
 .resizer { background:var(--resizer); z-index:5; }
 .resizer:hover { background:var(--accent); }
 .resizer.vertical { cursor:col-resize; border-left:1px solid var(--border); border-right:1px solid var(--border); }
