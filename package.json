@@ -29,6 +29,7 @@
       "package.json"
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         "nsis",
         "portable"
@@ -39,7 +40,8 @@
         "ext": "wslwb-workspace",
         "name": "WSL Workbench Workspace",
         "description": "WSL Workbench workspace file",
-        "role": "Editor"
+        "role": "Editor",
+        "icon": "build/icon.ico"
       }
     ]
   }
