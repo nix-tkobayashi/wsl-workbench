@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -544,6 +544,16 @@ ipcMain.handle('workspace:resync', (event, { workspace, showLanding = false } = 
     state.showLanding = !!showLanding;
   }
   return { ok: true };
+});
+
+// Clipboard via the main process: the `clipboard` module is not available in a sandboxed preload,
+// so the renderer reaches it through these IPC channels. sendSync keeps the renderer API synchronous.
+ipcMain.on('clipboard:writeText', (event, text) => {
+  clipboard.writeText(String(text ?? ''));
+  event.returnValue = true;
+});
+ipcMain.on('clipboard:readText', (event) => {
+  event.returnValue = clipboard.readText();
 });
 
 ipcMain.handle('tree:read', (_event, args) => readDirTree(args));

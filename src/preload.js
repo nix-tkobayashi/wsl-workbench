@@ -1,7 +1,8 @@
-const { contextBridge, ipcRenderer, webUtils, clipboard } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('api', {
-  clipboardWriteText: (text) => clipboard.writeText(String(text ?? '')),
-  clipboardReadText: () => clipboard.readText(),
+  // The `clipboard` module is unavailable in a sandboxed preload, so go through the main process.
+  clipboardWriteText: (text) => ipcRenderer.sendSync('clipboard:writeText', String(text ?? '')),
+  clipboardReadText: () => ipcRenderer.sendSync('clipboard:readText'),
   getConfig: () => ipcRenderer.invoke('config:get'),
   readTree: (args) => ipcRenderer.invoke('tree:read', args),
   treeSignature: (args) => ipcRenderer.invoke('tree:signature', args),
