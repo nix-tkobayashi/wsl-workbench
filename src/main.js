@@ -232,6 +232,7 @@ function createWindow(initialWorkspace = defaultWorkspace(), { showLanding = fal
     height: 820,
     minWidth: 880,
     minHeight: 560,
+    autoHideMenuBar: true, // hide the native menu-bar row; menus are reachable from the in-app toolbar (and Alt)
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -392,16 +393,6 @@ function buildAppMenu() {
             openWorkspaceFileDialog(win, state);
           }
         },
-        { type: 'separator' },
-        {
-          label: tr('menu.refresh'),
-          accelerator: 'F5',
-          click: () => sendToFocusedWindow('menu:refreshTree')
-        },
-        {
-          label: tr('menu.restartTerminal'),
-          click: () => sendToFocusedWindow('menu:restartTerminal')
-        },
         {
           label: tr('menu.saveWorkspace'),
           accelerator: 'CmdOrCtrl+Shift+S',
@@ -421,6 +412,16 @@ function buildAppMenu() {
             if (result.canceled || !result.filePath) return;
             fs.writeFileSync(result.filePath, JSON.stringify({ ...state.workspace, app: 'WSL Workbench', version: 1 }, null, 2), 'utf8');
           }
+        },
+        { type: 'separator' },
+        {
+          label: tr('menu.refresh'),
+          accelerator: 'F5',
+          click: () => sendToFocusedWindow('menu:refreshTree')
+        },
+        {
+          label: tr('menu.restartTerminal'),
+          click: () => sendToFocusedWindow('menu:restartTerminal')
         },
         { type: 'separator' },
         {
@@ -554,6 +555,19 @@ ipcMain.on('clipboard:writeText', (event, text) => {
 });
 ipcMain.on('clipboard:readText', (event) => {
   event.returnValue = clipboard.readText();
+});
+
+// Pop a top-level application menu's submenu at a screen position, so the in-app toolbar buttons
+// can show the real menus (the native menu bar itself is hidden via autoHideMenuBar). index maps
+// to the application menu's top-level order: 0 Workspace, 1 Edit, 2 View, 3 Language, 4 Help.
+ipcMain.on('menu:popup', (event, { index, x, y } = {}) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const appMenu = Menu.getApplicationMenu();
+  if (!win || !appMenu) return;
+  const item = appMenu.items[index];
+  if (item && item.submenu) {
+    item.submenu.popup({ window: win, x: Math.round(x || 0), y: Math.round(y || 0) });
+  }
 });
 
 ipcMain.handle('tree:read', (_event, args) => readDirTree(args));

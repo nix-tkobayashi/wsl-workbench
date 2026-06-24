@@ -596,6 +596,17 @@ document.getElementById('treePane').addEventListener('contextmenu', (event) => {
   showContextMenu(event, { path: config.wslPath, type: 'directory', name: rootName });
 });
 
+// Toolbar menu buttons pop the real application submenus (the native menu bar is hidden to save
+// vertical space). data-menu maps to the app menu's top-level order.
+function initMenubar() {
+  document.querySelectorAll('#menubar .menubtn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const rect = btn.getBoundingClientRect();
+      window.api.popupMenu({ index: Number(btn.dataset.menu), x: rect.left, y: rect.bottom });
+    });
+  });
+}
+
 // Landing screen: the two buttons trigger the same main-process dialogs as the Workspace menu.
 // On success the main process sends 'workspace:changed', which applyWorkspace() handles (and hides the screen).
 function initLanding() {
@@ -753,6 +764,7 @@ document.getElementById('claudeBtn').addEventListener('click', () => {
   initTerminalDropTarget();
   initTreeRootDropTarget();
   initLanding();
+  initMenubar();
   setInterval(pollTreeChanges, 1500);
 
   const initial = await window.api.getConfig();

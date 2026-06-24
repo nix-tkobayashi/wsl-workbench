@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('api', {
   openWorkspaceFile: () => ipcRenderer.invoke('workspace:openFile'),
   resyncWorkspace: (payload) => ipcRenderer.invoke('workspace:resync', payload),
   newWindow: (workspace) => ipcRenderer.invoke('window:new', workspace),
+  popupMenu: (pos) => ipcRenderer.send('menu:popup', pos),
   terminalStart: (args) => ipcRenderer.send('terminal:start', args),
   terminalWrite: (data) => ipcRenderer.send('terminal:write', data),
   terminalResize: (size) => ipcRenderer.send('terminal:resize', size),

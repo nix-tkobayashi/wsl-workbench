@@ -3,6 +3,9 @@
 body { margin:0; height:100vh; overflow:hidden; background:var(--bg); color:var(--text); font-family: "Segoe UI", sans-serif; }
 #toolbar { height:42px; display:flex; align-items:center; gap:12px; padding:0 12px; border-bottom:1px solid var(--border); background:#111; }
 .title { font-weight:600; }
+#menubar { display:flex; gap:2px; }
+.menubtn { background:transparent; border:0; padding:4px 8px; border-radius:4px; color:var(--text); font-size:13px; cursor:pointer; }
+.menubtn:hover { background:var(--hover); }
 #cwd { color:var(--muted); flex:1; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 button { background:#2a2a2a; color:var(--text); border:1px solid #444; padding:5px 10px; border-radius:6px; cursor:pointer; }
 button:hover:not(:disabled) { background:#3a3a3a; }
