@@ -14,8 +14,14 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 #treePane { background:var(--panel); overflow:auto; padding:8px; min-width:180px; }
 #rightPane { display:grid; grid-template-rows: 38% 5px 1fr; min-width:0; min-height:0; }
 #editorPane { min-height:120px; overflow:hidden; display:flex; flex-direction:column; }
-#editorBar { height:30px; padding:6px 10px; border-bottom:1px solid var(--border); color:var(--muted); font-size:12px; display:flex; gap:8px; align-items:center; }
-#dirtyMark { color:#ffcc66; }
+#editorBar { height:30px; padding:0 4px; border-bottom:1px solid var(--border); color:var(--muted); font-size:12px; display:flex; align-items:center; overflow:hidden; }
+#editorTabList { display:flex; gap:2px; min-width:0; overflow-x:auto; height:100%; align-items:center; }
+.editor-tab { display:flex; align-items:center; gap:4px; height:24px; padding:0 8px; border-radius:4px; background:transparent; color:var(--muted); font-size:12px; white-space:nowrap; cursor:pointer; }
+.editor-tab:hover { background:var(--hover); }
+.editor-tab.active { background:#181818; color:var(--text); }
+.editor-tab-dirty { color:#ffcc66; min-width:8px; font-size:10px; }
+.editor-tab-close { width:14px; text-align:center; border-radius:3px; color:var(--muted); }
+.editor-tab-close:hover { background:#555; color:#fff; }
 #editor { flex:1; width:100%; resize:none; border:0; outline:0; padding:10px; background:#181818; color:var(--text); font-family: Consolas, "Cascadia Mono", monospace; font-size:13px; line-height:1.45; white-space:pre; overflow:auto; tab-size:2; }
 #imagePreview { display:none; flex:1; min-height:0; width:100%; object-fit:contain; background:#181818; padding:10px; }
 #terminalPane { min-height:120px; overflow:hidden; display:flex; flex-direction:column; }

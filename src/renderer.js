@@ -2,7 +2,6 @@
 
 let config = null;
 let selectedPath = null;
-let editorDirty = false;
 const expanded = new Set();
 let contextNode = null;
 
@@ -10,8 +9,6 @@ const layout = document.getElementById('layout');
 const rightPane = document.getElementById('rightPane');
 const editor = document.getElementById('editor');
 const imagePreview = document.getElementById('imagePreview');
-const editorTitle = document.getElementById('editorTitle');
-const dirtyMark = document.getElementById('dirtyMark');
 
 const landing = document.getElementById('landing');
 
@@ -31,10 +28,7 @@ function applyLanguage() {
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
   document.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle); });
-  // editorTitle shows a file path when a file is open; only localize it when idle.
-  if (!selectedPath) editorTitle.textContent = t('editor.title');
-  setDirty(editorDirty); // refresh the unsaved indicator label
-  // Re-label open terminal tabs in the new language.
+  // Re-label open terminal tabs in the new language (file/editor tab names are not localized).
   for (const entry of terminals.values()) {
     const lbl = entry.tab.querySelector('.term-tab-label');
     if (lbl) lbl.textContent = `${t('terminal.tab')} ${entry.id}`;
@@ -244,59 +238,191 @@ function shellQuotePath(p) {
   return `'${p.replace(/'/g, `'\\''`)}'`;
 }
 
-// True while an image is shown in the preview, so save/dirty logic doesn't touch it.
-let currentIsImage = false;
+// --- Editor tabs: multiple open files share one textarea/img; each tab keeps its own state.
+// selectedPath is the active tab's path (also used for tree highlight + save). ---
+const editorTabs = new Map(); // path -> { path, name, value, dirty, isImage, imageSrc, disabled, el }
+const editorTabList = document.getElementById('editorTabList');
 
 function showImagePreview(on) {
-  currentIsImage = on;
   imagePreview.style.display = on ? 'block' : 'none';
   editor.style.display = on ? 'none' : '';
 }
 
-function setDirty(value) {
-  editorDirty = value;
-  dirtyMark.textContent = editorDirty ? t('editor.unsaved') : '';
+function anyEditorDirty() {
+  for (const tab of editorTabs.values()) if (tab.dirty) return true;
+  return false;
 }
 
-async function loadFile(node) {
-  selectedPath = node.path;
-  editorTitle.textContent = node.path;
+function updateEditorTabEl(tab) {
+  if (!tab || !tab.el) return;
+  tab.el.querySelector('.editor-tab-label').textContent = tab.name;
+  tab.el.querySelector('.editor-tab-dirty').textContent = tab.dirty ? '●' : '';
+  tab.el.classList.toggle('active', tab.path === selectedPath);
+}
+function refreshEditorTabs() { for (const tab of editorTabs.values()) updateEditorTabEl(tab); }
 
+function setDirty(value) {
+  const tab = editorTabs.get(selectedPath);
+  if (tab) { tab.dirty = value; updateEditorTabEl(tab); }
+}
+
+function highlightTreeRow(path) {
+  document.querySelectorAll('#tree .row.selected').forEach((el) => el.classList.remove('selected'));
+  if (!path) return;
+  const row = document.querySelector(`#tree .row[data-path="${(window.CSS && CSS.escape) ? CSS.escape(path) : path}"]`);
+  if (row) row.classList.add('selected');
+}
+
+// Persist the live textarea content into the active tab before switching away from it.
+function persistActiveEditor() {
+  const tab = editorTabs.get(selectedPath);
+  if (tab && !tab.isImage && !tab.disabled) tab.value = editor.value;
+}
+
+// Load the active tab into the shared editor/image view (or blank when no tab is open).
+function renderActiveEditor() {
+  const tab = editorTabs.get(selectedPath);
+  if (!tab) {
+    showImagePreview(false);
+    imagePreview.removeAttribute('src');
+    editor.value = '';
+    editor.disabled = false;
+    refreshEditorTabs();
+    return;
+  }
+  if (tab.isImage) {
+    showImagePreview(true);
+    if (tab.imageSrc) imagePreview.src = tab.imageSrc; else imagePreview.removeAttribute('src');
+    editor.disabled = false;
+  } else {
+    showImagePreview(false);
+    imagePreview.removeAttribute('src');
+    editor.value = tab.value || '';
+    editor.disabled = !!tab.disabled;
+  }
+  refreshEditorTabs();
+}
+
+function makeEditorTabEl(tab) {
+  const el = document.createElement('div');
+  el.className = 'editor-tab';
+  const label = document.createElement('span');
+  label.className = 'editor-tab-label';
+  label.textContent = tab.name;
+  label.title = tab.path;
+  const dirty = document.createElement('span');
+  dirty.className = 'editor-tab-dirty';
+  const close = document.createElement('span');
+  close.className = 'editor-tab-close';
+  close.textContent = '×';
+  el.append(label, dirty, close);
+  el.addEventListener('mousedown', (event) => { if (event.target === close) return; activateEditorTab(tab.path); });
+  close.addEventListener('click', (event) => { event.stopPropagation(); closeEditorTab(tab.path); });
+  editorTabList.appendChild(el);
+  return el;
+}
+
+function activateEditorTab(path) {
+  if (path === selectedPath) return;
+  persistActiveEditor();
+  selectedPath = path;
+  renderActiveEditor();
+  highlightTreeRow(path);
+}
+
+// Open a file in a tab (or activate its existing tab). Replaces the old single-file loadFile.
+async function openFileInEditor(node) {
+  if (editorTabs.has(node.path)) { activateEditorTab(node.path); return; }
+  persistActiveEditor(); // save the previously active tab before switching
+  // Register and activate synchronously (read-only while loading) so a second open of the same
+  // file activates this tab instead of creating a duplicate, and edits can't be lost mid-load.
+  const tab = { path: node.path, name: basenameFor(node.path), value: '', dirty: false, isImage: false, imageSrc: null, disabled: true, el: null };
+  tab.el = makeEditorTabEl(tab);
+  editorTabs.set(node.path, tab);
+  selectedPath = node.path;
+  renderActiveEditor();
+  highlightTreeRow(node.path);
+
+  let disabled = false;
   if (window.fileTypes.isImagePath(node.path)) {
-    try {
-      imagePreview.src = await window.api.readImage({ distro: config.distro, wslPath: node.path });
-      showImagePreview(true);
-      setDirty(false);
-      return;
-    } catch (error) {
-      // Fall back to showing the error in the text view.
-      imagePreview.removeAttribute('src');
-      showImagePreview(false);
-      editor.value = String(error.message || error);
-      editor.disabled = true;
-      setDirty(false);
-      return;
+    try { tab.imageSrc = await window.api.readImage({ distro: config.distro, wslPath: node.path }); tab.isImage = true; }
+    catch (error) { tab.value = String(error.message || error); disabled = true; }
+  } else {
+    try { tab.value = await window.api.readFile({ distro: config.distro, wslPath: node.path }); }
+    catch (error) { tab.value = String(error.message || error); disabled = true; }
+  }
+  tab.disabled = disabled; // editable once loaded (unless the read failed)
+  if (editorTabs.get(node.path) === tab && selectedPath === node.path) renderActiveEditor();
+}
+
+function closeEditorTab(path) {
+  const tab = editorTabs.get(path);
+  if (!tab) return;
+  if (tab.dirty && !confirm(t('confirm.discardChanges'))) return;
+  tab.el.remove();
+  editorTabs.delete(path);
+  if (selectedPath === path) {
+    selectedPath = [...editorTabs.keys()].pop() || null;
+    renderActiveEditor();
+    highlightTreeRow(selectedPath);
+  }
+}
+
+function disposeAllEditorTabs() {
+  for (const tab of editorTabs.values()) tab.el.remove();
+  editorTabs.clear();
+  selectedPath = null;
+  renderActiveEditor();
+}
+
+// Close tabs for a deleted path (and descendants) — no dirty prompt, the file is gone.
+function closeEditorTabsUnder(targetPath) {
+  let activeClosed = false;
+  for (const p of [...editorTabs.keys()]) {
+    if (p === targetPath || p.startsWith(targetPath + '/')) {
+      editorTabs.get(p).el.remove();
+      editorTabs.delete(p);
+      if (p === selectedPath) activeClosed = true;
     }
   }
-
-  showImagePreview(false);
-  imagePreview.removeAttribute('src');
-  try {
-    editor.value = await window.api.readFile({ distro: config.distro, wslPath: node.path });
-    editor.disabled = false;
-    setDirty(false);
-  } catch (error) {
-    editor.value = String(error.message || error);
-    editor.disabled = true;
-    setDirty(false);
+  if (activeClosed) {
+    selectedPath = [...editorTabs.keys()].pop() || null;
+    renderActiveEditor();
+    highlightTreeRow(selectedPath);
   }
+}
+
+// Re-key tabs after a rename/move (file or directory): oldPath prefix -> newPath.
+function retargetEditorTabs(oldPath, newPath) {
+  for (const [p, tab] of [...editorTabs.entries()]) {
+    if (p === oldPath || p.startsWith(oldPath + '/')) {
+      const np = newPath + p.slice(oldPath.length);
+      editorTabs.delete(p);
+      tab.path = np;
+      tab.name = basenameFor(np);
+      const label = tab.el.querySelector('.editor-tab-label');
+      label.textContent = tab.name;
+      label.title = np;
+      editorTabs.set(np, tab);
+      if (selectedPath === p) selectedPath = np;
+    }
+  }
+  // Keep the tree's expanded state in sync so a renamed/moved directory stays open and the
+  // active descendant row still renders (and gets re-highlighted) after renderTree().
+  for (const p of [...expanded]) {
+    if (p === oldPath || p.startsWith(oldPath + '/')) {
+      expanded.delete(p);
+      expanded.add(newPath + p.slice(oldPath.length));
+    }
+  }
+  refreshEditorTabs();
 }
 
 editor.addEventListener('input', () => {
-  if (selectedPath) setDirty(true);
+  if (editorTabs.get(selectedPath)) setDirty(true);
 });
 
-// Ctrl+S (not Ctrl+Shift+S, which is Save Workspace) saves the open file. The toolbar button and
+// Ctrl+S (not Ctrl+Shift+S, which is Save Workspace) saves the active tab. The toolbar button and
 // the menu item were removed; Ctrl+S is the single save affordance.
 window.addEventListener('keydown', (event) => {
   if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 's') {
@@ -305,14 +431,13 @@ window.addEventListener('keydown', (event) => {
   }
 });
 
-// Save the current editor file. Triggered by Ctrl+S (the toolbar button and the menu item were
-// removed; Ctrl+S is the single save affordance).
 async function saveCurrentFile() {
-  // Skip when there's no editable text buffer: no file, an image preview, or an error/read-failure
-  // view (editor.disabled) — otherwise Ctrl+S would write the error text over the file.
-  if (!selectedPath || !config || currentIsImage || editor.disabled) return;
+  const tab = editorTabs.get(selectedPath);
+  // Skip when there's no editable text buffer: no tab, an image, or an error/read-failure view.
+  if (!tab || !config || tab.isImage || tab.disabled) return;
   try {
-    await window.api.writeFile({ distro: config.distro, wslPath: selectedPath, content: editor.value });
+    await window.api.writeFile({ distro: config.distro, wslPath: tab.path, content: editor.value });
+    tab.value = editor.value;
     setDirty(false);
   } catch (error) {
     alert(error.message || String(error));
@@ -326,18 +451,6 @@ function parentDirFor(node) {
 
 function basenameFor(wslPath) {
   return wslPath.split('/').filter(Boolean).pop() || wslPath;
-}
-
-function clearEditorIfAffected(targetPath) {
-  if (selectedPath === targetPath || selectedPath?.startsWith(targetPath + '/')) {
-    selectedPath = null;
-    editor.value = '';
-    editorTitle.textContent = t('editor.title');
-    editor.disabled = false;
-    showImagePreview(false);
-    imagePreview.removeAttribute('src');
-    setDirty(false);
-  }
 }
 
 function showContextMenu(event, node) {
@@ -384,13 +497,7 @@ async function handleContextAction(action) {
       const newName = await askPrompt(t('prompt.newName'), currentName);
       if (!newName || newName === currentName) return;
       const result = await window.api.renameFsItem({ distro: config.distro, sourcePath: node.path, newName });
-      if (selectedPath === node.path) {
-        selectedPath = result.path;
-        editorTitle.textContent = result.path;
-      } else if (selectedPath?.startsWith(node.path + '/')) {
-        selectedPath = result.path + selectedPath.slice(node.path.length);
-        editorTitle.textContent = selectedPath;
-      }
+      retargetEditorTabs(node.path, result.path); // update any open tabs for the renamed file/dir
       await renderTree();
       return;
     }
@@ -399,7 +506,7 @@ async function handleContextAction(action) {
       const message = node.type === 'directory' ? t('confirm.deleteDir') : t('confirm.deleteFile');
       if (!confirm(`${message}\n\n${node.path}`)) return;
       await window.api.deleteFsItem({ distro: config.distro, targetPath: node.path });
-      clearEditorIfAffected(node.path);
+      closeEditorTabsUnder(node.path);
       await renderTree();
       return;
     }
@@ -446,13 +553,10 @@ function rowFor(node) {
 
   row.addEventListener('click', async (event) => {
     event.stopPropagation();
-    document.querySelectorAll('.row.selected').forEach((el) => el.classList.remove('selected'));
-    row.classList.add('selected');
     if (node.type === 'directory') {
       toggle(node.path);
     } else {
-      if (editorDirty && !confirm(t('confirm.discardChanges'))) return;
-      await loadFile(node);
+      await openFileInEditor(node); // opens/activates a tab and updates the tree highlight
     }
   });
 
@@ -505,14 +609,7 @@ function rowFor(node) {
     try {
       await window.api.move({ distro: config.distro, sourcePath, targetDirPath: node.path });
       expanded.add(node.path);
-      if (selectedPath === sourcePath || selectedPath?.startsWith(sourcePath + '/')) {
-        selectedPath = null;
-        editor.value = '';
-        editorTitle.textContent = t('editor.title');
-        showImagePreview(false);
-        imagePreview.removeAttribute('src');
-        setDirty(false);
-      }
+      retargetEditorTabs(sourcePath, `${node.path}/${basenameFor(sourcePath)}`);
       await renderTree();
     } catch (error) {
       alert(error.message || String(error));
@@ -579,39 +676,26 @@ async function toggle(wslPath) {
 }
 
 async function applyWorkspace(nextConfig) {
-  if (editorDirty && !confirm(t('confirm.discardChanges'))) {
+  if (anyEditorDirty() && !confirm(t('confirm.discardChanges'))) {
     // Main already committed the new workspace; put it back in sync with what we still show.
     if (config) window.api.resyncWorkspace({ workspace: config, showLanding: false });
     return;
   }
-  // Snapshot so we can fully roll back if the new workspace fails to load.
+  // Snapshot config/expanded so we can roll back if the new workspace fails to load. Editor tabs
+  // and terminals are only disposed AFTER a successful render, so no editor snapshot is needed.
   const prevConfig = config;
   const prevExpanded = new Set(expanded);
-  const prevEditor = { selectedPath, value: editor.value, title: editorTitle.textContent, disabled: editor.disabled, dirty: editorDirty, image: currentIsImage, imageSrc: imagePreview.getAttribute('src') };
   config = nextConfig;
-  selectedPath = null;
-  editor.value = '';
-  editorTitle.textContent = t('editor.title');
-  showImagePreview(false);
-  imagePreview.removeAttribute('src');
-  setDirty(false);
   expanded.clear();
   expanded.add(config.wslPath);
   try {
     await renderTree(); // builds detached and publishes only on success; landing stays as a loading cover
   } catch (error) {
     alert(error.message || String(error));
-    // Roll back: the live tree/CWD/editor were never replaced, so restore the matching state.
+    // Roll back: the live tree/CWD/editor tabs were never replaced.
     config = prevConfig;
     expanded.clear();
     for (const p of prevExpanded) expanded.add(p);
-    selectedPath = prevEditor.selectedPath;
-    editor.value = prevEditor.value;
-    editorTitle.textContent = prevEditor.title;
-    editor.disabled = prevEditor.disabled;
-    if (prevEditor.imageSrc) imagePreview.setAttribute('src', prevEditor.imageSrc); else imagePreview.removeAttribute('src');
-    showImagePreview(prevEditor.image);
-    setDirty(prevEditor.dirty);
     if (prevConfig) {
       window.api.resyncWorkspace({ workspace: prevConfig, showLanding: false });
     } else {
@@ -621,7 +705,8 @@ async function applyWorkspace(nextConfig) {
     return;
   }
   landing.classList.add('hidden');
-  disposeAllTerminals(); // close the previous workspace's terminals, open one fresh
+  disposeAllEditorTabs(); // close the previous workspace's editor tabs
+  disposeAllTerminals();  // close the previous workspace's terminals, open one fresh
   createTerminal();
 }
 
@@ -737,14 +822,7 @@ function initTreeRootDropTarget() {
     if (sourceParent === rootPath) return; // already directly under the workspace root
     try {
       await window.api.move({ distro: config.distro, sourcePath, targetDirPath: rootPath });
-      if (selectedPath === sourcePath || selectedPath?.startsWith(sourcePath + '/')) {
-        selectedPath = null;
-        editor.value = '';
-        editorTitle.textContent = t('editor.title');
-        showImagePreview(false);
-        imagePreview.removeAttribute('src');
-        setDirty(false);
-      }
+      retargetEditorTabs(sourcePath, `${rootPath}/${basenameFor(sourcePath)}`);
       await renderTree();
     } catch (error) {
       alert(error.message || String(error));
