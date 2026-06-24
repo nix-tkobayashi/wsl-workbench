@@ -107,6 +107,13 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
 
+## v0.6.0
+
+- Terminal tabs: multiple terminals per window (+ to add, × to close); Start Claude opens a new tab.
+- Editor tabs: open multiple files at once, each with its own unsaved state; Ctrl+S saves the active tab.
+- Moved the menu into the top toolbar (native menu bar hidden to save vertical space); Save Workspace now sits below Open Workspace File.
+- Terminal right-click copy/paste fixed (handled on mousedown; clipboard routed through the main process for the sandboxed preload).
+
 ## v0.5.0
 
 - Renamed the workspace file extension to `.wslwb-workspace` and the environment variables to `WSLWB_DISTRO` / `WSLWB_PATH` / `WSLWB_HOME_PATH`. The old `.nwl-workspace` extension and `NWL_*` / `CWL_*` variables were removed.
