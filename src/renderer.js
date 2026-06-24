@@ -129,17 +129,22 @@ term.attachCustomKeyEventHandler((event) => {
   return true;
 });
 
-// Right-click mirrors Ctrl+C / Ctrl+V (Windows Terminal / PuTTY style):
-// copy when there is a selection, paste when there is none.
-document.getElementById('terminal').addEventListener('contextmenu', (event) => {
-  event.preventDefault();
-  if (term.hasSelection()) {
-    copyTerminalSelection();
-    term.clearSelection();
-  } else {
-    pasteIntoTerminal();
-    term.focus();
-  }
+// Right-click copy/paste (Windows Terminal / PuTTY style): copy the selection, or paste when
+// there's none. Handled on right-button MOUSEDOWN, not 'contextmenu' — xterm preventDefaults the
+// right-button mousedown, which suppresses the contextmenu event entirely (so a contextmenu
+// listener never fires). The decision/action logic lives in terminal-actions.js (unit-tested).
+const terminalRightClickIO = {
+  hasSelection: () => term.hasSelection(),
+  getSelection: () => term.getSelection(),
+  clearSelection: () => term.clearSelection(),
+  readClipboard: () => window.api.clipboardReadText(),
+  writeClipboard: (text) => window.api.clipboardWriteText(text),
+  writePty: (text) => window.api.terminalWrite(text)
+};
+document.getElementById('terminal').addEventListener('mousedown', (event) => {
+  if (event.button !== 2) return; // right button only
+  const result = window.terminalActions.terminalRightClick(terminalRightClickIO);
+  if (result.action === 'paste') term.focus();
 });
 
 // Path of the tree item currently being dragged within the app. This is the authoritative
@@ -203,24 +208,6 @@ async function loadFile(node) {
 }
 
 editor.addEventListener('input', () => {
-  if (selectedPath) setDirty(true);
-});
-
-// Editor right-click: copy when there's a selection, otherwise paste at the cursor
-// (mirrors the terminal). Skipped for read-only views (image preview / read failure).
-editor.addEventListener('contextmenu', (event) => {
-  event.preventDefault();
-  const start = editor.selectionStart;
-  const end = editor.selectionEnd;
-  if (start !== end) {
-    window.api.clipboardWriteText(editor.value.slice(start, end));
-    return;
-  }
-  if (!selectedPath || editor.disabled || currentIsImage) return; // nothing editable to paste into
-  const text = window.api.clipboardReadText();
-  if (!text) return;
-  editor.value = editor.value.slice(0, start) + text + editor.value.slice(end);
-  editor.selectionStart = editor.selectionEnd = start + text.length;
   if (selectedPath) setDirty(true);
 });
 
