@@ -206,6 +206,24 @@ editor.addEventListener('input', () => {
   if (selectedPath) setDirty(true);
 });
 
+// Editor right-click: copy when there's a selection, otherwise paste at the cursor
+// (mirrors the terminal). Skipped for read-only views (image preview / read failure).
+editor.addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  if (start !== end) {
+    window.api.clipboardWriteText(editor.value.slice(start, end));
+    return;
+  }
+  if (!selectedPath || editor.disabled || currentIsImage) return; // nothing editable to paste into
+  const text = window.api.clipboardReadText();
+  if (!text) return;
+  editor.value = editor.value.slice(0, start) + text + editor.value.slice(end);
+  editor.selectionStart = editor.selectionEnd = start + text.length;
+  if (selectedPath) setDirty(true);
+});
+
 // Ctrl+S (not Ctrl+Shift+S, which is Save Workspace) saves the open file. The toolbar button and
 // the menu item were removed; Ctrl+S is the single save affordance.
 window.addEventListener('keydown', (event) => {
