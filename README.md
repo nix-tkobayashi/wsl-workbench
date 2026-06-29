@@ -127,6 +127,11 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
 
+## v0.9.0
+
+- File viewer: find & replace (Ctrl+F / Ctrl+H) with match highlighting, a match counter, case-sensitivity toggle, and Replace / Replace All.
+- File viewer: line numbers down the left side of the editor.
+
 ## v0.8.0
 
 - Custom title bar (VS Code / Cursor style): the menu now sits in the top toolbar of a frameless window, with the app icon at the left and custom minimize / maximize / close controls at the right.
