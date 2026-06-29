@@ -107,6 +107,12 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
 
+## v0.7.0
+
+- One-click in-app update: Help → About now offers **Download and install** when a newer release exists. It downloads the installer from the latest GitHub release (with a progress bar), verifies its Authenticode signature (trusted chain + publisher pinned to the running app), then runs it and restarts the app.
+- Shift+Enter in the terminal inserts a newline like Alt+Enter, so CLIs (e.g. Claude Code) treat it as a newline rather than submit.
+- Directory tree font size now matches the editor and terminal.
+
 ## v0.6.0
 
 - Terminal tabs: multiple terminals per window (+ to add, × to close); Start Claude opens a new tab.
