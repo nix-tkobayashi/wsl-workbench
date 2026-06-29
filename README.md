@@ -107,6 +107,11 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
 
+## v0.8.0
+
+- Custom title bar (VS Code / Cursor style): the menu now sits in the top toolbar of a frameless window, with the app icon at the left and custom minimize / maximize / close controls at the right.
+- The current workspace directory moved from the toolbar to a header at the top of the file tree.
+
 ## v0.7.0
 
 - One-click in-app update: Help → About now offers **Download and install** when a newer release exists. It downloads the installer from the latest GitHub release (with a progress bar), verifies its Authenticode signature (trusted chain + publisher pinned to the running app), then runs it and restarts the app.
