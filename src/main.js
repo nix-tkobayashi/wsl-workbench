@@ -296,15 +296,28 @@ async function openWorkspaceFileDialog(win, state) {
   }
 }
 
-// Only open https URLs on github.com (never trust an arbitrary URL from the API response).
-function safeReleaseUrl(url) {
+// Only trust https URLs on github.com (never trust an arbitrary URL from the API response).
+function isGithubHttpsUrl(url) {
   try {
     const u = new URL(url);
-    if (u.protocol === 'https:' && u.hostname === 'github.com') {
-      return u.toString();
-    }
-  } catch {}
-  return RELEASES_PAGE;
+    return u.protocol === 'https:' && u.hostname === 'github.com';
+  } catch {
+    return false;
+  }
+}
+
+function safeReleaseUrl(url) {
+  return isGithubHttpsUrl(url) ? url : RELEASES_PAGE;
+}
+
+// Pick the NSIS one-click installer asset (e.g. "WSL.Workbench.Setup.0.6.0.exe") — not the portable build.
+function pickInstallerAsset(assets) {
+  if (!Array.isArray(assets)) return null;
+  const asset = assets.find((a) =>
+    a && typeof a.name === 'string' &&
+    /setup/i.test(a.name) && a.name.toLowerCase().endsWith('.exe') &&
+    isGithubHttpsUrl(a.browser_download_url));
+  return asset ? { name: path.basename(asset.name), url: asset.browser_download_url } : null;
 }
 
 // Fetch the latest release version from GitHub (best-effort, short timeout).
@@ -318,11 +331,111 @@ async function fetchLatestRelease() {
     });
     if (!res.ok) return null;
     const data = await res.json();
-    return { version: normalizeVersion(data.tag_name), url: safeReleaseUrl(data.html_url) };
+    return {
+      version: normalizeVersion(data.tag_name),
+      url: safeReleaseUrl(data.html_url),
+      installer: pickInstallerAsset(data.assets)
+    };
   } catch {
     return null;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// Refuse to execute an installer unless it is Authenticode-signed by the same publisher as the
+// running app (matched on certificate subject so it survives a self-signed cert renewal). This
+// guards against running arbitrary bytes if the release/GitHub account is ever compromised.
+function verifyInstallerSignature(installerPath) {
+  try {
+    const script =
+      "$ErrorActionPreference='Stop';" +
+      '$a=Get-AuthenticodeSignature -LiteralPath $env:WB_INSTALLER;' +
+      '$b=Get-AuthenticodeSignature -LiteralPath $env:WB_SELF;' +
+      '[pscustomobject]@{it=$a.SignerCertificate.Subject;is=$a.Status.ToString();st=$b.SignerCertificate.Subject}|ConvertTo-Json -Compress';
+    const ps = require('child_process').spawnSync('powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { env: { ...process.env, WB_INSTALLER: installerPath, WB_SELF: process.execPath }, timeout: 20000, encoding: 'utf8' });
+    if (ps.status !== 0 || !ps.stdout) return { ok: false, reason: 'verification failed' };
+    const info = JSON.parse(ps.stdout.trim());
+    if (!info.it) return { ok: false, reason: 'installer is not signed' };
+    // Require a trusted certificate chain — this is the real cryptographic guarantee (a tampered
+    // installer is HashMismatch; a forged self-signed cert is untrusted). The chain is trusted only
+    // if the user installed the publisher cert into their trust store (the documented install step).
+    if (info.is !== 'Valid') return { ok: false, reason: `untrusted (${info.is})` };
+    // Defense in depth: when the running app is itself signed, pin the installer to the same publisher
+    // so a different, unrelated trusted cert cannot be substituted.
+    if (info.st && String(info.it).toLowerCase() !== String(info.st).toLowerCase()) {
+      return { ok: false, reason: 'publisher mismatch' };
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: error.message || 'verification error' };
+  }
+}
+
+// Spawn the installer detached, then quit so it can replace the running app. Quit only once spawn
+// has actually started (a missing/quarantined file emits 'error' first).
+function launchInstallerAndQuit(installerPath) {
+  return new Promise((resolve, reject) => {
+    const child = require('child_process').spawn(installerPath, [], { detached: true, stdio: 'ignore' });
+    let settled = false;
+    child.once('error', (error) => { if (!settled) { settled = true; reject(error); } });
+    setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.unref();
+      app.quit();
+      resolve();
+    }, 500);
+  });
+}
+
+// Download the installer to a temp file (reporting progress to the window), verify its signature,
+// launch it, and quit. The NSIS one-click installer relaunches the app when it finishes.
+let updateInProgress = false;
+async function downloadAndInstallUpdate(win, installer) {
+  if (updateInProgress) return;
+  updateInProgress = true;
+  const { pipeline } = require('stream/promises');
+  const { Readable } = require('stream');
+  const send = (payload) => { if (win && !win.isDestroyed()) win.webContents.send('update:progress', payload); };
+  const setBar = (frac) => { if (win && !win.isDestroyed()) win.setProgressBar(frac); };
+  const dest = path.join(app.getPath('temp'), installer.name);
+  const controller = new AbortController();
+  let stallTimer = null;
+  const armStall = () => { if (stallTimer) clearTimeout(stallTimer); stallTimer = setTimeout(() => controller.abort(), 60000); };
+  try {
+    send({ phase: 'download', received: 0, total: 0 });
+    armStall();
+    const res = await fetch(installer.url, { headers: { 'User-Agent': 'wsl-workbench' }, signal: controller.signal });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    const total = Number(res.headers.get('content-length')) || 0;
+    let received = 0;
+    const source = Readable.fromWeb(res.body);
+    source.on('data', (chunk) => {
+      received += chunk.length;
+      armStall();
+      send({ phase: 'download', received, total });
+      setBar(total > 0 ? received / total : -1);
+    });
+    // pipeline cleans up both streams (and the dest file) on any error, including an abort.
+    await pipeline(source, fs.createWriteStream(dest), { signal: controller.signal });
+    clearTimeout(stallTimer);
+    setBar(-1);
+
+    const verdict = verifyInstallerSignature(dest);
+    if (!verdict.ok) throw new Error(`${tr('update.untrusted')} (${verdict.reason})`);
+
+    send({ phase: 'launching' });
+    await launchInstallerAndQuit(dest);
+  } catch (error) {
+    updateInProgress = false;
+    clearTimeout(stallTimer);
+    setBar(-1);
+    try { fs.unlinkSync(dest); } catch {}
+    send({ phase: 'error', message: error.message || String(error) });
+    dialog.showErrorBox(tr('update.failed'), error.message || String(error));
   }
 }
 
@@ -334,16 +447,25 @@ async function showAboutDialog(win) {
 
   const lines = [`${tr('about.currentVersion')}: ${current}`];
   let buttons = [tr('about.close')];
-  let openIndex = -1;
+  // The first button (index 0) is the action button; null = none. Either install in-app or open the page.
+  let action = null; // 'install' | 'open'
+  let installer = null;
   let openUrl = RELEASES_PAGE;
 
   if (latest && latest.version) {
     lines.push(`${tr('about.latestVersion')}: ${latest.version}`);
     if (isNewer(latest.version, current)) {
       lines.push('', tr('about.updateAvailable'));
-      buttons = [tr('about.openReleasePage'), tr('about.close')];
-      openIndex = 0;
-      openUrl = latest.url;
+      if (latest.installer) {
+        buttons = [tr('about.downloadInstall'), tr('about.close')];
+        action = 'install';
+        installer = latest.installer;
+      } else {
+        // No installer asset on the release: fall back to opening the release page.
+        buttons = [tr('about.openReleasePage'), tr('about.close')];
+        action = 'open';
+        openUrl = latest.url;
+      }
     } else {
       lines.push('', tr('about.upToDate'));
     }
@@ -362,7 +484,10 @@ async function showAboutDialog(win) {
     cancelId: buttons.length - 1
   };
   const result = target ? await dialog.showMessageBox(target, opts) : await dialog.showMessageBox(opts);
-  if (openIndex >= 0 && result.response === openIndex) {
+  if (result.response !== 0) return;
+  if (action === 'install') {
+    downloadAndInstallUpdate(target, installer);
+  } else if (action === 'open') {
     try { await shell.openExternal(openUrl); } catch {}
   }
 }

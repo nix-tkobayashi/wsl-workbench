@@ -122,7 +122,15 @@ function wireTerminal(entry) {
   });
   // Ctrl+C copies selection (else interrupt), Ctrl+V pastes; Ctrl+S is handled by the window handler.
   term.attachCustomKeyEventHandler((event) => {
-    if (event.type !== 'keydown' || !(event.ctrlKey || event.metaKey)) return true;
+    if (event.type !== 'keydown') return true;
+    // Shift+Enter inserts a newline like Alt+Enter: send ESC+CR so CLIs (e.g. Claude Code) treat it as a newline, not submit.
+    if (event.key === 'Enter' && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (entry.exited) restartTerminal(entry);
+      else window.api.terminalWrite({ id, data: '\x1b\r' });
+      event.preventDefault();
+      return false;
+    }
+    if (!(event.ctrlKey || event.metaKey)) return true;
     const key = event.key.toLowerCase();
     if (key === 'c') {
       if (event.shiftKey || term.hasSelection()) {
@@ -902,6 +910,36 @@ window.api.onLangChanged((lang) => {
 });
 window.api.onWorkspaceChanged(async (nextConfig) => {
   await applyWorkspace(nextConfig);
+});
+
+// One-click update: main streams the installer download, then launches it and quits.
+const updateModal = document.getElementById('updateModal');
+const updateMessage = document.getElementById('updateMessage');
+const updateBarFill = document.getElementById('updateBarFill');
+const updatePercent = document.getElementById('updatePercent');
+const toMB = (bytes) => (bytes / (1024 * 1024)).toFixed(1);
+window.api.onUpdateProgress((p) => {
+  if (p.phase === 'error') { updateModal.classList.add('hidden'); return; }
+  updateModal.classList.remove('hidden');
+  if (p.phase === 'launching') {
+    updateMessage.textContent = t('update.installing');
+    updateBarFill.classList.remove('indeterminate');
+    updateBarFill.style.width = '100%';
+    updatePercent.textContent = '';
+    return;
+  }
+  // phase === 'download'
+  updateMessage.textContent = t('update.downloading');
+  if (p.total > 0) {
+    const pct = Math.min(100, Math.round((p.received / p.total) * 100));
+    updateBarFill.classList.remove('indeterminate');
+    updateBarFill.style.width = pct + '%';
+    updatePercent.textContent = `${pct}%  (${toMB(p.received)} / ${toMB(p.total)} MB)`;
+  } else {
+    updateBarFill.classList.add('indeterminate');
+    updateBarFill.style.width = '';
+    updatePercent.textContent = p.received > 0 ? `${toMB(p.received)} MB` : '';
+  }
 });
 
 document.getElementById('claudeBtn').addEventListener('click', () => {
