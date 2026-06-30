@@ -9,6 +9,7 @@ const { normalizeVersion, isNewer } = require('./version');
 
 const RELEASES_API = 'https://api.github.com/repos/nix-tkobayashi/wsl-workbench/releases/latest';
 const RELEASES_PAGE = 'https://github.com/nix-tkobayashi/wsl-workbench/releases/latest';
+const REPO_URL = 'https://github.com/nix-tkobayashi/wsl-workbench';
 
 const DEFAULT_DISTRO = process.env.WSLWB_DISTRO || 'Ubuntu';
 const DEFAULT_WSL_PATH = process.env.WSLWB_PATH || `/home/${os.userInfo().username}/projects`;
@@ -457,32 +458,27 @@ async function showAboutDialog(win) {
   const latest = await fetchLatestRelease();
 
   const lines = [`${tr('about.currentVersion')}: ${current}`];
-  let buttons = [tr('about.close')];
-  // The first button (index 0) is the action button; null = none. Either install in-app or open the page.
-  let action = null; // 'install' | 'open'
-  let installer = null;
-  let openUrl = RELEASES_PAGE;
+  // Buttons and a parallel list of click actions (null = just dismiss). Index 0 is the default.
+  const buttons = [];
+  const actions = [];
+  const addButton = (label, fn) => { buttons.push(label); actions.push(fn || null); };
 
   if (latest && latest.version) {
     lines.push(`${tr('about.latestVersion')}: ${latest.version}`);
     if (isNewer(latest.version, current)) {
       lines.push('', tr('about.updateAvailable'));
-      if (latest.installer) {
-        buttons = [tr('about.downloadInstall'), tr('about.close')];
-        action = 'install';
-        installer = latest.installer;
-      } else {
-        // No installer asset on the release: fall back to opening the release page.
-        buttons = [tr('about.openReleasePage'), tr('about.close')];
-        action = 'open';
-        openUrl = latest.url;
-      }
+      const target0 = win && !win.isDestroyed() ? win : null;
+      if (latest.installer) addButton(tr('about.downloadInstall'), () => downloadAndInstallUpdate(target0, latest.installer));
+      else addButton(tr('about.openReleasePage'), () => shell.openExternal(latest.url).catch(() => {}));
     } else {
       lines.push('', tr('about.upToDate'));
     }
   } else {
     lines.push('', tr('about.checkFailed'));
   }
+  lines.push('', `GitHub: ${REPO_URL}`);
+  addButton(tr('about.github'), () => shell.openExternal(REPO_URL).catch(() => {}));
+  addButton(tr('about.close'), null);
 
   const target = win && !win.isDestroyed() ? win : null;
   const opts = {
@@ -495,12 +491,8 @@ async function showAboutDialog(win) {
     cancelId: buttons.length - 1
   };
   const result = target ? await dialog.showMessageBox(target, opts) : await dialog.showMessageBox(opts);
-  if (result.response !== 0) return;
-  if (action === 'install') {
-    downloadAndInstallUpdate(target, installer);
-  } else if (action === 'open') {
-    try { await shell.openExternal(openUrl); } catch {}
-  }
+  const fn = actions[result.response];
+  if (fn) fn();
 }
 
 function buildAppMenu() {

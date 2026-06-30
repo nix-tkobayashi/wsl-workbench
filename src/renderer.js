@@ -298,6 +298,12 @@ function updateEditorTabEl(tab) {
 }
 function refreshEditorTabs() { for (const tab of editorTabs.values()) updateEditorTabEl(tab); }
 
+// Keep the active editor tab visible when the tab strip overflows (it scrolls horizontally).
+function scrollActiveEditorTabIntoView() {
+  const tab = editorTabs.get(selectedPath);
+  if (tab && tab.el) tab.el.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+}
+
 function setDirty(value) {
   const tab = editorTabs.get(selectedPath);
   if (tab) { tab.dirty = value; updateEditorTabEl(tab); }
@@ -340,6 +346,7 @@ function renderActiveEditor() {
     editor.disabled = !!tab.disabled;
   }
   refreshEditorTabs();
+  scrollActiveEditorTabIntoView();
   renderGutter();
   syncFindToActiveEditor();
 }
