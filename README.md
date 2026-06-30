@@ -127,6 +127,12 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
 
+## v0.11.0
+
+- Terminal tabs can be renamed by double-clicking.
+- The toolbar shows the open workspace's directory name (e.g. `[test003]`).
+- Fixed multi-line text being pasted twice into the terminal (right-click / Ctrl+V).
+
 ## v0.10.0
 
 - Editor tabs scroll horizontally instead of squeezing when many files are open; the active tab stays in view.
