@@ -127,6 +127,12 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
 
+## v0.10.0
+
+- Editor tabs scroll horizontally instead of squeezing when many files are open; the active tab stays in view.
+- Terminal: fixed the bottom row being cut off.
+- About dialog: added a link to the GitHub repository.
+
 ## v0.9.0
 
 - File viewer: find & replace (Ctrl+F / Ctrl+H) with match highlighting, a match counter, case-sensitivity toggle, and Replace / Replace All.
