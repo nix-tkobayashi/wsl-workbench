@@ -8,7 +8,7 @@ Lightweight Windows Electron app for working in WSL:
 - Landing screen on startup / New Window to pick a workspace
 - **Start Claude** launches the WSL-native `claude --dangerously-skip-permissions`
 - Terminal: right-click to copy (selection) / paste, drag a tree item in to insert its path,
-  paste an image with `Alt+V` (Claude Code reads it), and press any key to restart after `exit`
+  paste an image with `Ctrl+V` or right-click (Claude Code reads it as `[Image #N]`), and press any key to restart after `exit`
 - Tree auto-refreshes (files created in the terminal appear without a manual refresh)
 - English / Japanese UI (Language menu)
 - Drag & drop to move within the tree, or copy in from Windows Explorer
