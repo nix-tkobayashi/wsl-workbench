@@ -32,6 +32,9 @@ const translations = {
     'landing.subtitle': 'Open a workspace to get started',
     'landing.openWorkspace': 'Open Workspace…',
     'landing.openWorkspaceFile': 'Open Workspace File…',
+    'landing.cloneRepo': 'Clone Repository…',
+    'landing.cloning': 'Cloning…',
+    'prompt.cloneUrl': 'Git repository URL to clone:',
     'ctx.newFile': 'New File',
     'ctx.newFolder': 'New Folder',
     'ctx.rename': 'Rename',
@@ -94,6 +97,7 @@ const translations = {
     'find.noResults': 'No results',
     'terminal.exited': '[terminal exited]',
     'terminal.restartHint': '[Press Enter to restart the terminal]',
+    'terminal.imagePasteFailed': 'Could not paste the image into the terminal. Install a clipboard tool in WSL (e.g. "sudo apt install wl-clipboard") so the CLI can read it.',
     'claude.notFound': 'Error: claude not found in WSL PATH (only a Windows claude under /mnt, if any). Install it inside WSL: npm i -g @anthropic-ai/claude-code'
   },
   ja: {
@@ -121,6 +125,9 @@ const translations = {
     'landing.subtitle': 'ワークスペースを開いて開始します',
     'landing.openWorkspace': 'ワークスペースを開く…',
     'landing.openWorkspaceFile': 'ワークスペースファイルを開く…',
+    'landing.cloneRepo': 'リポジトリを Clone…',
+    'landing.cloning': 'Clone しています…',
+    'prompt.cloneUrl': 'Clone する Git リポジトリの URL:',
     'ctx.newFile': '新規ファイル',
     'ctx.newFolder': '新規フォルダ',
     'ctx.rename': '名前を変更',
@@ -183,6 +190,7 @@ const translations = {
     'find.noResults': '一致なし',
     'terminal.exited': '[ターミナルが終了しました]',
     'terminal.restartHint': '[Enter キーでターミナルを再起動します]',
+    'terminal.imagePasteFailed': 'ターミナルへ画像を貼り付けできませんでした。CLI が読めるよう WSL にクリップボードツール（例: sudo apt install wl-clipboard）を導入してください。',
     'claude.notFound': 'エラー: WSL の PATH に claude が見つかりません（/mnt 配下の Windows 版を除く）。WSL 内でインストールしてください: npm i -g @anthropic-ai/claude-code'
   }
 };

@@ -4,6 +4,7 @@ let config = null;
 let selectedPath = null;
 const expanded = new Set();
 let contextNode = null;
+let treeSelection = null; // last-clicked tree node; the target for a clipboard-image paste into the tree
 
 const layout = document.getElementById('layout');
 const rightPane = document.getElementById('rightPane');
@@ -162,6 +163,26 @@ function makeTermTab(entry) {
   return tab;
 }
 
+// Paste a clipboard image into the terminal by pushing it onto the WSL clipboard as PNG, then sending
+// Ctrl+V so an AI CLI (e.g. Claude Code) reads it and shows [Image #N]. No file is written to the
+// workspace. If WSL lacks wl-copy/xclip (or the Wayland clipboard is unreachable), tell the user.
+async function pasteImageToTerminal(entry) {
+  if (!entry || !config) return;
+  let res = null;
+  try {
+    res = await window.api.pushImageToWsl({ distro: config.distro });
+  } catch (error) {
+    alert(error.message || String(error));
+    return;
+  }
+  if (res && res.ok) {
+    window.api.terminalWrite({ id: entry.id, data: '\x16' }); // Ctrl+V: the CLI reads the WSL clipboard
+    entry.term.focus();
+    return;
+  }
+  alert(t('terminal.imagePasteFailed'));
+}
+
 function wireTerminal(entry) {
   const { id, term } = entry;
   term.onData((data) => {
@@ -190,9 +211,14 @@ function wireTerminal(entry) {
       return true; // no selection: let Ctrl+C interrupt
     }
     if (key === 'v') {
-      const text = window.api.clipboardReadText();
-      if (text) term.paste(text); // bracketed paste (see the right-click paste note above)
       event.preventDefault();
+      // An image on the clipboard takes priority over text (screenshots carry only an image).
+      if (window.api.clipboardHasImage()) {
+        pasteImageToTerminal(entry);
+      } else {
+        const text = window.api.clipboardReadText();
+        if (text) term.paste(text); // bracketed paste (see the right-click paste note above)
+      }
       return false;
     }
     if (key === 's' && !event.shiftKey) return false; // let window Ctrl+S save; no XOFF
@@ -205,6 +231,8 @@ function wireTerminal(entry) {
     clearSelection: () => term.clearSelection(),
     readClipboard: () => window.api.clipboardReadText(),
     writeClipboard: (text) => window.api.clipboardWriteText(text),
+    hasImage: () => window.api.clipboardHasImage(),
+    pasteImage: () => pasteImageToTerminal(entry),
     // Deliver pasted text through xterm so it goes in as one bracketed paste (writing raw multi-line
     // bytes straight to the pty gets echoed twice by ConPTY / a bracketed-paste TUI).
     paste: (text) => term.paste(text)
@@ -299,6 +327,13 @@ document.getElementById('newTerminalBtn').addEventListener('click', () => create
 // internal-origin signal: it is only set during a genuine tree dragstart, so external drags
 // (text/URLs/files from other apps) cannot trigger terminal insertion or fs:move.
 let currentTreeDragPath = null;
+
+// True when a drag carries external OS files. Must be checked via dataTransfer.types during dragover:
+// dataTransfer.files is empty until the actual drop, so testing files.length there wrongly rejects the
+// drop (the cursor shows a ✖ and nothing can be dropped).
+function isExternalFileDrag(event) {
+  return !!event.dataTransfer && Array.from(event.dataTransfer.types || []).includes('Files');
+}
 
 // Quote a path for the shell only when it contains characters that need it.
 function shellQuotePath(p) {
@@ -757,10 +792,17 @@ function basenameFor(wslPath) {
   return wslPath.split('/').filter(Boolean).pop() || wslPath;
 }
 
-// Toolbar title: the active workspace's leaf directory in brackets (e.g. "[test003]"), or blank when
-// no workspace is open.
+// The last two path segments (parent/leaf), e.g. "richka/aws-infra"; falls back to fewer when the
+// path is shallow. Used for the toolbar title so sibling workspaces with the same leaf are told apart.
+function lastTwoSegmentsFor(wslPath) {
+  const parts = wslPath.split('/').filter(Boolean);
+  return parts.slice(-2).join('/') || wslPath;
+}
+
+// Toolbar title: the active workspace's parent/leaf directory in brackets (e.g. "[richka/aws-infra]"),
+// or blank when no workspace is open.
 function updateWorkspaceName() {
-  document.getElementById('workspaceName').textContent = config ? `[${basenameFor(config.wslPath)}]` : '';
+  document.getElementById('workspaceName').textContent = config ? `[${lastTwoSegmentsFor(config.wslPath)}]` : '';
 }
 
 function showContextMenu(event, node) {
@@ -863,6 +905,7 @@ function rowFor(node) {
 
   row.addEventListener('click', async (event) => {
     event.stopPropagation();
+    setTreePasteTarget(node); // remember the paste target (clipboard-image paste saves next to it)
     if (node.type === 'directory') {
       toggle(node.path);
     } else {
@@ -873,8 +916,8 @@ function rowFor(node) {
   row.addEventListener('contextmenu', (event) => showContextMenu(event, node));
 
   twisty.addEventListener('click', (event) => {
-    event.stopPropagation();
-    if (node.type === 'directory') toggle(node.path);
+    event.stopPropagation(); // suppresses the row click, so update the paste target here too
+    if (node.type === 'directory') { setTreePasteTarget(node); toggle(node.path); }
   });
 
   row.addEventListener('dragstart', (event) => {
@@ -888,7 +931,7 @@ function rowFor(node) {
   row.addEventListener('dragover', (event) => {
     if (node.type !== 'directory') return;
     event.preventDefault();
-    event.dataTransfer.dropEffect = event.dataTransfer.files?.length ? 'copy' : 'move';
+    event.dataTransfer.dropEffect = isExternalFileDrag(event) ? 'copy' : 'move';
     row.classList.add('drag-over');
   });
   row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
@@ -999,6 +1042,7 @@ async function applyWorkspace(nextConfig) {
   const prevConfig = config;
   const prevExpanded = new Set(expanded);
   config = nextConfig;
+  setTreePasteTarget(null); // reset the paste target to the new workspace root
   expanded.clear();
   expanded.add(config.wslPath);
   try {
@@ -1095,6 +1139,30 @@ function initMenubar() {
 function initLanding() {
   document.getElementById('landingOpenWorkspace').addEventListener('click', () => window.api.openWorkspace());
   document.getElementById('landingOpenFile').addEventListener('click', () => window.api.openWorkspaceFile());
+  document.getElementById('landingClone').addEventListener('click', cloneRepoFlow);
+}
+
+// Landing "Clone Repository": ask for a Git URL, pick the destination parent folder, then clone. On
+// success the main process broadcasts workspace:changed → applyWorkspace() opens it and hides landing.
+async function cloneRepoFlow() {
+  const url = await askPrompt(t('prompt.cloneUrl'), '');
+  if (!url || !url.trim()) return;
+  const folder = await window.api.pickFolder(); // { distro, wslPath } destination parent, or null
+  if (!folder) return;
+
+  const subtitle = document.querySelector('#landing .landing-subtitle');
+  const buttons = document.querySelectorAll('#landing .landing-actions button');
+  const prevSubtitle = subtitle ? subtitle.textContent : '';
+  if (subtitle) subtitle.textContent = t('landing.cloning');
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    await window.api.cloneRepo({ distro: folder.distro, parentDirPath: folder.wslPath, url: url.trim() });
+  } catch (error) {
+    alert(error.message || String(error));
+  } finally {
+    if (subtitle) subtitle.textContent = prevSubtitle;
+    buttons.forEach((b) => { b.disabled = false; });
+  }
 }
 
 // Dropping onto empty tree-pane space targets the workspace root: internal drags move there,
@@ -1105,13 +1173,22 @@ function initLanding() {
 function initTreeRootDropTarget() {
   const pane = document.getElementById('treePane');
   pane.addEventListener('dragover', (event) => {
-    if (!config || event.target.closest('.row')) return; // rows manage their own drop affordance
-    const external = !!event.dataTransfer.files?.length;
+    if (!config) return;
+    // Over a row: that row owns the affordance. Also drop the pane highlight so it can't stick on
+    // when the drag crosses from empty space onto a row (a row drop won't reach the pane handler).
+    if (event.target.closest('.row')) { pane.classList.remove('drag-over'); return; }
+    const external = isExternalFileDrag(event);
     if (!currentTreeDragPath && !external) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = external ? 'copy' : 'move';
+    pane.classList.add('drag-over'); // highlight the whole pane: the drop targets the workspace root
+  });
+  pane.addEventListener('dragleave', (event) => {
+    if (pane.contains(event.relatedTarget)) return; // ignore moves between children inside the pane
+    pane.classList.remove('drag-over');
   });
   pane.addEventListener('drop', async (event) => {
+    pane.classList.remove('drag-over');
     if (!config || event.target.closest('.row')) return;
     const rootPath = config.wslPath;
 
@@ -1138,6 +1215,48 @@ function initTreeRootDropTarget() {
       await window.api.move({ distro: config.distro, sourcePath, targetDirPath: rootPath });
       retargetEditorTabs(sourcePath, `${rootPath}/${basenameFor(sourcePath)}`);
       await renderTree();
+    } catch (error) {
+      alert(error.message || String(error));
+    }
+  });
+}
+
+// Set the folder a clipboard-image paste in the tree targets. `null` means the workspace root (the
+// top directory has no row of its own); the path header (#cwd) is marked so the target is visible.
+function setTreePasteTarget(node) {
+  treeSelection = node;
+  const cwdEl = document.getElementById('cwd');
+  if (cwdEl) cwdEl.classList.toggle('paste-target', !node);
+}
+
+// The directory a clipboard-image paste in the tree should be saved into: the last-clicked node's
+// folder (its own path if it's a directory, else its parent), falling back to the workspace root.
+function treePasteTargetDir() {
+  if (treeSelection) return parentDirFor(treeSelection);
+  return config ? config.wslPath : null;
+}
+
+// Ctrl+V in the tree pane: if the clipboard holds an image, save it as a PNG into the target folder
+// and refresh. (#treePane is focusable via tabindex so it receives the paste event.) Text pastes are
+// left alone — there's no text-paste action in the tree.
+function initTreePasteTarget() {
+  const pane = document.getElementById('treePane');
+  // Clicking empty tree space or the path header targets the workspace root (its rows do their own
+  // selection and stopPropagation, so this only fires off-row) — the way to paste into the top dir.
+  pane.addEventListener('click', (event) => {
+    if (event.target.closest('.row')) return;
+    setTreePasteTarget(null);
+  });
+  pane.addEventListener('paste', async (event) => {
+    if (!config || !window.api.clipboardHasImage()) return;
+    event.preventDefault();
+    const targetDirPath = treePasteTargetDir();
+    if (!targetDirPath) return;
+    try {
+      const saved = await window.api.saveClipboardImage({ distro: config.distro, targetDirPath });
+      expanded.add(targetDirPath);
+      await renderTree();
+      highlightTreeRow(saved.path);
     } catch (error) {
       alert(error.message || String(error));
     }
@@ -1280,6 +1399,7 @@ document.getElementById('claudeBtn').addEventListener('click', () => {
   initResizers();
   initTerminalDropTarget();
   initTreeRootDropTarget();
+  initTreePasteTarget();
   initLanding();
   initMenubar();
   setInterval(pollTreeChanges, 1500);

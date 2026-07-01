@@ -12,6 +12,13 @@ const RELEASES_PAGE = 'https://github.com/nix-tkobayashi/wsl-workbench/releases/
 const REPO_URL = 'https://github.com/nix-tkobayashi/wsl-workbench';
 
 const DEFAULT_DISTRO = process.env.WSLWB_DISTRO || 'Ubuntu';
+// WSLg with systemd sets XDG_RUNTIME_DIR to /run/user/<uid> but leaves the Wayland socket under
+// /mnt/wslg/runtime-dir, so wl-copy/wl-paste (hence Claude Code's clipboard image paste) can't find
+// it. When the default socket is missing but WSLg's exists, point WAYLAND_DISPLAY at the real one.
+// Shared by the terminal's login shell (so CLIs inside inherit it) and the image-bridge command.
+const WSLG_WAYLAND_FIX =
+  'if [ -S /mnt/wslg/runtime-dir/wayland-0 ] && [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wayland-0" ]; ' +
+  'then export WAYLAND_DISPLAY=/mnt/wslg/runtime-dir/wayland-0; fi';
 const DEFAULT_WSL_PATH = process.env.WSLWB_PATH || `/home/${os.userInfo().username}/projects`;
 const DEFAULT_WSL_HOME_PATH = process.env.WSLWB_HOME_PATH || `/home/${os.userInfo().username}`;
 
@@ -665,6 +672,50 @@ ipcMain.handle('workspace:openFile', (event) => {
   return openWorkspaceFileDialog(win, state);
 });
 
+// The directory `git clone <url>` creates: the URL's last path segment without a trailing .git.
+// Handles https URLs and scp-style (git@host:user/repo.git); returns '' if none can be derived.
+function repoDirNameFromUrl(url) {
+  const trimmed = String(url).trim().replace(/[/\\]+$/, '');
+  const last = trimmed.split(/[/\\:]/).pop() || '';
+  const name = last.replace(/\.git$/i, '');
+  return (name === '.' || name === '..') ? '' : name;
+}
+
+// Run `git clone` inside the distro. url/name are passed as argv (never through a shell) so a hostile
+// URL can't inject commands; `--` stops git from reading either as an option. GIT_TERMINAL_PROMPT=0 +
+// GIT_ASKPASS=/bin/true make auth failures error out instead of hanging on a prompt with no TTY.
+function runWslGitClone(distro, parentDirPath, url, name) {
+  return new Promise((resolve) => {
+    const args = ['-d', distro, '--cd', parentDirPath, '--',
+      'env', 'GIT_TERMINAL_PROMPT=0', 'GIT_ASKPASS=/bin/true', 'git', 'clone', '--', url, name];
+    const child = require('child_process').spawn('wsl.exe', args, { windowsHide: true });
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.on('error', (err) => resolve({ ok: false, message: String(err.message || err) }));
+    child.on('close', (code) => resolve({ ok: code === 0, message: stderr.trim() }));
+  });
+}
+
+// Clone a repo into the chosen parent folder, then open the cloned directory as the workspace.
+ipcMain.handle('workspace:clone', async (event, { distro = DEFAULT_DISTRO, parentDirPath, url } = {}) => {
+  const { win } = getStateForWebContents(event.sender);
+  if (!url || !url.trim()) throw new Error('Repository URL is required.');
+  if (!parentDirPath) throw new Error('Destination folder is required.');
+  const cleanUrl = url.trim();
+  const name = repoDirNameFromUrl(cleanUrl);
+  if (!name) throw new Error('Could not determine a folder name from the URL.');
+  const targetWslPath = path.posix.join(parentDirPath, name);
+  const targetFsPath = wslPathToWindowsFsPath(distro, targetWslPath);
+  if (safeStat(targetFsPath)) throw new Error(`Already exists: ${name}`);
+
+  const res = await runWslGitClone(distro, parentDirPath, cleanUrl, name);
+  if (!res.ok) throw new Error(res.message || 'git clone failed.');
+  if (!safeStat(targetFsPath)) throw new Error('Clone succeeded but the folder was not found.');
+
+  setCurrentWorkspaceForWindow(win, { distro, wslPath: targetWslPath });
+  return { ok: true, wslPath: targetWslPath, name };
+});
+
 // Re-assert renderer state as the source of truth (e.g. the user cancelled a discard prompt, or a
 // workspace failed to load) without re-broadcasting or restarting the terminal.
 ipcMain.handle('workspace:resync', (event, { workspace, showLanding = false } = {}) => {
@@ -685,6 +736,35 @@ ipcMain.on('clipboard:writeText', (event, text) => {
 });
 ipcMain.on('clipboard:readText', (event) => {
   event.returnValue = clipboard.readText();
+});
+// True when the clipboard holds a bitmap image (e.g. a screenshot). Lets the renderer decide whether
+// a paste in the tree/terminal should be handled as an image instead of text.
+ipcMain.on('clipboard:hasImage', (event) => {
+  event.returnValue = !clipboard.readImage().isEmpty();
+});
+
+// Bridge the clipboard image into the WSL distro's own clipboard as PNG. Claude Code reads the OS
+// clipboard on Ctrl+V (via wl-copy/xclip) and shows it as [Image #N]; a Windows-side clipboard image
+// (BMP over WSLg) isn't visible to it, so we push a PNG in ourselves, then the renderer sends Ctrl+V.
+// The PNG is staged to a temp file (not piped straight into a tool) so that if wl-copy is present but
+// its Wayland server is unreachable, we can still fall through to xclip on the same bytes. stdout/
+// stderr go to /dev/null so the daemon wl-copy/xclip forks doesn't hold spawnSync's pipes open.
+// Returns { ok }; the renderer reports failure to the user (it does not write a file).
+ipcMain.handle('clipboard:pushImageToWsl', (_event, { distro = DEFAULT_DISTRO } = {}) => {
+  const image = clipboard.readImage();
+  if (image.isEmpty()) return { ok: false, reason: 'no-image' };
+  const script = `${WSLG_WAYLAND_FIX}; ` +
+    'tmp=$(mktemp --suffix=.png) || exit 4; cat > "$tmp"; rc=3; ' +
+    'if command -v wl-copy >/dev/null 2>&1; then wl-copy --type image/png < "$tmp" >/dev/null 2>&1 && rc=0; fi; ' +
+    'if [ $rc -ne 0 ] && command -v xclip >/dev/null 2>&1; then xclip -selection clipboard -t image/png -i "$tmp" >/dev/null 2>&1 && rc=0; fi; ' +
+    'rm -f "$tmp"; exit $rc';
+  const res = require('child_process').spawnSync(
+    'wsl.exe', ['-d', distro, '--exec', 'bash', '-lc', script],
+    { input: image.toPNG(), timeout: 10000 }
+  );
+  if (res.error) return { ok: false, reason: String(res.error.message || res.error) };
+  if (res.status !== 0) return { ok: false, reason: `exit-${res.status}` };
+  return { ok: true };
 });
 
 // Custom window controls (frameless window): the toolbar's min/max/close buttons drive these.
@@ -818,6 +898,39 @@ ipcMain.handle('fs:reveal', async (_event, { distro = DEFAULT_DISTRO, targetPath
   return { ok: true };
 });
 
+// Two-digit zero-pad for the timestamp used in pasted-image filenames.
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+// Save the clipboard's bitmap image as a PNG into the given WSL directory. Used by both the tree
+// (explicit paste-to-save) and the terminal (so an AI CLI can reference the saved path). Returns the
+// created file's WSL path so the renderer can refresh/insert it.
+ipcMain.handle('fs:saveClipboardImage', (_event, { distro = DEFAULT_DISTRO, targetDirPath } = {}) => {
+  if (!targetDirPath) throw new Error('targetDirPath is required.');
+  const image = clipboard.readImage();
+  if (image.isEmpty()) throw new Error('No image in clipboard.');
+  const targetDir = wslPathToWindowsFsPath(distro, targetDirPath);
+  const targetStat = safeStat(targetDir);
+  if (!targetStat || !targetStat.isDirectory()) throw new Error(`Target directory not found: ${targetDirPath}`);
+
+  const now = new Date();
+  const stamp = `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}-${pad2(now.getHours())}${pad2(now.getMinutes())}${pad2(now.getSeconds())}`;
+  const base = `pasted-image-${stamp}`;
+  const png = image.toPNG();
+  // Exclusive create ('wx') so a name collision (or a symlink planted between check and write) can't
+  // clobber an existing file; on EEXIST, try the next suffix.
+  let name = `${base}.png`;
+  for (let i = 1; ; i++) {
+    try {
+      fs.writeFileSync(path.join(targetDir, name), png, { flag: 'wx' });
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      name = `${base}-${i}.png`;
+    }
+  }
+  return { ok: true, name, path: path.posix.join(targetDirPath, name) };
+});
+
 ipcMain.handle('fs:copyExternal', (_event, { distro = DEFAULT_DISTRO, sourcePaths = [], targetDirPath }) => {
   if (!Array.isArray(sourcePaths) || sourcePaths.length === 0) throw new Error('sourcePaths are required.');
   if (!targetDirPath) throw new Error('targetDirPath is required.');
@@ -865,7 +978,9 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '' }) => {
   if (existing) {
     try { existing.kill(); } catch {}
   }
-  const args = ['-d', workspace.distro, '--cd', workspace.wslPath, '--exec', 'bash', '-lc', command ? `${command}; exec bash` : 'exec bash'];
+  // Repair the Wayland env first so CLIs in the shell (e.g. Claude Code) can read clipboard images.
+  const launch = command ? `${command}; exec bash` : 'exec bash';
+  const args = ['-d', workspace.distro, '--cd', workspace.wslPath, '--exec', 'bash', '-lc', `${WSLG_WAYLAND_FIX}; ${launch}`];
   const ptyProc = pty.spawn('wsl.exe', args, {
     name: 'xterm-256color',
     cols: 100,

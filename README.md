@@ -127,6 +127,15 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
 
+## v0.12.0
+
+- Paste a clipboard image into the file tree to save it as a PNG. It goes into the clicked folder, or the workspace root when you click the path header / empty space (the target folder is marked on the path header).
+- Paste a clipboard image into the terminal to hand it to an AI CLI (e.g. Claude Code) as `[Image #N]`. The image is bridged into the WSL clipboard, so the distro needs `wl-clipboard` (Wayland/WSLg) or `xclip` (X11) installed.
+- Drag an image/file onto the tree — including the top-level (root) area — now works; fixed the "no drop" ✖ cursor over empty tree space.
+- Start screen: **Clone Repository…** — clone a Git repo into a chosen folder and open it as the workspace.
+- The toolbar now shows the workspace as `parent/leaf` (e.g. `[richka/aws-infra]`) so sibling workspaces with the same name are distinguishable.
+- Fixed terminal text overlapping the scrollbar (added right padding).
+
 ## v0.11.0
 
 - Terminal tabs can be renamed by double-clicking.

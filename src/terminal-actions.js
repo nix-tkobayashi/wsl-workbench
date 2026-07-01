@@ -11,6 +11,12 @@
       io.clearSelection();
       return { action: 'copy', text };
     }
+    // An image on the clipboard takes priority over text (screenshots carry only an image), so a
+    // right-click paste bridges it to the terminal the same way Ctrl+V does.
+    if (io.hasImage && io.hasImage()) {
+      io.pasteImage();
+      return { action: 'paste-image' };
+    }
     const text = io.readClipboard() || '';
     if (text) io.paste(text);
     return { action: 'paste', text };

@@ -39,6 +39,26 @@ test('pastes the clipboard into the pty when there is no selection', () => {
   assert.equal(io.calls.clearSelection, 0);
 });
 
+test('pastes a clipboard image (via pasteImage) instead of text when one is present', () => {
+  const io = makeIO({ selection: '', clipboard: 'some text' });
+  const calls = { pasteImage: 0 };
+  io.hasImage = () => true;
+  io.pasteImage = () => { calls.pasteImage += 1; };
+  const r = terminalRightClick(io);
+  assert.equal(r.action, 'paste-image');
+  assert.equal(calls.pasteImage, 1);
+  assert.deepEqual(io.calls.paste, []); // image path taken: no text paste
+});
+
+test('falls back to text paste when the clipboard has no image', () => {
+  const io = makeIO({ selection: '', clipboard: 'plain text' });
+  io.hasImage = () => false;
+  io.pasteImage = () => { throw new Error('should not paste image'); };
+  const r = terminalRightClick(io);
+  assert.equal(r.action, 'paste');
+  assert.deepEqual(io.calls.paste, ['plain text']);
+});
+
 test('paste with empty clipboard is a no-op write', () => {
   const io = makeIO({ selection: '', clipboard: '' });
   const r = terminalRightClick(io);

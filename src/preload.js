@@ -3,6 +3,9 @@ contextBridge.exposeInMainWorld('api', {
   // The `clipboard` module is unavailable in a sandboxed preload, so go through the main process.
   clipboardWriteText: (text) => ipcRenderer.sendSync('clipboard:writeText', String(text ?? '')),
   clipboardReadText: () => ipcRenderer.sendSync('clipboard:readText'),
+  clipboardHasImage: () => ipcRenderer.sendSync('clipboard:hasImage'),
+  saveClipboardImage: (args) => ipcRenderer.invoke('fs:saveClipboardImage', args),
+  pushImageToWsl: (args) => ipcRenderer.invoke('clipboard:pushImageToWsl', args),
   getConfig: () => ipcRenderer.invoke('config:get'),
   readTree: (args) => ipcRenderer.invoke('tree:read', args),
   treeSignature: (args) => ipcRenderer.invoke('tree:signature', args),
@@ -19,6 +22,7 @@ contextBridge.exposeInMainWorld('api', {
   pickFolder: () => ipcRenderer.invoke('folder:pick'),
   openWorkspace: () => ipcRenderer.invoke('workspace:openDirectory'),
   openWorkspaceFile: () => ipcRenderer.invoke('workspace:openFile'),
+  cloneRepo: (args) => ipcRenderer.invoke('workspace:clone', args),
   resyncWorkspace: (payload) => ipcRenderer.invoke('workspace:resync', payload),
   newWindow: (workspace) => ipcRenderer.invoke('window:new', workspace),
   popupMenu: (pos) => ipcRenderer.send('menu:popup', pos),
