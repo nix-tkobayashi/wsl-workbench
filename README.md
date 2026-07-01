@@ -127,6 +127,11 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
 
+## v0.12.1
+
+- The viewer and terminal scrollbars now render dark to match the always-dark UI (they were showing as light bars when the Windows "app mode" was Light).
+- Fixed the editor's line numbers being overprinted by long lines when scrolling horizontally; text now scrolls under the line-number gutter.
+
 ## v0.12.0
 
 - Paste a clipboard image into the file tree to save it as a PNG. It goes into the clicked folder, or the workspace root when you click the path header / empty space (the target folder is marked on the path header).

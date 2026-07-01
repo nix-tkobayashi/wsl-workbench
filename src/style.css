@@ -61,9 +61,15 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 #editorScroll { position:relative; flex:1; min-height:0; background:#181818; overflow:hidden; }
 #editor, #editorBackdrop { position:absolute; inset:0; margin:0; padding:10px 10px 10px 52px; font-family: Consolas, "Cascadia Mono", monospace; font-size:13px; line-height:1.45; white-space:pre; tab-size:2; border:0; }
 #editor { width:100%; height:100%; resize:none; outline:0; background:transparent; color:var(--text); overflow:auto; }
+/* The UI is always dark, so force dark native scrollbars for the viewer and terminal (otherwise they
+   render light when the Windows "app mode" is Light, showing white bars on the dark UI). Scoped to
+   these two elements so nothing else is affected. */
+#editor, .xterm-viewport { color-scheme: dark; }
 #editorBackdrop { overflow:hidden; color:transparent; pointer-events:none; }
 /* Line-number gutter, scroll-synced with the editor; its width and the editors' left padding are set in JS. */
-#editorGutter { position:absolute; top:0; left:0; bottom:0; width:46px; box-sizing:border-box; padding:10px 6px 10px 0; overflow:hidden; font-family: Consolas, "Cascadia Mono", monospace; font-size:13px; line-height:1.45; white-space:pre; text-align:right; color:#6a6a6a; background:#1c1c1c; border-right:1px solid #2a2a2a; pointer-events:none; user-select:none; }
+/* z-index keeps the gutter above the textarea so horizontally-scrolled text slides *under* its opaque
+   background instead of overprinting the line numbers; pointer-events:none still lets clicks through. */
+#editorGutter { position:absolute; top:0; left:0; bottom:0; width:46px; box-sizing:border-box; padding:10px 6px 10px 0; overflow:hidden; font-family: Consolas, "Cascadia Mono", monospace; font-size:13px; line-height:1.45; white-space:pre; text-align:right; color:#6a6a6a; background:#1c1c1c; border-right:1px solid #2a2a2a; pointer-events:none; user-select:none; z-index:2; }
 #editorBackdrop mark { background:rgba(95,140,255,.35); color:transparent; border-radius:2px; }
 #editorBackdrop mark.current { background:rgba(255,180,84,.55); }
 #imagePreview { display:none; flex:1; min-height:0; width:100%; object-fit:contain; background:#181818; padding:10px; }
