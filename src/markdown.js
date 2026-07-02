@@ -52,6 +52,43 @@
 
   const LIST_ITEM = /^\s*([-*+]|\d+[.)])\s+/;
 
+  // --- GFM pipe tables ---
+  // Cells of one row: outer pipes stripped, escaped \| kept as a literal pipe (protected with a
+  // NUL placeholder through the split — NUL can't survive in real text files).
+  function splitTableRow(line) {
+    // Escaped backslashes are protected FIRST so \\| reads as a literal backslash followed by
+    // a real cell delimiter (GFM), not an escaped pipe. Then \| pipes are protected, then the
+    // outer pipes stripped - a row ending in \| with no closing outer pipe keeps its pipe.
+    let s = line.trim().replace(/\\\\/g, '\u0001').replace(/\\\|/g, '\u0000');
+    if (s.startsWith('|')) s = s.slice(1);
+    if (s.endsWith('|')) s = s.slice(0, -1);
+    return s.split('|').map((c) => c.replace(/\u0000/g, '|').replace(/\u0001/g, '\\\\').trim());
+  }
+
+  // A pipe that actually delimits cells — an escaped \| in prose must not smell like a table.
+  // An even number of backslashes before the pipe (\\| etc.) means the pipe itself is NOT escaped.
+  const UNESCAPED_PIPE = /(?<!\\)(?:\\\\)*\|/;
+
+  // The delimiter row under the header (e.g. |---|:--:|). Cell count must match the header's —
+  // that's what keeps a lone --- (rule) or a stray pipe in prose from being misread as a table.
+  function tableAligns(delimLine, headerCount) {
+    if (!delimLine || !UNESCAPED_PIPE.test(delimLine)) return null;
+    const cells = splitTableRow(delimLine);
+    if (cells.length !== headerCount || !cells.every((c) => /^:?-+:?$/.test(c))) return null;
+    return cells.map((c) => {
+      const l = c.startsWith(':'); const r = c.endsWith(':');
+      return l && r ? 'center' : r ? 'right' : l ? 'left' : '';
+    });
+  }
+
+  // Start of a non-paragraph block (blank, fence, heading, rule, quote, list): ends a table body
+  // per GFM ("broken at the first empty line or beginning of another block-level structure") and
+  // ends paragraph continuation.
+  function isBlockBoundary(l) {
+    return /^\s*$/.test(l) || /^(```|~~~)/.test(l) || /^#{1,6}\s+/.test(l) ||
+           /^\s*([-*_])(\s*\1){2,}\s*$/.test(l) || /^\s*>/.test(l) || LIST_ITEM.test(l);
+  }
+
   function render(src) {
     const lines = String(src == null ? '' : src).replace(/\r\n?/g, '\n').split('\n');
     const out = [];
@@ -95,10 +132,33 @@
         continue;
       }
 
+      // GFM table: a header row containing |, then a matching delimiter row, then body rows until
+      // a block boundary (a pipe-less prose line is still a single-cell row, per GFM). Body cells
+      // are padded/truncated to the header's column count.
+      if (UNESCAPED_PIPE.test(line)) {
+        const headerCells = splitTableRow(line);
+        const aligns = tableAligns(lines[i + 1], headerCells.length);
+        if (aligns) {
+          i += 2;
+          const rows = [];
+          while (i < lines.length && !isBlockBoundary(lines[i])) {
+            rows.push(splitTableRow(lines[i]));
+            i++;
+          }
+          const attr = (k) => (aligns[k] ? ` style="text-align:${aligns[k]}"` : '');
+          const head = headerCells.map((c, k) => `<th${attr(k)}>${inline(c)}</th>`).join('');
+          const body = rows.map((r) =>
+            `<tr>${headerCells.map((_c, k) => `<td${attr(k)}>${inline(r[k] ?? '')}</td>`).join('')}</tr>`
+          ).join('');
+          out.push(`<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`);
+          continue;
+        }
+      }
+
       const buf = [line];
       i++;
-      while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^(```|~~~)/.test(lines[i]) &&
-             !/^#{1,6}\s+/.test(lines[i]) && !/^\s*>/.test(lines[i]) && !LIST_ITEM.test(lines[i])) {
+      while (i < lines.length && !isBlockBoundary(lines[i]) &&
+             !(UNESCAPED_PIPE.test(lines[i]) && tableAligns(lines[i + 1], splitTableRow(lines[i]).length))) {
         buf.push(lines[i]); i++;
       }
       out.push(`<p>${inline(buf.join('\n')).replace(/\n/g, '<br>')}</p>`);
