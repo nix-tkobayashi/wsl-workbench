@@ -52,7 +52,11 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .find-expand { transition: transform .12s ease; }
 #findWidget.with-replace .find-expand { transform: rotate(90deg); }
 #editorBar { height:30px; padding:0 4px; border-bottom:1px solid var(--border); color:var(--muted); font-size:12px; display:flex; align-items:center; overflow:hidden; }
-#editorTabList { display:flex; gap:2px; min-width:0; flex:1 1 auto; overflow-x:auto; height:100%; align-items:center; }
+/* The tab strip scrolls horizontally but draws NO scrollbars: inside the 30px bar a horizontal bar
+   squeezes the tabs (and a vertical one can appear). Scrolling still works via the mouse wheel
+   (wheel handler in renderer.js) and the active tab is kept in view by scrollIntoView. */
+#editorTabList { display:flex; gap:2px; min-width:0; flex:1 1 auto; overflow-x:auto; overflow-y:hidden; height:100%; align-items:center; scrollbar-width:none; }
+#editorTabList::-webkit-scrollbar { display:none; }
 /* Preview/Edit toggle at the right of the editor bar; shown only for Markdown files (via JS). */
 .editor-toolbtn { flex:0 0 auto; height:22px; margin-left:8px; padding:0 10px; background:#2a2a2a; border:1px solid #444; border-radius:4px; color:var(--text); font-size:12px; cursor:pointer; }
 .editor-toolbtn:hover { background:#3a3a3a; }
