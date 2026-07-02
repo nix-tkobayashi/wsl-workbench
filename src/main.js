@@ -22,7 +22,7 @@ const WSLG_WAYLAND_FIX =
 const DEFAULT_WSL_PATH = process.env.WSLWB_PATH || `/home/${os.userInfo().username}/projects`;
 const DEFAULT_WSL_HOME_PATH = process.env.WSLWB_HOME_PATH || `/home/${os.userInfo().username}`;
 
-const WORKSPACE_EXT = 'wslwb-workspace';
+const { WORKSPACE_EXT } = require('./workspace-args'); // single source for the extension + argv parsing
 
 const windowState = new Map();
 
@@ -38,7 +38,13 @@ function readSettings() {
 function writeSettings(patch) {
   try {
     const next = { ...readSettings(), ...patch };
-    fs.writeFileSync(settingsPath(), JSON.stringify(next, null, 2), 'utf8');
+    // Atomic write (temp file + rename): session saves hit this frequently, and a crash mid-write
+    // must not leave settings.json truncated — readSettings() would silently reset to {} and the
+    // next write would permanently drop everything else (language, recents, sessions).
+    const target = settingsPath();
+    const tmp = `${target}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8');
+    fs.renameSync(tmp, target);
   } catch (error) {
     console.error('Failed to write settings:', error);
   }
@@ -65,23 +71,14 @@ function defaultWorkspace() {
   return { distro: DEFAULT_DISTRO, wslPath: DEFAULT_WSL_PATH };
 }
 
-const WORKSPACE_EXTENSIONS = new Set([`.${WORKSPACE_EXT}`, '.json']);
-
-function isWorkspaceFile(filePath) {
-  if (!filePath) return false;
-  const ext = path.extname(filePath).toLowerCase();
-  if (!WORKSPACE_EXTENSIONS.has(ext)) return false;
-  try { return fs.statSync(filePath).isFile(); } catch { return false; }
-}
+// findWorkspaceArg comes from workspace-args.js too (unit-tested; it also parses the argv the
+// 'second-instance' event forwards, which carries Chromium switches).
+const { findWorkspaceArg } = require('./workspace-args');
 
 function readWorkspaceFile(filePath, fallback = defaultWorkspace()) {
   const raw = fs.readFileSync(filePath, 'utf8');
   const data = JSON.parse(raw);
   return normalizeWorkspace(data, fallback);
-}
-
-function findWorkspaceArg(argv = process.argv) {
-  return argv.find((arg) => isWorkspaceFile(arg));
 }
 
 function normalizeWorkspace(next = {}, fallback = defaultWorkspace()) {
@@ -123,11 +120,25 @@ function getDefaultOpenWorkspacePath(distro = DEFAULT_DISTRO) {
   return wslPathToWindowsFsPath(distro, DEFAULT_WSL_HOME_PATH);
 }
 
+// Track opened workspaces in settings: `recentWorkspaces` feeds the landing screen's quick-open
+// list, `lastWorkspace` lets the next launch restore where the user left off.
+const RECENT_WORKSPACES_MAX = 8;
+function rememberWorkspace(ws) {
+  const workspace = normalizeWorkspace(ws);
+  const key = `${workspace.distro}:${workspace.wslPath}`;
+  const prev = readSettings().recentWorkspaces;
+  const list = Array.isArray(prev) ? prev : [];
+  const next = [workspace, ...list.filter((e) => e && `${e.distro}:${e.wslPath}` !== key)].slice(0, RECENT_WORKSPACES_MAX);
+  writeSettings({ recentWorkspaces: next, lastWorkspace: workspace });
+}
+
 function setCurrentWorkspaceForWindow(win, next) {
   const state = windowState.get(win.id);
   if (!state) return;
   state.workspace = normalizeWorkspace(next, state.workspace);
   state.showLanding = false;
+  // NOT remembered here: the renderer may still reject this switch (dirty-tab discard prompt).
+  // rememberWorkspace() runs on terminal:start, which only fires once a workspace is really applied.
   if (!win.isDestroyed()) {
     win.webContents.send('workspace:changed', { ...state.workspace });
   }
@@ -645,21 +656,53 @@ function buildAppMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-app.whenReady().then(() => {
-  initLanguage();
-  const workspaceFile = findWorkspaceArg(process.argv);
-  if (workspaceFile) {
-    try {
-      // Launched via a workspace file (e.g. file association): open it directly.
-      createWindow(readWorkspaceFile(workspaceFile), { showLanding: false });
-      return;
-    } catch (error) {
-      dialog.showErrorBox(tr('dialog.openFileFailed'), error.message || String(error));
+// Single instance: launching the exe again (app icon, .wslwb-workspace double-click) must not boot
+// a whole second Electron — main + GPU + utility processes cost hundreds of MB per instance. The
+// second launch forwards its argv here and exits; this first instance opens the requested window
+// (only a renderer process is added, everything else is shared).
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv) => {
+    const workspaceFile = findWorkspaceArg(argv);
+    if (workspaceFile) {
+      try {
+        createWindow(readWorkspaceFile(workspaceFile), { showLanding: false });
+        return;
+      } catch (error) {
+        dialog.showErrorBox(tr('dialog.openFileFailed'), error.message || String(error));
+      }
     }
-  }
-  // Normal launch: start on the landing screen so the user picks a workspace.
-  createWindow(defaultWorkspace(), { showLanding: true });
-});
+    // Plain re-launch: a fresh landing window (recents are one click away). Not the last workspace —
+    // that's already open in this instance, so restoring it here would just duplicate the window.
+    createWindow(defaultWorkspace(), { showLanding: true });
+  });
+
+  app.whenReady().then(() => {
+    initLanguage();
+    const workspaceFile = findWorkspaceArg(process.argv);
+    if (workspaceFile) {
+      try {
+        // Launched via a workspace file (e.g. file association): open it directly.
+        createWindow(readWorkspaceFile(workspaceFile), { showLanding: false });
+        return;
+      } catch (error) {
+        dialog.showErrorBox(tr('dialog.openFileFailed'), error.message || String(error));
+      }
+    }
+    // Normal launch: restore the last workspace when it still exists; otherwise start on the
+    // landing screen so the user picks one. (The Workspace menu can always open a different one.)
+    const last = readSettings().lastWorkspace;
+    if (last && last.wslPath) {
+      const stat = safeStat(wslPathToWindowsFsPath(last.distro || DEFAULT_DISTRO, last.wslPath));
+      if (stat && stat.isDirectory()) {
+        createWindow(normalizeWorkspace(last), { showLanding: false });
+        return;
+      }
+    }
+    createWindow(defaultWorkspace(), { showLanding: true });
+  });
+}
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(defaultWorkspace(), { showLanding: true }); });
 
@@ -727,6 +770,45 @@ ipcMain.handle('workspace:clone', async (event, { distro = DEFAULT_DISTRO, paren
 
   setCurrentWorkspaceForWindow(win, { distro, wslPath: targetWslPath });
   return { ok: true, wslPath: targetWslPath, name };
+});
+
+// Recent workspaces for the landing screen, filtered to directories that still exist.
+ipcMain.handle('workspace:recent', () => {
+  const list = readSettings().recentWorkspaces;
+  if (!Array.isArray(list)) return [];
+  return list.filter((e) => {
+    if (!e || !e.wslPath) return false;
+    const stat = safeStat(wslPathToWindowsFsPath(e.distro || DEFAULT_DISTRO, e.wslPath));
+    return !!stat && stat.isDirectory();
+  }).map((e) => ({ distro: e.distro || DEFAULT_DISTRO, wslPath: e.wslPath }));
+});
+
+// Open one of the recent workspaces (clicked on the landing screen).
+ipcMain.handle('workspace:openRecent', (event, { distro = DEFAULT_DISTRO, wslPath } = {}) => {
+  const { win } = getStateForWebContents(event.sender);
+  if (!wslPath) throw new Error('wslPath is required.');
+  const stat = safeStat(wslPathToWindowsFsPath(distro, wslPath));
+  if (!stat || !stat.isDirectory()) throw new Error(`Workspace not found: ${wslPath}`);
+  setCurrentWorkspaceForWindow(win, { distro, wslPath });
+  return { ok: true };
+});
+
+// --- Editor session persistence: which files were open per workspace, restored on reopen. ---
+const SESSION_TABS_MAX = 15;
+const SESSION_KEYS_MAX = 20;
+ipcMain.on('session:save', (_event, { key, tabs, active } = {}) => {
+  if (typeof key !== 'string' || !key) return;
+  const cleanTabs = (Array.isArray(tabs) ? tabs : []).filter((p) => typeof p === 'string').slice(0, SESSION_TABS_MAX);
+  const sessions = { ...(readSettings().sessions || {}) };
+  sessions[key] = { tabs: cleanTabs, active: typeof active === 'string' ? active : null, ts: Date.now() };
+  // Cap stored workspaces, dropping the least recently saved.
+  const keys = Object.keys(sessions).sort((a, b) => (sessions[b].ts || 0) - (sessions[a].ts || 0));
+  for (const k of keys.slice(SESSION_KEYS_MAX)) delete sessions[k];
+  writeSettings({ sessions });
+});
+ipcMain.handle('session:get', (_event, { key } = {}) => {
+  if (typeof key !== 'string' || !key) return null;
+  return (readSettings().sessions || {})[key] || null;
 });
 
 // Re-assert renderer state as the source of truth (e.g. the user cancelled a discard prompt, or a
@@ -1025,6 +1107,9 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '' }) => {
   const { win, state } = getStateForWebContents(event.sender);
   const workspace = normalizeWorkspace({ distro, wslPath }, state.workspace);
   state.workspace = workspace;
+  // The renderer starts a terminal only after a workspace switch is really applied (a rejected
+  // dirty-tab discard never gets here), so THIS is where recents/lastWorkspace are recorded.
+  rememberWorkspace(workspace);
   const existing = state.terminals.get(id);
   if (existing) {
     try { existing.kill(); } catch {}

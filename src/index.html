@@ -34,6 +34,7 @@
       <section id="editorPane">
         <div id="editorBar">
           <div id="editorTabList"></div>
+          <button id="wrapToggle" class="editor-toolbtn hidden" data-i18n="editor.wrap">Wrap</button>
           <button id="previewToggle" class="editor-toolbtn hidden" data-i18n="editor.preview">Preview</button>
         </div>
         <div id="findWidget" class="hidden">
@@ -54,6 +55,7 @@
         </div>
         <div id="editorScroll">
           <div id="editorGutter" aria-hidden="true"></div>
+          <div id="editorMeasure" aria-hidden="true"></div>
           <div id="editorBackdrop" aria-hidden="true"></div>
           <textarea id="editor" spellcheck="false" data-i18n-placeholder="editor.placeholder" placeholder="Select a text file from the left tree."></textarea>
           <div id="editorPreview" class="hidden"></div>
@@ -88,6 +90,10 @@
         <button id="landingOpenWorkspace" class="primary" data-i18n="landing.openWorkspace">Open Workspace…</button>
         <button id="landingOpenFile" data-i18n="landing.openWorkspaceFile">Open Workspace File…</button>
         <button id="landingClone" data-i18n="landing.cloneRepo">Clone Repository…</button>
+      </div>
+      <div id="landingRecent" class="landing-recent hidden">
+        <div class="landing-recent-title" data-i18n="landing.recent">Recent Workspaces</div>
+        <div id="landingRecentList"></div>
       </div>
     </div>
   </div>

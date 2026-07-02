@@ -12,15 +12,74 @@ const editor = document.getElementById('editor');
 const editorScroll = document.getElementById('editorScroll');
 const editorBackdrop = document.getElementById('editorBackdrop');
 const editorGutter = document.getElementById('editorGutter');
+const editorMeasure = document.getElementById('editorMeasure');
 const imagePreview = document.getElementById('imagePreview');
 const editorPreview = document.getElementById('editorPreview');
 const previewToggle = document.getElementById('previewToggle');
+const wrapToggle = document.getElementById('wrapToggle');
 let gutterLineCount = -1;
 let previewMode = false; // Markdown preview on/off (applies only while a Markdown file is active)
+let wrapMode = localStorage.getItem('editorWrap') === '1'; // soft-wrap long lines in the viewer
+let editorRenderedFor = null; // tab path the textarea currently holds; guards undo-destroying rewrites
 
 // Render the line-number gutter (only when the line count changes) and keep the editors' left padding
 // matched to its width. Called whenever editor content is loaded or edited.
+// Wrap-mode gutter: a logical line can span several visual rows, so the browser wraps each
+// candidate line inside the hidden #editorMeasure layer (same metrics/width as the textarea) and
+// the gutter gets blank rows after each number to match — numbers stay aligned with the first
+// visual row of their line. Short lines that cannot possibly wrap (even if every char were
+// fullwidth CJK ~15px) skip measurement, so typical files only measure their long lines.
+function renderWrappedGutter() {
+  if (!editorPreview.classList.contains('hidden')) { editorGutter.style.display = 'none'; return; }
+  const lines = editor.value.split('\n');
+  const n = lines.length;
+  // Width/padding first (same formula as the unwrapped path): the left padding defines the
+  // textarea's content width, which defines where lines wrap — measure only after applying it.
+  const width = Math.max(40, String(n).length * 8 + 20);
+  const pad = (width + 6) + 'px';
+  editorGutter.style.display = '';
+  editorGutter.style.width = width + 'px';
+  editor.style.paddingLeft = pad;
+  editorBackdrop.style.paddingLeft = pad;
+  editorMeasure.style.width = editor.clientWidth + 'px';
+  editorMeasure.style.paddingLeft = pad;
+  editorMeasure.style.paddingRight = '10px';
+  const contentWidth = editor.clientWidth - (width + 6) - 10;
+  const measured = new Map(); // line index -> measuring div
+  const frag = document.createDocumentFragment();
+  lines.forEach((line, idx) => {
+    const cols = line.includes('\t') ? line.replace(/\t/g, '  ').length : line.length;
+    if (cols * 15 <= contentWidth) return; // can't wrap even at max glyph width
+    const div = document.createElement('div');
+    div.textContent = line;
+    frag.appendChild(div);
+    measured.set(idx, div);
+  });
+  editorMeasure.replaceChildren(frag);
+  const rowH = parseFloat(getComputedStyle(editorMeasure).lineHeight) || 19;
+  const nums = [];
+  lines.forEach((line, idx) => {
+    nums.push(String(idx + 1));
+    const div = measured.get(idx);
+    if (!div) return;
+    const rows = Math.max(1, Math.round(div.getBoundingClientRect().height / rowH));
+    for (let k = 1; k < rows; k++) nums.push('');
+  });
+  editorGutter.textContent = nums.join('\n');
+  editorMeasure.replaceChildren(); // drop the measuring DOM
+}
+
 function renderGutter() {
+  editorScroll.classList.toggle('wrap', wrapMode);
+  if (wrapMode) {
+    renderWrappedGutter();
+    gutterLineCount = -1; // wrapped row counts change with edits inside a line: always recompute
+    syncEditorOverlays();
+    return;
+  }
+  // Don't re-show the gutter over the Markdown preview (showMarkdownPreview hid it; renderGutter
+  // runs after it in renderActiveEditor and would otherwise get the final say).
+  editorGutter.style.display = editorPreview.classList.contains('hidden') ? '' : 'none';
   const n = editor.value ? (editor.value.match(/\n/g) || []).length + 1 : 1;
   if (n !== gutterLineCount) {
     gutterLineCount = n;
@@ -432,9 +491,11 @@ function renderActiveEditor() {
     showImagePreview(false);
     imagePreview.removeAttribute('src');
     editor.value = '';
+    editorRenderedFor = null;
     editor.disabled = false;
     showMarkdownPreview(false);
     previewToggle.classList.add('hidden');
+    wrapToggle.classList.add('hidden');
     refreshEditorTabs();
     renderGutter();
     syncFindToActiveEditor();
@@ -446,11 +507,21 @@ function renderActiveEditor() {
     editor.disabled = false;
     showMarkdownPreview(false);
     previewToggle.classList.add('hidden');
+    wrapToggle.classList.add('hidden');
   } else {
     showImagePreview(false);
     imagePreview.removeAttribute('src');
-    editor.value = tab.value || '';
+    // Rewrite the textarea only when it holds a different tab or stale content: assigning .value
+    // clears the browser's undo stack, so a same-tab re-render (preview toggle, tab strip updates)
+    // must leave it untouched to keep Ctrl+Z working.
+    const nextValue = tab.value || '';
+    if (editorRenderedFor !== tab.path || editor.value !== nextValue) {
+      editor.value = nextValue;
+      editorRenderedFor = tab.path;
+    }
     editor.disabled = !!tab.disabled;
+    wrapToggle.classList.toggle('hidden', !!tab.disabled);
+    wrapToggle.classList.toggle('active', wrapMode);
     const isMd = activeTabIsMarkdown();
     previewToggle.classList.toggle('hidden', !isMd);
     const showPreview = previewMode && isMd;
@@ -494,6 +565,62 @@ function activateEditorTab(path) {
   selectedPath = path;
   renderActiveEditor();
   highlightTreeRow(path);
+  scheduleSessionSave();
+}
+
+// --- Editor session: remember which files are open (and which is active) per workspace, so
+// reopening the workspace restores them. Saves are debounced and keyed/captured at schedule time,
+// so a save can't record one workspace's tabs under another's key if the workspace switches before
+// the timer fires. disposeAllEditorTabs deliberately does NOT save: clearing tabs on a workspace
+// switch must not wipe the outgoing workspace's stored session.
+let sessionSaveTimer = null;
+let sessionSavePending = null; // the payload the debounce timer will write ({ key, tabs, active })
+// Counter, not a boolean: a workspace switch can start restore B while restore A is still winding
+// down, and A's exit must not unsuppress saves while B is mid-restore.
+let restoringSessionDepth = 0;
+function sessionKey() { return config ? `${config.distro}:${config.wslPath}` : null; }
+function flushSessionSave() {
+  clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = null;
+  if (sessionSavePending) window.api.sessionSave(sessionSavePending);
+  sessionSavePending = null;
+}
+function scheduleSessionSave() {
+  if (!config || restoringSessionDepth > 0) return;
+  const key = sessionKey();
+  // A pending save for a DIFFERENT workspace must be written out, not debounce-cancelled — else
+  // switching workspaces within the debounce window drops the outgoing workspace's last tab state.
+  if (sessionSavePending && sessionSavePending.key !== key) flushSessionSave();
+  sessionSavePending = { key, tabs: [...editorTabs.keys()], active: selectedPath };
+  clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = setTimeout(flushSessionSave, 300);
+}
+async function restoreEditorSession() {
+  const cfg = config;
+  if (!cfg) return;
+  let saved = null;
+  try { saved = await window.api.sessionGet({ key: `${cfg.distro}:${cfg.wslPath}` }); } catch { return; }
+  if (!saved || !Array.isArray(saved.tabs) || !saved.tabs.length) return;
+  restoringSessionDepth++; // the opens below must not re-save the half-restored state
+  try {
+    for (const p of saved.tabs) {
+      if (config !== cfg) return; // workspace switched mid-restore; stop opening old tabs
+      if (typeof p !== 'string' || editorTabs.has(p)) continue;
+      let st = null;
+      try { st = await window.api.statFile({ distro: cfg.distro, wslPath: p }); } catch { continue; }
+      // Re-check after the await: a switch during statFile must not open an old-workspace path
+      // via openFileInEditor, which reads the (now new) global config.
+      if (config !== cfg) return;
+      if (!st) continue; // deleted since the last session
+      await openFileInEditor({ path: p, type: 'file' });
+    }
+    if (config === cfg && typeof saved.active === 'string' && editorTabs.has(saved.active)) {
+      activateEditorTab(saved.active);
+    }
+  } finally {
+    restoringSessionDepth--;
+  }
+  if (config === cfg) scheduleSessionSave(); // normalize the stored list (drops now-missing files)
 }
 
 // Open a file in a tab (or activate its existing tab). Replaces the old single-file loadFile.
@@ -509,21 +636,26 @@ async function openFileInEditor(node) {
   renderActiveEditor();
   highlightTreeRow(node.path);
 
+  // Snapshot the workspace for ALL reads below: a workspace switch mid-open must not make a later
+  // read resolve the old path against the NEW distro (the switch also disposes this tab, and the
+  // final render below is already guarded, so the loaded bytes are simply discarded).
+  const cfg = config;
   let disabled = false;
   if (window.fileTypes.isImagePath(node.path)) {
-    try { tab.imageSrc = await window.api.readImage({ distro: config.distro, wslPath: node.path }); tab.isImage = true; }
+    try { tab.imageSrc = await window.api.readImage({ distro: cfg.distro, wslPath: node.path }); tab.isImage = true; }
     catch (error) { tab.value = String(error.message || error); disabled = true; }
   } else {
     try {
       // Fingerprint BEFORE reading: if the file changes during the read, the baseline stays older
       // than disk so the next poll re-detects and reloads (never records new mtime with stale text).
-      const st = await window.api.statFile({ distro: config.distro, wslPath: node.path });
-      tab.value = await window.api.readFile({ distro: config.distro, wslPath: node.path });
+      const st = await window.api.statFile({ distro: cfg.distro, wslPath: node.path });
+      tab.value = await window.api.readFile({ distro: cfg.distro, wslPath: node.path });
       if (st) { tab.mtimeMs = st.mtimeMs; tab.size = st.size; }
     } catch (error) { tab.value = String(error.message || error); disabled = true; }
   }
   tab.disabled = disabled; // editable once loaded (unless the read failed)
   if (editorTabs.get(node.path) === tab && selectedPath === node.path) renderActiveEditor();
+  scheduleSessionSave();
 }
 
 function closeEditorTab(path) {
@@ -537,6 +669,7 @@ function closeEditorTab(path) {
     renderActiveEditor();
     highlightTreeRow(selectedPath);
   }
+  scheduleSessionSave();
 }
 
 function disposeAllEditorTabs() {
@@ -561,6 +694,7 @@ function closeEditorTabsUnder(targetPath) {
     renderActiveEditor();
     highlightTreeRow(selectedPath);
   }
+  scheduleSessionSave();
 }
 
 // Re-key tabs after a rename/move (file or directory): oldPath prefix -> newPath.
@@ -576,8 +710,10 @@ function retargetEditorTabs(oldPath, newPath) {
       label.title = np;
       editorTabs.set(np, tab);
       if (selectedPath === p) selectedPath = np;
+      if (editorRenderedFor === p) editorRenderedFor = np; // renamed, not new content: keep undo intact
     }
   }
+  scheduleSessionSave();
   // Keep the tree's expanded state in sync so a renamed/moved directory stays open and the
   // active descendant row still renders (and gets re-highlighted) after renderTree().
   for (const p of [...expanded]) {
@@ -625,6 +761,27 @@ async function saveCurrentFile() {
   }
 }
 
+// Replace the textarea's whole content as a single *undoable* edit (select-all + insertText), so a
+// disk reload doesn't wipe the undo stack — Ctrl+Z can restore what the buffer held before it.
+// Falls back to a plain .value assignment (undo is lost, content is right) when insertText is
+// unavailable, e.g. while the textarea is hidden behind the Markdown preview.
+function replaceEditorValuePreservingUndo(next) {
+  const prevFocus = document.activeElement;
+  editor.focus();
+  // insertText targets document.activeElement; if focus didn't land on the editor (hidden, etc.),
+  // aborting to the fallback keeps us from typing into whatever IS focused (e.g. the terminal).
+  if (document.activeElement !== editor) {
+    editor.value = next;
+  } else {
+    editor.select();
+    let ok = false;
+    try { ok = next ? document.execCommand('insertText', false, next) : document.execCommand('delete'); }
+    catch { ok = false; }
+    if (!ok || editor.value !== next) editor.value = next;
+  }
+  if (prevFocus && prevFocus !== editor && typeof prevFocus.focus === 'function') prevFocus.focus();
+}
+
 // Re-read a tab from disk, discarding in-memory edits, and refresh the view if it's active. `force`
 // (a user-confirmed reload) overrides the guard that protects edits made during the async read.
 async function reloadTabFromDisk(tab, { force = false } = {}) {
@@ -639,6 +796,12 @@ async function reloadTabFromDisk(tab, { force = false } = {}) {
     if (!force && tab.dirty) { tab.externallyChanged = true; updateEditorTabEl(tab); return; }
     tab.value = content;
     if (st) { tab.mtimeMs = st.mtimeMs; tab.size = st.size; }
+    // Active tab: swap the buffer as one undoable edit BEFORE renderActiveEditor — it then sees
+    // editor.value === tab.value and leaves the textarea (and its undo stack) alone. The insertText
+    // fires the 'input' listener (setDirty(true)), so dirty is cleared after, not before.
+    if (tab.path === selectedPath && !tab.isImage && editorRenderedFor === tab.path) {
+      replaceEditorValuePreservingUndo(content);
+    }
     tab.dirty = false;
     tab.externallyChanged = false;
     if (tab.path === selectedPath) renderActiveEditor();
@@ -845,11 +1008,26 @@ function closeFind() {
   if (editorIsTextEditable()) editor.focus();
 }
 
+// Replace [start,end) in the textarea as an undoable edit (selection + insertText/delete); falls
+// back to rebuilding .value (which loses undo) if the command is unavailable.
+function replaceEditorRangePreservingUndo(start, end, text) {
+  const prevFocus = document.activeElement;
+  editor.focus();
+  let ok = false;
+  if (document.activeElement === editor) {
+    editor.setSelectionRange(start, end);
+    try { ok = text ? document.execCommand('insertText', false, text) : document.execCommand('delete'); }
+    catch { ok = false; }
+  }
+  if (!ok) editor.value = editor.value.slice(0, start) + text + editor.value.slice(end);
+  if (prevFocus && prevFocus !== editor && typeof prevFocus.focus === 'function') prevFocus.focus();
+}
+
 function replaceCurrentMatch() {
   if (!editorIsTextEditable() || !findMatches.length) return;
   const m = findMatches[findIndex] || findMatches[0];
   const rep = replaceInput.value;
-  editor.value = editor.value.slice(0, m.start) + rep + editor.value.slice(m.end);
+  replaceEditorRangePreservingUndo(m.start, m.end, rep);
   setDirty(true);
   renderGutter();
   const caretAfter = m.start + rep.length;
@@ -867,7 +1045,7 @@ function replaceAllMatches() {
   const rep = replaceInput.value;
   let v = editor.value;
   for (let i = findMatches.length - 1; i >= 0; i--) v = v.slice(0, findMatches[i].start) + rep + v.slice(findMatches[i].end);
-  editor.value = v;
+  replaceEditorValuePreservingUndo(v); // one undoable edit for the whole replace-all
   setDirty(true);
   renderGutter();
   // The replacement text may itself contain the search string; show/select any remaining matches.
@@ -878,6 +1056,14 @@ function replaceAllMatches() {
 }
 
 editor.addEventListener('scroll', syncEditorOverlays);
+// Wrapping depends on the editor's width, so pane/window resizes must re-measure the wrap-mode
+// gutter (rAF-throttled: ResizeObserver fires every frame during a resizer drag).
+let gutterResizeQueued = false;
+new ResizeObserver(() => {
+  if (!wrapMode || gutterResizeQueued) return;
+  gutterResizeQueued = true;
+  requestAnimationFrame(() => { gutterResizeQueued = false; if (wrapMode) renderGutter(); });
+}).observe(editorScroll);
 findInput.addEventListener('input', () => refreshFind(true));
 findCaseBtn.addEventListener('click', () => {
   findCaseSensitive = !findCaseSensitive;
@@ -1207,6 +1393,7 @@ async function applyWorkspace(nextConfig) {
     } else {
       landing.classList.remove('hidden');
       updateWorkspaceName();
+      renderLandingRecent();
       window.api.resyncWorkspace({ showLanding: true });
     }
     return;
@@ -1215,6 +1402,7 @@ async function applyWorkspace(nextConfig) {
   disposeAllEditorTabs(); // close the previous workspace's editor tabs
   disposeAllTerminals();  // close the previous workspace's terminals, open one fresh
   createTerminal();
+  restoreEditorSession(); // reopen the files that were open here last time (async, best-effort)
 }
 
 function initResizers() {
@@ -1291,6 +1479,13 @@ function initEditorPreview() {
     previewMode = !previewMode;
     renderActiveEditor();
   });
+  // Word-wrap toggle: purely visual (soft wrap), persisted across sessions.
+  wrapToggle.addEventListener('click', () => {
+    wrapMode = !wrapMode;
+    localStorage.setItem('editorWrap', wrapMode ? '1' : '0');
+    wrapToggle.classList.toggle('active', wrapMode);
+    renderGutter();
+  });
   editorPreview.addEventListener('click', (event) => {
     const anchor = event.target.closest('a');
     if (!anchor) return;
@@ -1306,6 +1501,32 @@ function initLanding() {
   document.getElementById('landingOpenWorkspace').addEventListener('click', () => window.api.openWorkspace());
   document.getElementById('landingOpenFile').addEventListener('click', () => window.api.openWorkspaceFile());
   document.getElementById('landingClone').addEventListener('click', cloneRepoFlow);
+}
+
+// Populate the landing screen's recent-workspaces list (hidden when there are none).
+// Clicking an entry opens it exactly like the dialogs do (main broadcasts workspace:changed).
+async function renderLandingRecent() {
+  const box = document.getElementById('landingRecent');
+  const list = document.getElementById('landingRecentList');
+  let items = [];
+  try { items = await window.api.recentWorkspaces(); } catch { items = []; }
+  list.textContent = '';
+  box.classList.toggle('hidden', !items.length);
+  for (const item of items) {
+    const btn = document.createElement('button');
+    btn.className = 'landing-recent-item';
+    btn.textContent = `${item.distro}:${item.wslPath}`;
+    btn.title = btn.textContent;
+    btn.addEventListener('click', async () => {
+      try {
+        await window.api.openRecentWorkspace(item);
+      } catch (error) {
+        alert(error.message || String(error));
+        renderLandingRecent(); // e.g. the directory disappeared; refresh the list
+      }
+    });
+    list.appendChild(btn);
+  }
 }
 
 // Landing "Clone Repository": ask for a Git URL, pick the destination parent folder, then clone. On
@@ -1581,6 +1802,7 @@ document.getElementById('claudeBtn').addEventListener('click', () => {
     config = null; // no active workspace yet; the landing screen drives the next step
     landing.classList.remove('hidden');
     updateWorkspaceName();
+    renderLandingRecent();
     return;
   }
   landing.classList.add('hidden');
@@ -1588,4 +1810,5 @@ document.getElementById('claudeBtn').addEventListener('click', () => {
   expanded.add(config.wslPath);
   await renderTree();
   createTerminal();
+  restoreEditorSession(); // reopen this workspace's files from the last session
 })();
