@@ -127,6 +127,14 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
 
+## v0.13.0
+
+- **Single instance**: launching the app again (app icon or a `.wslwb-workspace` file) no longer boots a second full Electron (saving hundreds of MB) — the running instance opens a new window instead.
+- **Session restore**: the app reopens the last workspace on startup, and each workspace remembers which files were open (and which was active).
+- **Recent Workspaces** on the start screen — one click to reopen.
+- **Word wrap** toggle in the editor bar. Line numbers stay visible and correctly aligned with wrapped lines.
+- **Undo protection**: reloads after external changes (e.g. the AI CLI editing an open file) and Replace / Replace All are now single undoable edits — Ctrl+Z restores the previous buffer. Preview toggling no longer clears undo history.
+
 ## v0.12.3
 
 - Fixed a right-click in the terminal pasting the clipboard when a mouse-reporting app (e.g. Claude Code) was running: right-click is now left to the app in that mode, so it no longer pastes over the app's own selection. At a normal prompt, right-click still copies the selection (or pastes when there's none). Ctrl+V pastes in either mode.

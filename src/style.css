@@ -74,6 +74,14 @@ button:disabled { opacity:.45; cursor:not-allowed; }
    render light when the Windows "app mode" is Light, showing white bars on the dark UI). Scoped to
    these two elements so nothing else is affected. */
 #editor, .xterm-viewport { color-scheme: dark; }
+/* Word-wrap mode: soft-wrap long lines instead of horizontal scrolling. The backdrop must wrap
+   identically so find-highlight positions keep matching the textarea. Line numbers stay visible:
+   renderGutter() measures each logical line's wrapped height via #editorMeasure and pads the gutter
+   with blank rows so the numbers align with the first visual row of each line. */
+#editorScroll.wrap #editor, #editorScroll.wrap #editorBackdrop { white-space:pre-wrap; overflow-wrap:break-word; }
+/* Off-screen measuring layer for wrapped-line heights: identical text metrics + wrap rules as the
+   textarea (widths/paddings are synced inline by renderGutter), hidden but still laid out. */
+#editorMeasure { position:absolute; top:0; left:0; box-sizing:border-box; visibility:hidden; pointer-events:none; user-select:none; font-family: Consolas, "Cascadia Mono", monospace; font-size:13px; line-height:1.45; tab-size:2; white-space:pre-wrap; overflow-wrap:break-word; }
 /* Markdown preview: overlays the editor area (same #editorScroll box) when toggled on. */
 #editorPreview { position:absolute; inset:0; margin:0; padding:12px 18px; overflow:auto; color:var(--text); background:#181818; font-family:"Segoe UI",sans-serif; font-size:14px; line-height:1.6; }
 #editorPreview.hidden { display:none; }
@@ -155,6 +163,12 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .landing-actions button { padding:11px 20px; font-size:14px; }
 .landing-actions button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
 .landing-actions button.primary:hover:not(:disabled) { background:#739bff; }
+/* Recent workspaces under the landing buttons: a compact clickable list (hidden when empty). */
+.landing-recent { margin-top:28px; text-align:left; }
+.landing-recent.hidden { display:none; }
+.landing-recent-title { color:var(--muted); font-size:12px; margin-bottom:6px; }
+.landing-recent-item { display:block; width:100%; max-width:520px; box-sizing:border-box; margin:0 auto 4px; padding:7px 12px; background:transparent; border:1px solid transparent; border-radius:6px; color:var(--accent); font-size:13px; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
+.landing-recent-item:hover { background:var(--hover); border-color:var(--border); }
 
 /* Modal prompt (replacement for unsupported window.prompt) */
 .modal { position:fixed; inset:0; background:rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; z-index:3500; }
