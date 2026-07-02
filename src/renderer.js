@@ -423,6 +423,13 @@ function shellQuotePath(p) {
 // selectedPath is the active tab's path (also used for tree highlight + save). ---
 const editorTabs = new Map(); // path -> { path, name, value, dirty, isImage, imageSrc, disabled, el }
 const editorTabList = document.getElementById('editorTabList');
+// The tab strip hides its scrollbars (they squeeze the 30px bar); scroll it with the mouse wheel
+// instead — vertical wheel motion maps to horizontal tab scrolling, like VS Code's tab bar.
+editorTabList.addEventListener('wheel', (event) => {
+  if (!event.deltaY) return;
+  event.preventDefault();
+  editorTabList.scrollLeft += event.deltaY;
+}, { passive: false });
 
 function showImagePreview(on) {
   imagePreview.style.display = on ? 'block' : 'none';
