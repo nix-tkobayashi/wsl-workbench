@@ -127,6 +127,10 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
 
+## v0.12.3
+
+- Fixed a right-click in the terminal pasting the clipboard when a mouse-reporting app (e.g. Claude Code) was running: right-click is now left to the app in that mode, so it no longer pastes over the app's own selection. At a normal prompt, right-click still copies the selection (or pastes when there's none). Ctrl+V pastes in either mode.
+
 ## v0.12.2
 
 - Open files now detect changes on disk (e.g. edits made by the AI CLI in the terminal): files with no unsaved edits reload automatically, while files with unsaved edits are flagged with ⚠ and reload only when you click the tab and confirm.

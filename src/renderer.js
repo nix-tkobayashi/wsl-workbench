@@ -243,8 +243,16 @@ function wireTerminal(entry) {
   // Capture phase + stopPropagation so xterm never sees the right-click: otherwise, when the app has
   // mouse reporting on (e.g. Claude Code), xterm forwards it as a mouse event that corrupts the paste
   // rendering. Right-click is a terminal paste/copy action, not something the app should receive.
+  // When a full-screen app has mouse reporting on (e.g. Claude Code), xterm disables its own text
+  // selection and forwards the drag to the app — so the visible highlight is the app's, not xterm's,
+  // and there's nothing for us to copy. In that mode our right-click would just paste over the app's
+  // selection, so we bow out and let the mouse event reach the app (paste is still on Ctrl+V).
+  const mouseReportingActive = () => {
+    const xtermEl = entry.host.querySelector('.xterm');
+    return !!(xtermEl && xtermEl.classList.contains('enable-mouse-events'));
+  };
   entry.host.addEventListener('mousedown', (event) => {
-    if (event.button !== 2) return;
+    if (event.button !== 2 || mouseReportingActive()) return;
     event.preventDefault();
     event.stopPropagation();
     const result = window.terminalActions.terminalRightClick(io);
@@ -252,7 +260,14 @@ function wireTerminal(entry) {
   }, true);
   // Also swallow the matching right-button mouseup so xterm doesn't emit a dangling release report.
   entry.host.addEventListener('mouseup', (event) => {
-    if (event.button !== 2) return;
+    if (event.button !== 2 || mouseReportingActive()) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
+  // Suppress xterm's own contextmenu handler (it stages the selection into the hidden textarea, which
+  // could leak into the pty). Only when we own the right-click, i.e. mouse reporting is off.
+  entry.host.addEventListener('contextmenu', (event) => {
+    if (mouseReportingActive()) return;
     event.preventDefault();
     event.stopPropagation();
   }, true);
