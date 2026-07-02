@@ -48,3 +48,72 @@ test('blockquote and horizontal rule', () => {
   assert.ok(render('> quoted').includes('<blockquote>'));
   assert.equal(render('---'), '<hr>');
 });
+
+test('renders a GFM pipe table with header and body', () => {
+  const out = render('| A | B | C |\n|---|---|---|\n| a | b | c |\n| d | e | f |');
+  assert.ok(out.startsWith('<table><thead><tr><th>A</th><th>B</th><th>C</th></tr></thead>'));
+  assert.ok(out.includes('<tbody><tr><td>a</td><td>b</td><td>c</td></tr><tr><td>d</td><td>e</td><td>f</td></tr></tbody>'));
+});
+
+test('table alignment from the delimiter row', () => {
+  const out = render('| L | C | R |\n|:--|:-:|--:|\n| a | b | c |');
+  assert.ok(out.includes('<th style="text-align:left">L</th>'));
+  assert.ok(out.includes('<th style="text-align:center">C</th>'));
+  assert.ok(out.includes('<td style="text-align:right">c</td>'));
+});
+
+test('table cells: escaped pipe stays literal, inline markup and escaping apply', () => {
+  const out = render('| A\\|B | **b** |\n|---|---|\n| <x> | `c` |');
+  assert.ok(out.includes('<th>A|B</th>'));
+  assert.ok(out.includes('<strong>b</strong>'));
+  assert.ok(out.includes('<td>&lt;x&gt;</td>'));
+  assert.ok(out.includes('<code>c</code>'));
+});
+
+test('body rows are padded/truncated to the header column count', () => {
+  const out = render('| A | B |\n|---|---|\n| a |\n| x | y | z |');
+  assert.ok(out.includes('<tr><td>a</td><td></td></tr>'));
+  assert.ok(out.includes('<tr><td>x</td><td>y</td></tr>'));
+  assert.ok(!out.includes('<td>z</td>'));
+});
+
+test('escaped pipe at row end without a closing outer pipe stays literal', () => {
+  const out = render('A | B\\|\n---|---\n a | b ');
+  assert.ok(out.includes('<th>B|</th>'));
+});
+
+test('not a table when the delimiter column count mismatches', () => {
+  const out = render('a | b\n---');
+  assert.ok(!out.includes('<table>'));
+});
+
+test('escaped pipes alone do not start a table', () => {
+  const out = render('A\\|B\n|---|');
+  assert.ok(!out.includes('<table>'));
+});
+
+test('a pipe-less prose line continues the table as a single-cell row (GFM)', () => {
+  const out = render('| A | B |\n|---|---|\n| a | b |\nbar');
+  assert.ok(out.includes('<tr><td>bar</td><td></td></tr>'));
+});
+
+test('a block boundary (blockquote/list/heading) ends the table body', () => {
+  const out = render('| A | B |\n|---|---|\n| a | b |\n> q | r');
+  assert.ok(out.includes('<table>'));
+  assert.ok(out.includes('<blockquote>'));
+  assert.ok(!out.includes('<td>q'));
+});
+
+test('escaped backslash before a pipe still delimits cells (GFM)', () => {
+  // Source row: "A \\| B" — literal backslash, then a real cell delimiter.
+  const out = render('A \\\\| B\n---|---\n a | b ');
+  assert.ok(out.includes('<table>'));
+  assert.ok(out.includes('<th>A \\\\</th>'));
+  assert.ok(out.includes('<th>B</th>'));
+});
+
+test('table right after a paragraph is not swallowed into it', () => {
+  const out = render('intro text\n| A | B |\n|---|---|\n| a | b |');
+  assert.ok(out.includes('<p>intro text</p>'));
+  assert.ok(out.includes('<table>'));
+});

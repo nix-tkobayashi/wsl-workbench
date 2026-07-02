@@ -127,6 +127,10 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
 
+## v0.13.2
+
+- Markdown preview now renders **GFM pipe tables** (with `:--`/`:-:`/`--:` column alignment, `\|` escapes, and GFM row-continuation rules).
+
 ## v0.13.1
 
 - Fixed the editor tab strip being squeezed by its own scrollbars when many files are open. The strip no longer shows scrollbars; scroll the tabs with the mouse wheel (the active tab still scrolls into view automatically).

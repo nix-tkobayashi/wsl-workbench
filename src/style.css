@@ -102,7 +102,10 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 #editorPreview ul, #editorPreview ol { margin:.5em 0; padding-left:1.6em; }
 #editorPreview img { max-width:100%; }
 #editorPreview hr { border:0; border-top:1px solid var(--border); margin:1em 0; }
-#editorPreview table { border-collapse:collapse; }
+#editorPreview table { border-collapse:collapse; margin:.6em 0; }
+#editorPreview th, #editorPreview td { border:1px solid var(--border); padding:4px 10px; }
+#editorPreview th { background:#232323; }
+#editorPreview tbody tr:nth-child(even) { background:#1d1d1d; }
 /* Tab marker when the open file changed on disk (unsaved edits pending): warn color + ⚠ (set in JS). */
 .editor-tab.changed { color:#e6b450; }
 #editorBackdrop { overflow:hidden; color:transparent; pointer-events:none; }
