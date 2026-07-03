@@ -126,6 +126,11 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
 
+## v0.13.4
+
+- The file tree now shows **git status colors** (VS Code-like): untracked files green, modified/staged files amber, and folders containing changes a muted amber. Piggybacks on the existing branch-badge poll — no extra processes.
+- The tree's and Markdown preview's scrollbars now render dark like the rest of the UI.
+
 ## v0.13.3
 
 - **Terminal splits**: the ◫ button splits the active terminal tab into up to 3 side-by-side panes, each its own shell. Drag the divider to resize; hover a pane for its close button; the focused pane gets the accent outline (and receives tree-path drops / image pastes).

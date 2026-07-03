@@ -73,10 +73,10 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 #editorScroll { position:relative; flex:1; min-height:0; background:#181818; overflow:hidden; }
 #editor, #editorBackdrop { position:absolute; inset:0; margin:0; padding:10px 10px 10px 52px; font-family: Consolas, "Cascadia Mono", monospace; font-size:13px; line-height:1.45; white-space:pre; tab-size:2; border:0; }
 #editor { width:100%; height:100%; resize:none; outline:0; background:transparent; color:var(--text); overflow:auto; }
-/* The UI is always dark, so force dark native scrollbars for the viewer and terminal (otherwise they
+/* The UI is always dark, so force dark native scrollbars on every scrollable pane (otherwise they
    render light when the Windows "app mode" is Light, showing white bars on the dark UI). Scoped to
-   these two elements so nothing else is affected. */
-#editor, .xterm-viewport { color-scheme: dark; }
+   the scroll containers so form-control rendering elsewhere is untouched. */
+#editor, .xterm-viewport, #treePane, #editorPreview { color-scheme: dark; }
 /* Word-wrap mode: soft-wrap long lines instead of horizontal scrolling. The backdrop must wrap
    identically so find-highlight positions keep matching the textarea. Line numbers stay visible:
    renderGutter() measures each logical line's wrapped height via #editorMeasure and pads the gutter
@@ -163,6 +163,11 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .twisty { width:14px; text-align:center; color:var(--muted); cursor:pointer; }
 .icon { width:18px; text-align:center; }
 .name { overflow:hidden; text-overflow:ellipsis; }
+/* Git status tinting (VS Code palette): untracked green, modified/staged amber, and a muted amber
+   for folders that contain changed descendants. On the name only, so selection stays readable. */
+#tree .row.git-untracked .name { color:#73c991; }
+#tree .row.git-modified .name { color:#e2c08d; }
+#tree .row.git-dirty-dir .name { color:#bfa77d; }
 .children { margin-left:18px; display:none; }
 .children.open { display:block; }
 .row.drag-over { outline:1px solid var(--accent); background:#26385f; }

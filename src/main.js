@@ -957,24 +957,29 @@ ipcMain.handle('shell:openExternal', (_event, url) => {
   return { ok: true };
 });
 
-// Current git branch (or short SHA when detached) and whether the working tree is dirty, for the
-// tree header. Returns null when the workspace isn't a git repo or git is unavailable.
+// Current git branch (or short SHA when detached) plus the working tree's porcelain status, for
+// the tree-header badge AND the tree's per-file git coloring. One spawn serves both. Returns null
+// when the workspace isn't a git repo or git is unavailable.
+const { parseGitInfoOutput } = require('./git-status');
 ipcMain.handle('git:info', (_event, { distro = DEFAULT_DISTRO, wslPath } = {}) => {
   if (!wslPath) return null;
   const script =
     'b=$(git branch --show-current 2>/dev/null); ' +
     '[ -z "$b" ] && b=$(git rev-parse --short HEAD 2>/dev/null); ' +
     '[ -z "$b" ] && exit 0; ' +
-    'echo "$b"; ' +
-    '[ -n "$(git status --porcelain 2>/dev/null)" ] && echo dirty || echo clean';
+    'echo "$b"; git rev-parse --show-toplevel 2>/dev/null; ' +
+    // quotepath=false keeps UTF-8 names (e.g. Japanese) unescaped so tree paths match.
+    'git -c core.quotepath=false status --porcelain 2>/dev/null';
   const res = require('child_process').spawnSync(
     'wsl.exe', ['-d', distro, '--cd', wslPath, '--exec', 'bash', '-lc', script],
-    { encoding: 'utf8', timeout: 5000 }
+    { encoding: 'utf8', timeout: 10000, maxBuffer: 10 * 1024 * 1024 }
   );
   if (res.error || res.status !== 0) return null;
-  const lines = String(res.stdout || '').trim().split('\n');
-  if (!lines[0]) return null;
-  return { branch: lines[0], dirty: lines[1] === 'dirty' };
+  const parsed = parseGitInfoOutput(res.stdout);
+  if (!parsed) return null;
+  // dirty counts EVERY porcelain line (rawCount), including entries the parser skipped (C-quoted
+  // control-char names) or capped — the badge must not claim clean when git said otherwise.
+  return { branch: parsed.branch, dirty: parsed.rawCount > 0, statuses: parsed.statuses };
 });
 
 ipcMain.handle('fs:move', (_event, { distro = DEFAULT_DISTRO, sourcePath, targetDirPath }) => {
