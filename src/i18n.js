@@ -24,8 +24,6 @@ const translations = {
     'dialog.openFileFailed': 'Open Workspace File failed',
     'filter.workspace': 'WSL Workbench Workspace',
     'filter.allFiles': 'All Files',
-    'toolbar.startClaude': 'Start Claude',
-    'toolbar.startClaudeTitle': 'Runs: claude --dangerously-skip-permissions (skips permission prompts)',
     'editor.title': 'Editor',
     'editor.placeholder': 'Select a text file from the left tree.',
     'editor.unsaved': '● unsaved',
@@ -74,6 +72,8 @@ const translations = {
     'ui.dragToResize': 'Drag to resize',
     'menu.restartTerminal': 'Restart Terminal',
     'terminal.newTab': 'New Terminal',
+    'terminal.split': 'Split Terminal',
+    'terminal.closePane': 'Close Pane',
     'terminal.tab': 'Terminal',
     'terminal.renameHint': 'Double-click to rename',
     'menu.help': 'Help',
@@ -104,7 +104,6 @@ const translations = {
     'terminal.exited': '[terminal exited]',
     'terminal.restartHint': '[Press Enter to restart the terminal]',
     'terminal.imagePasteFailed': 'Could not paste the image into the terminal. Install a clipboard tool in WSL (e.g. "sudo apt install wl-clipboard") so the CLI can read it.',
-    'claude.notFound': 'Error: claude not found in WSL PATH (only a Windows claude under /mnt, if any). Install it inside WSL: npm i -g @anthropic-ai/claude-code'
   },
   ja: {
     'menu.workspace': 'ワークスペース',
@@ -123,8 +122,6 @@ const translations = {
     'dialog.openFileFailed': 'ワークスペースファイルを開けませんでした',
     'filter.workspace': 'WSL Workbench ワークスペース',
     'filter.allFiles': 'すべてのファイル',
-    'toolbar.startClaude': 'Claude を起動',
-    'toolbar.startClaudeTitle': '実行: claude --dangerously-skip-permissions（権限確認をスキップ）',
     'editor.title': 'エディタ',
     'editor.placeholder': '左のツリーからテキストファイルを選択してください。',
     'editor.unsaved': '● 未保存',
@@ -173,6 +170,8 @@ const translations = {
     'ui.dragToResize': 'ドラッグでサイズ変更',
     'menu.restartTerminal': 'ターミナルを再起動',
     'terminal.newTab': '新しいターミナル',
+    'terminal.split': 'ターミナルを分割',
+    'terminal.closePane': 'この分割を閉じる',
     'terminal.tab': 'ターミナル',
     'terminal.renameHint': 'ダブルクリックで名前を変更',
     'menu.help': 'ヘルプ',
@@ -203,7 +202,6 @@ const translations = {
     'terminal.exited': '[ターミナルが終了しました]',
     'terminal.restartHint': '[Enter キーでターミナルを再起動します]',
     'terminal.imagePasteFailed': 'ターミナルへ画像を貼り付けできませんでした。CLI が読めるよう WSL にクリップボードツール（例: sudo apt install wl-clipboard）を導入してください。',
-    'claude.notFound': 'エラー: WSL の PATH に claude が見つかりません（/mnt 配下の Windows 版を除く）。WSL 内でインストールしてください: npm i -g @anthropic-ai/claude-code'
   }
 };
 
