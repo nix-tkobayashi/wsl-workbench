@@ -1275,6 +1275,52 @@ function updateWorkspaceName() {
   document.getElementById('workspaceName').textContent = config ? `[${lastTwoSegmentsFor(config.wslPath)}]` : '';
 }
 
+// --- Git status coloring for the tree (VS Code-like: untracked green, modified amber, folders
+// with changed descendants a muted amber). Fed by the same git:info poll as the branch badge. ---
+let gitFileStatus = new Map();     // absolute path -> porcelain XY code
+let gitDirStatus = [];             // whole-dir entries (e.g. an untracked directory), prefix-matched
+let gitChangedAncestors = new Set(); // dirs (under the workspace root) containing changed descendants
+
+function applyGitStatuses(statuses) {
+  gitFileStatus = new Map();
+  gitDirStatus = [];
+  gitChangedAncestors = new Set();
+  const root = config ? config.wslPath : '';
+  for (const s of statuses || []) {
+    if (!s || typeof s.path !== 'string') continue;
+    if (s.dir) gitDirStatus.push(s); else gitFileStatus.set(s.path, s.code);
+    // Mark every ancestor directory below the workspace root so folders tint too.
+    let p = s.path;
+    for (let idx = p.lastIndexOf('/'); idx > 0; idx = p.lastIndexOf('/')) {
+      p = p.slice(0, idx);
+      if (!root || p === root || !p.startsWith(root + '/')) break;
+      gitChangedAncestors.add(p);
+    }
+  }
+}
+
+function gitCodeForPath(p) {
+  const code = gitFileStatus.get(p);
+  if (code) return code;
+  // Files/dirs beneath a whole-dir entry (untracked directory) inherit its status.
+  for (const d of gitDirStatus) {
+    if (p === d.path || p.startsWith(d.path + '/')) return d.code;
+  }
+  return null;
+}
+
+// Re-tint all visible tree rows from the current status maps (cheap: class toggles only).
+function decorateTreeGitStatus() {
+  document.querySelectorAll('#tree .row').forEach((row) => {
+    const p = row.dataset.path;
+    const code = gitCodeForPath(p);
+    const untracked = code === '??';
+    row.classList.toggle('git-untracked', untracked);
+    row.classList.toggle('git-modified', !!code && !untracked);
+    row.classList.toggle('git-dirty-dir', !code && row.dataset.type === 'directory' && gitChangedAncestors.has(p));
+  });
+}
+
 // Show the workspace's current git branch (⎇ name, plus * when dirty) in the tree header, or hide the
 // badge when it isn't a git repo. Re-run on an interval since branch/dirtiness change via the terminal.
 let updatingGitBranch = false;
@@ -1292,9 +1338,12 @@ async function updateGitBranch() {
       badge.textContent = `⎇ ${info.branch}${info.dirty ? ' *' : ''}`;
       badge.title = info.branch + (info.dirty ? ' (uncommitted changes)' : '');
       badge.classList.remove('hidden');
+      applyGitStatuses(info.statuses);
     } else {
       badge.classList.add('hidden');
+      applyGitStatuses([]); // not a repo: clear any leftover tinting
     }
+    decorateTreeGitStatus();
   } catch {
     badge.classList.add('hidden');
   } finally {
@@ -1520,7 +1569,8 @@ async function renderTree() {
   document.getElementById('cwdPath').textContent = cwdText;
   cwdEl.title = cwdText;
   updateWorkspaceName();
-  updateGitBranch();
+  decorateTreeGitStatus(); // fresh rows: re-apply the last known git tinting immediately
+  updateGitBranch();       // then refresh branch + statuses asynchronously
   // Invalidate the poll baseline so a just-rendered state is not re-detected as a change.
   lastTreeSignature = null;
 }
