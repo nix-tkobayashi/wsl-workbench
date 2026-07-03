@@ -6,7 +6,6 @@ Lightweight Windows Electron app for working in WSL:
 - Upper right: minimal text editor (`Ctrl+S` to save) with inline image preview
 - Lower right: WSL terminal for Claude Code
 - Landing screen on startup / New Window to pick a workspace
-- **Start Claude** launches the WSL-native `claude --dangerously-skip-permissions`
 - Terminal: right-click to copy (selection) / paste, drag a tree item in to insert its path,
   paste an image with `Ctrl+V` or right-click (Claude Code reads it as `[Image #N]`), and press any key to restart after `exit`
 - Tree auto-refreshes (files created in the terminal appear without a manual refresh)
@@ -126,6 +125,13 @@ Internal tree drag and drop performs move/rename via Windows UNC path:
 ```
 
 The editor is intentionally minimal. Test file editing and drag/drop operations in a throwaway directory before using it on important repositories.
+
+## v0.13.3
+
+- **Terminal splits**: the ◫ button splits the active terminal tab into up to 3 side-by-side panes, each its own shell. Drag the divider to resize; hover a pane for its close button; the focused pane gets the accent outline (and receives tree-path drops / image pastes).
+- **Clickable URLs in the terminal**: http(s) URLs underline on hover and open in your default browser.
+- Even thinner (1px) dividers between the tree, editor, and terminal (the drag target stays wide).
+- Removed the **Start Claude** toolbar button (start your CLI from the terminal instead).
 
 ## v0.13.2
 

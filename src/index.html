@@ -17,7 +17,6 @@
       <button class="menubtn" data-menu="3" data-i18n="menu.language">Language</button>
       <button class="menubtn" data-menu="4" data-i18n="menu.help">Help</button>
     </nav>
-    <button id="claudeBtn" data-i18n="toolbar.startClaude" data-i18n-title="toolbar.startClaudeTitle" title="Runs: claude --dangerously-skip-permissions (skips permission prompts)">Start Claude</button>
     <div id="winControls">
       <button id="winMin" class="winctl" aria-label="Minimize">&#xE921;</button>
       <button id="winMax" class="winctl" aria-label="Maximize">&#xE922;</button>
@@ -67,6 +66,7 @@
         <div id="terminalTabs">
           <div id="terminalTabList"></div>
           <button id="newTerminalBtn" data-i18n-title="terminal.newTab" title="New Terminal">+</button>
+          <button id="splitTerminalBtn" data-i18n-title="terminal.split" title="Split Terminal">◫</button>
         </div>
         <div id="terminalHost"></div>
       </section>
@@ -120,6 +120,7 @@
   <script src="./terminal-actions.js"></script>
   <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

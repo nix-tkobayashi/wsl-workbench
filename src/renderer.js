@@ -121,7 +121,7 @@ function applyLanguage() {
   document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
   document.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle); });
   // Re-label open terminal tabs in the new language (a custom name, if set, is kept).
-  for (const entry of terminals.values()) relabelTermTab(entry);
+  for (const group of termGroups.values()) relabelTermTab(group);
 }
 
 // Promise-based replacement for the unsupported window.prompt() in Electron.
@@ -154,62 +154,96 @@ function askPrompt(message, defaultValue = '') {
   });
 }
 
-// --- Terminal tabs: multiple terminals per window, each its own pty (keyed by id) ---
-const terminals = new Map(); // id -> { id, term, fit, host, tab, exited }
-let activeTermId = null;
+// --- Terminal tabs & splits: each tab is a GROUP of 1..MAX_PANES side-by-side terminal panes.
+// Every pane has its own pty in the main process (keyed by pane id; IPC is unchanged). ---
+const terminals = new Map();  // pane id -> { id, groupId, term, fit, host, divider, exited }
+const termGroups = new Map(); // group id -> { id, name, tab, container, paneIds, activePaneId }
+let activeGroupId = null;
 let nextTermId = 1;
+let nextGroupId = 1;
+const MAX_PANES = 3;
 const terminalHost = document.getElementById('terminalHost');
 const terminalTabList = document.getElementById('terminalTabList');
 
-function activeTerminal() { return terminals.get(activeTermId) || null; }
+function activeGroup() { return termGroups.get(activeGroupId) || null; }
 
-function fitTerminal(entry) {
-  // Only fit the visible (active) terminal; a hidden host has zero size and would resize the pty wrong.
-  if (!entry || entry.id !== activeTermId) return;
+// The pane terminal actions target (menu restart, tree-path drop, image paste):
+// the focused pane of the active tab.
+function activeTerminal() {
+  const group = activeGroup();
+  return group ? terminals.get(group.activePaneId) || null : null;
+}
+
+function fitPane(entry) {
+  // Only fit a visible pane; a hidden/zero-size host would resize the pty wrong.
+  if (!entry || !entry.host.clientWidth) return;
   try { entry.fit.fit(); } catch {}
   window.api.terminalResize({ id: entry.id, cols: entry.term.cols, rows: entry.term.rows });
 }
-function fitActiveTerminal() { fitTerminal(activeTerminal()); }
+function fitGroupPanes(group) { if (group) for (const pid of group.paneIds) fitPane(terminals.get(pid)); }
+function fitActiveTerminal() { fitGroupPanes(activeGroup()); }
 window.addEventListener('resize', fitActiveTerminal);
 
-function activateTerminal(id) {
-  const entry = terminals.get(id);
-  if (!entry) return;
-  activeTermId = id;
-  for (const [tid, e] of terminals) {
-    const on = tid === id;
-    e.host.style.display = on ? 'block' : 'none';
-    e.tab.classList.toggle('active', on);
+function activateTerminal(groupId) {
+  const group = termGroups.get(groupId);
+  if (!group) return;
+  activeGroupId = groupId;
+  for (const [gid, g] of termGroups) {
+    const on = gid === groupId;
+    g.container.style.display = on ? 'flex' : 'none';
+    g.tab.classList.toggle('active', on);
   }
-  setTimeout(() => { fitTerminal(entry); entry.term.focus(); }, 0);
+  setTimeout(() => {
+    fitGroupPanes(group);
+    const focus = terminals.get(group.activePaneId);
+    if (focus) focus.term.focus();
+  }, 0);
+}
+
+// Show per-pane close buttons and the focused-pane outline only when a group is actually split.
+function refreshPaneChrome(group) {
+  const multi = group.paneIds.length > 1;
+  for (const pid of group.paneIds) {
+    const e = terminals.get(pid);
+    if (!e) continue;
+    e.host.classList.toggle('focused', multi && pid === group.activePaneId);
+    const btn = e.host.querySelector('.term-pane-close');
+    if (btn) btn.style.display = multi ? '' : 'none';
+  }
+}
+
+function setActivePane(group, paneId) {
+  if (group.activePaneId === paneId) return;
+  group.activePaneId = paneId;
+  refreshPaneChrome(group);
 }
 
 // A terminal tab shows its custom name when set, otherwise the localized default "Terminal <id>".
-function termTabText(entry) { return entry.name || `${t('terminal.tab')} ${entry.id}`; }
+function termTabText(group) { return group.name || `${t('terminal.tab')} ${group.id}`; }
 
-function relabelTermTab(entry) {
-  const lbl = entry.tab && entry.tab.querySelector('.term-tab-label');
+function relabelTermTab(group) {
+  const lbl = group.tab && group.tab.querySelector('.term-tab-label');
   if (!lbl) return;
-  lbl.textContent = termTabText(entry);
+  lbl.textContent = termTabText(group);
   lbl.title = t('terminal.renameHint');
 }
 
 // Double-click a terminal tab to rename it (empty input restores the default name).
-async function renameTerminal(entry) {
-  const next = await askPrompt(t('prompt.renameTerminal'), termTabText(entry));
+async function renameTerminal(group) {
+  const next = await askPrompt(t('prompt.renameTerminal'), termTabText(group));
   if (next === null) return;
   const trimmed = next.trim();
   // Empty, or unchanged from the localized default, means "no custom name" (keep localizing it).
-  entry.name = (!trimmed || trimmed === `${t('terminal.tab')} ${entry.id}`) ? null : trimmed;
-  relabelTermTab(entry);
+  group.name = (!trimmed || trimmed === `${t('terminal.tab')} ${group.id}`) ? null : trimmed;
+  relabelTermTab(group);
 }
 
-function makeTermTab(entry) {
+function makeTermTab(group) {
   const tab = document.createElement('div');
   tab.className = 'term-tab';
   const label = document.createElement('span');
   label.className = 'term-tab-label';
-  label.textContent = termTabText(entry);
+  label.textContent = termTabText(group);
   label.title = t('terminal.renameHint');
   const close = document.createElement('span');
   close.className = 'term-tab-close';
@@ -217,10 +251,10 @@ function makeTermTab(entry) {
   tab.append(label, close);
   tab.addEventListener('mousedown', (event) => {
     if (event.target === close) return;
-    activateTerminal(entry.id);
+    activateTerminal(group.id);
   });
-  label.addEventListener('dblclick', (event) => { event.stopPropagation(); renameTerminal(entry); });
-  close.addEventListener('click', (event) => { event.stopPropagation(); closeTerminal(entry.id); });
+  label.addEventListener('dblclick', (event) => { event.stopPropagation(); renameTerminal(group); });
+  close.addEventListener('click', (event) => { event.stopPropagation(); closeTerminal(group.id); });
   terminalTabList.appendChild(tab);
   return tab;
 }
@@ -332,47 +366,166 @@ function wireTerminal(entry) {
   }, true);
 }
 
-function createTerminal({ command = '' } = {}) {
-  if (!config) return null;
+// Draggable divider between two panes; it resolves its left pane from the DOM at drag time, so a
+// pane removal can never leave it pointing at a disposed terminal.
+function makeTermDivider(group) {
+  const divider = document.createElement('div');
+  divider.className = 'term-divider';
+  divider.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    const leftHost = divider.previousElementSibling;
+    if (!leftHost) return;
+    const startX = event.clientX;
+    const startW = leftHost.getBoundingClientRect().width;
+    let rafQueued = false;
+    const onMove = (move) => {
+      leftHost.style.flex = `0 0 ${Math.max(120, startW + (move.clientX - startX))}px`;
+      if (!rafQueued) {
+        rafQueued = true;
+        requestAnimationFrame(() => { rafQueued = false; fitGroupPanes(group); });
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      fitGroupPanes(group);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  });
+  return divider;
+}
+
+// One terminal pane (its own xterm + pty) appended to the group's flex row.
+function createPane(group, { command = '' } = {}) {
   const id = nextTermId++;
   const host = document.createElement('div');
   host.className = 'term-pane';
-  terminalHost.appendChild(host);
+  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false };
+  if (group.paneIds.length > 0) {
+    entry.divider = makeTermDivider(group);
+    group.container.appendChild(entry.divider);
+  }
+  group.container.appendChild(host);
   const term = new Terminal({ cursorBlink: true, fontFamily: 'Consolas, monospace', fontSize: 13 });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
+  // Clickable URLs: the web-links addon underlines http(s) URLs on hover; clicking routes through
+  // the main process (shell:openExternal re-validates the scheme) so links open in the OS browser,
+  // never in an Electron window.
+  term.loadAddon(new WebLinksAddon.WebLinksAddon((_event, uri) => {
+    if (/^https?:\/\//i.test(uri)) window.api.openExternal(uri);
+  }));
   term.open(host);
-  const entry = { id, term, fit, host, exited: false, tab: null, name: null };
-  entry.tab = makeTermTab(entry);
+  entry.term = term;
+  entry.fit = fit;
+  // Per-pane close (shown only while split): kills this pane's shell and gives its space back.
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'term-pane-close';
+  closeBtn.textContent = '×';
+  closeBtn.dataset.i18nTitle = 'terminal.closePane';
+  closeBtn.title = t('terminal.closePane');
+  closeBtn.addEventListener('click', (event) => { event.stopPropagation(); closePane(id); });
+  host.appendChild(closeBtn);
+  // Track which pane holds focus (xterm's textarea focus bubbles as focusin).
+  host.addEventListener('focusin', () => setActivePane(group, id));
   terminals.set(id, entry);
   wireTerminal(entry);
-  activateTerminal(id);
+  group.paneIds.push(id);
+  group.activePaneId = id;
   window.api.terminalStart({ id, ...config, command });
-  setTimeout(() => fitTerminal(entry), 60);
   return entry;
 }
 
-// After the shell exits, the pty is gone; any keystroke (or the menu) restarts that tab's shell.
+function createTerminal({ command = '' } = {}) {
+  if (!config) return null;
+  const id = nextGroupId++;
+  const container = document.createElement('div');
+  container.className = 'term-group';
+  terminalHost.appendChild(container);
+  const group = { id, name: null, tab: null, container, paneIds: [], activePaneId: null };
+  group.tab = makeTermTab(group);
+  termGroups.set(id, group);
+  const entry = createPane(group, { command });
+  activateTerminal(id);
+  refreshPaneChrome(group);
+  setTimeout(() => fitPane(entry), 60);
+  return entry;
+}
+
+// Split the active tab: another shell pane beside the existing ones (widths reset to equal shares).
+function splitActiveTerminal() {
+  const group = activeGroup();
+  if (!group || !config || group.paneIds.length >= MAX_PANES) return null;
+  for (const pid of group.paneIds) {
+    const e = terminals.get(pid);
+    if (e) e.host.style.flex = ''; // drop dragged widths so the new pane gets an equal share
+  }
+  const entry = createPane(group);
+  refreshPaneChrome(group);
+  setTimeout(() => { fitGroupPanes(group); entry.term.focus(); }, 60);
+  return entry;
+}
+
+// After the shell exits, the pty is gone; any keystroke (or the menu) restarts that pane's shell.
 function restartTerminal(entry) {
   if (!entry || !config) return;
   entry.exited = false;
   entry.term.clear();
   window.api.terminalStart({ id: entry.id, ...config, command: '' });
-  setTimeout(() => fitTerminal(entry), 200);
+  setTimeout(() => fitPane(entry), 200);
 }
 
-function closeTerminal(id) {
-  const entry = terminals.get(id);
+// Close one pane of a split group (the group itself when it's the last pane).
+function closePane(paneId) {
+  const entry = terminals.get(paneId);
   if (!entry) return;
-  window.api.terminalClose({ id });
+  const group = termGroups.get(entry.groupId);
+  if (!group) return;
+  if (group.paneIds.length <= 1) { closeTerminal(group.id); return; }
+  window.api.terminalClose({ id: paneId });
   entry.term.dispose();
+  // Remove the divider that came with this pane; the first pane has none, so the one owned by the
+  // (about to become first) second pane goes instead.
+  if (entry.divider) {
+    entry.divider.remove();
+  } else {
+    const second = terminals.get(group.paneIds[1]);
+    if (second && second.divider) { second.divider.remove(); second.divider = null; }
+  }
   entry.host.remove();
-  entry.tab.remove();
-  terminals.delete(id);
-  if (activeTermId === id) {
-    const next = terminals.keys().next().value;
+  terminals.delete(paneId);
+  group.paneIds = group.paneIds.filter((pid) => pid !== paneId);
+  for (const pid of group.paneIds) {
+    const e = terminals.get(pid);
+    if (e) e.host.style.flex = ''; // re-share the freed space equally
+  }
+  if (group.activePaneId === paneId) group.activePaneId = group.paneIds[group.paneIds.length - 1];
+  refreshPaneChrome(group);
+  setTimeout(() => {
+    fitGroupPanes(group);
+    const focus = terminals.get(group.activePaneId);
+    if (focus) focus.term.focus();
+  }, 0);
+}
+
+function closeTerminal(groupId) {
+  const group = termGroups.get(groupId);
+  if (!group) return;
+  for (const pid of group.paneIds) {
+    const e = terminals.get(pid);
+    if (!e) continue;
+    window.api.terminalClose({ id: pid });
+    e.term.dispose();
+    terminals.delete(pid);
+  }
+  group.container.remove();
+  group.tab.remove();
+  termGroups.delete(groupId);
+  if (activeGroupId === groupId) {
+    const next = termGroups.keys().next().value;
     if (next != null) activateTerminal(next);
-    else { activeTermId = null; createTerminal(); } // always keep at least one terminal
+    else { activeGroupId = null; createTerminal(); } // always keep at least one terminal
   }
 }
 
@@ -380,11 +533,14 @@ function disposeAllTerminals() {
   for (const entry of terminals.values()) {
     window.api.terminalClose({ id: entry.id });
     entry.term.dispose();
-    entry.host.remove();
-    entry.tab.remove();
+  }
+  for (const group of termGroups.values()) {
+    group.container.remove();
+    group.tab.remove();
   }
   terminals.clear();
-  activeTermId = null;
+  termGroups.clear();
+  activeGroupId = null;
 }
 
 window.api.onTerminalData(({ id, data }) => {
@@ -399,6 +555,7 @@ window.api.onTerminalExit((id) => {
 });
 
 document.getElementById('newTerminalBtn').addEventListener('click', () => createTerminal());
+document.getElementById('splitTerminalBtn').addEventListener('click', () => splitActiveTerminal());
 
 // Path of the tree item currently being dragged within the app. This is the authoritative
 // internal-origin signal: it is only set during a genuine tree dragstart, so external drags
@@ -1420,7 +1577,7 @@ function initResizers() {
     event.preventDefault();
     const onMove = (moveEvent) => {
       const width = Math.max(180, Math.min(700, moveEvent.clientX));
-      layout.style.gridTemplateColumns = `${width}px 2px 1fr`;
+      layout.style.gridTemplateColumns = `${width}px 1px 1fr`;
       fitActiveTerminal();
     };
     const onUp = () => {
@@ -1436,7 +1593,7 @@ function initResizers() {
     const onMove = (moveEvent) => {
       const rect = rightPane.getBoundingClientRect();
       const topHeight = Math.max(120, Math.min(rect.height - 140, moveEvent.clientY - rect.top));
-      rightPane.style.gridTemplateRows = `${topHeight}px 2px 1fr`;
+      rightPane.style.gridTemplateRows = `${topHeight}px 1px 1fr`;
       fitActiveTerminal();
     };
     const onUp = () => {
@@ -1769,23 +1926,6 @@ window.api.onUpdateProgress((p) => {
     updateBarFill.style.width = '';
     updatePercent.textContent = p.received > 0 ? `${toMB(p.received)} MB` : '';
   }
-});
-
-document.getElementById('claudeBtn').addEventListener('click', () => {
-  if (!config) return;
-  // Resolve claude exactly as the user's own interactive shell does: run inside `bash -ic` so
-  // ~/.bashrc (nvm/fnm/etc.) is sourced — otherwise the non-interactive `bash -lc` the terminal
-  // uses misses nvm and would pick an old /usr/local/bin/claude. Still exclude the Windows claude
-  // exposed under /mnt by WSL PATH interop, and fail loudly if no WSL claude is found.
-  // The not-found message is embedded in double quotes inside the single-quoted bash body.
-  // Enforce shell-safety for ANY translation: drop chars that would break the single-quote or
-  // trigger expansion ('`$), and escape double quotes.
-  const notFound = t('claude.notFound')
-    .replace(/['`$]/g, '')   // drop chars that break the single-quoted bash body / trigger expansion
-    .replace(/\\/g, '\\\\')  // escape backslashes before quotes so the quote-escapes survive
-    .replace(/"/g, '\\"');   // escape double quotes (message sits inside echo "...")
-  const startClaude = `bash -ic 'c=$(type -aP claude | grep -v "^/mnt/" | head -n1); if [ -n "$c" ]; then "$c" --dangerously-skip-permissions; else echo "${notFound}"; fi'`;
-  createTerminal({ command: startClaude }); // open Claude in a new terminal tab
 });
 
 (async function init() {
