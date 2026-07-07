@@ -77,6 +77,15 @@ button:disabled { opacity:.45; cursor:not-allowed; }
    render light when the Windows "app mode" is Light, showing white bars on the dark UI). Scoped to
    the scroll containers so form-control rendering elsewhere is untouched. */
 #editor, .xterm-viewport, #treePane, #editorPreview { color-scheme: dark; }
+/* Force a classic, always-visible scrollbar on the terminal viewport. The native (overlay) dark
+   scrollbar auto-hides and, with a large scrollback, its thumb shrinks until it vanishes. The
+   ::-webkit-scrollbar rules restore a persistent track; customizing the thumb, however, drops
+   Chromium's built-in minimum thumb length, so we set min-height explicitly (its 3px transparent
+   border + content-box clip eat 6px, hence 32 not 20) to keep the thumb visible at any scrollback. */
+.xterm-viewport::-webkit-scrollbar { width:12px; }
+.xterm-viewport::-webkit-scrollbar-track { background:transparent; }
+.xterm-viewport::-webkit-scrollbar-thumb { background:#4a4a4a; border-radius:6px; border:3px solid transparent; background-clip:content-box; min-height:32px; }
+.xterm-viewport::-webkit-scrollbar-thumb:hover { background:#5c5c5c; background-clip:content-box; }
 /* Word-wrap mode: soft-wrap long lines instead of horizontal scrolling. The backdrop must wrap
    identically so find-highlight positions keep matching the textarea. Line numbers stay visible:
    renderGutter() measures each logical line's wrapped height via #editorMeasure and pads the gutter
@@ -145,7 +154,7 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 /* Reserve room on the right so the (often overlay/zero-width) scrollbar doesn't draw over the
    last column. Padding goes on .xterm, not the host: FitAddon subtracts *this* element's
    horizontal padding when computing cols, but counts the host's padding as usable width. */
-.term-pane .xterm { padding-right: 10px; }
+.term-pane .xterm { padding-right: 12px; }
 /* 1px visible line, but a ±3px invisible grab zone via ::after so the drag target stays easy to
    hit (the pseudo-element is part of the resizer, so its pointer events drive the same drag). */
 .resizer { position:relative; background:var(--resizer); z-index:5; }
