@@ -344,23 +344,32 @@ function wireTerminal(entry) {
     const xtermEl = entry.host.querySelector('.xterm');
     return !!(xtermEl && xtermEl.classList.contains('enable-mouse-events'));
   };
+  // See terminalActions.shouldHandleRightClick for the policy (own the click when mouse reporting is
+  // off, or when a clipboard image makes the paste intent unambiguous).
+  const weOwnRightClick = () => window.terminalActions.shouldHandleRightClick({
+    mouseReporting: mouseReportingActive(),
+    hasImage: window.api.clipboardHasImage()
+  });
   entry.host.addEventListener('mousedown', (event) => {
-    if (event.button !== 2 || mouseReportingActive()) return;
+    if (event.button !== 2 || !weOwnRightClick()) return;
     event.preventDefault();
     event.stopPropagation();
+    // In mouse-reporting mode we only reach here for an image paste (see weOwnRightClick): the app
+    // owns selection/copy, so there's nothing to do but push the image the way Ctrl+V does.
+    if (mouseReportingActive()) { pasteImageToTerminal(entry); return; }
     const result = window.terminalActions.terminalRightClick(io);
     if (result.action === 'paste') term.focus();
   }, true);
   // Also swallow the matching right-button mouseup so xterm doesn't emit a dangling release report.
   entry.host.addEventListener('mouseup', (event) => {
-    if (event.button !== 2 || mouseReportingActive()) return;
+    if (event.button !== 2 || !weOwnRightClick()) return;
     event.preventDefault();
     event.stopPropagation();
   }, true);
   // Suppress xterm's own contextmenu handler (it stages the selection into the hidden textarea, which
-  // could leak into the pty). Only when we own the right-click, i.e. mouse reporting is off.
+  // could leak into the pty). Only when we own the right-click (mouse reporting off, or an image paste).
   entry.host.addEventListener('contextmenu', (event) => {
-    if (mouseReportingActive()) return;
+    if (!weOwnRightClick()) return;
     event.preventDefault();
     event.stopPropagation();
   }, true);
@@ -1360,6 +1369,10 @@ function showContextMenu(event, node) {
   const menu = document.getElementById('contextMenu');
   // The workspace root has no row; its menu offers create/reveal but not rename/delete.
   const isRoot = !!config && node.path === config.wslPath;
+  // Keep the Delete-key / paste target in sync with the row the user just visually selected here, so
+  // a right-click followed by Delete acts on this node — not on whatever was last left-clicked. Root
+  // clears the target (it's never deletable and has no row to paste beside).
+  setTreePasteTarget(isRoot ? null : node);
   menu.querySelector('[data-action="rename"]').style.display = isRoot ? 'none' : '';
   menu.querySelector('[data-action="delete"]').style.display = isRoot ? 'none' : '';
   document.getElementById('ctxSepEdit').style.display = isRoot ? 'none' : '';
@@ -1372,6 +1385,21 @@ function showContextMenu(event, node) {
 
 function hideContextMenu() {
   document.getElementById('contextMenu').classList.add('hidden');
+}
+
+// Delete a file/directory after a path-showing confirm, then close any open tabs under it and
+// refresh. Shared by the context-menu action and the tree pane's Delete-key handler. The workspace
+// root has no row and must never be deletable, so callers guard against it.
+async function deleteTreeNode(node) {
+  if (!node || !config || node.path === config.wslPath) return;
+  const message = node.type === 'directory' ? t('confirm.deleteDir') : t('confirm.deleteFile');
+  if (!confirm(`${message}\n\n${node.path}`)) return;
+  await window.api.deleteFsItem({ distro: config.distro, targetPath: node.path });
+  closeEditorTabsUnder(node.path);
+  // Drop the paste/Delete target if it pointed at what we just removed, so a follow-up Delete
+  // doesn't act on a stale path (falls back to the workspace root).
+  if (treeSelection && treeSelection.path === node.path) setTreePasteTarget(null);
+  await renderTree();
 }
 
 async function handleContextAction(action) {
@@ -1401,11 +1429,7 @@ async function handleContextAction(action) {
     }
 
     if (action === 'delete') {
-      const message = node.type === 'directory' ? t('confirm.deleteDir') : t('confirm.deleteFile');
-      if (!confirm(`${message}\n\n${node.path}`)) return;
-      await window.api.deleteFsItem({ distro: config.distro, targetPath: node.path });
-      closeEditorTabsUnder(node.path);
-      await renderTree();
+      await deleteTreeNode(node);
       return;
     }
 
@@ -1847,6 +1871,14 @@ function initTreePasteTarget() {
   pane.addEventListener('click', (event) => {
     if (event.target.closest('.row')) return;
     setTreePasteTarget(null);
+  });
+  // Delete key: remove the last-clicked file/directory (the same node a context-menu delete would
+  // target). Scoped to the tree pane's focus so it never fires while editing text in the editor.
+  // deleteTreeNode guards the workspace root (treeSelection is null when the root is the target).
+  pane.addEventListener('keydown', (event) => {
+    if (event.key !== 'Delete' || !treeSelection) return;
+    event.preventDefault();
+    deleteTreeNode(treeSelection).catch((error) => alert(error.message || String(error)));
   });
   pane.addEventListener('paste', async (event) => {
     if (!config || !window.api.clipboardHasImage()) return;

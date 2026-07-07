@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { terminalRightClick } = require('../src/terminal-actions');
+const { terminalRightClick, shouldHandleRightClick } = require('../src/terminal-actions');
 
 // Build a mock io that records calls and lets the test control selection/clipboard.
 function makeIO({ selection = '', clipboard = '' } = {}) {
@@ -76,6 +76,21 @@ test('copy ignores a falsy selection text without writing the clipboard', () => 
   assert.equal(r.action, 'copy');
   assert.deepEqual(calls.writeClipboard, []); // empty selection -> no clipboard write
   assert.equal(calls.clearSelection, 1);
+});
+
+test('shouldHandleRightClick: renderer owns the click when mouse reporting is off', () => {
+  assert.equal(shouldHandleRightClick({ mouseReporting: false, hasImage: false }), true);
+  assert.equal(shouldHandleRightClick({ mouseReporting: false, hasImage: true }), true);
+});
+
+test('shouldHandleRightClick: with mouse reporting on, only a clipboard image is owned', () => {
+  assert.equal(shouldHandleRightClick({ mouseReporting: true, hasImage: false }), false);
+  assert.equal(shouldHandleRightClick({ mouseReporting: true, hasImage: true }), true);
+});
+
+test('shouldHandleRightClick: coerces truthy/undefined hasImage to a boolean', () => {
+  assert.equal(shouldHandleRightClick({ mouseReporting: true, hasImage: undefined }), false);
+  assert.strictEqual(shouldHandleRightClick({ mouseReporting: false }), true);
 });
 
 test('terminal-actions.js is IIFE-wrapped and sets window.terminalActions without leaking globals', () => {

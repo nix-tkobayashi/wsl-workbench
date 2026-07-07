@@ -25,7 +25,15 @@
     return { action: 'paste', text };
   }
 
-  const terminalActions = { terminalRightClick };
+  // Whether the renderer (rather than the mouse-reporting app) owns a right-click. We own it whenever
+  // mouse reporting is off. When it's ON we normally bow out — except for an image on the clipboard,
+  // whose paste intent is unambiguous and which the app can't consume through a mouse event anyway,
+  // so we still bridge it to the terminal (an image paste, the way Ctrl+V does it).
+  function shouldHandleRightClick({ mouseReporting, hasImage }) {
+    return !mouseReporting || !!hasImage;
+  }
+
+  const terminalActions = { terminalRightClick, shouldHandleRightClick };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = terminalActions;
   }
