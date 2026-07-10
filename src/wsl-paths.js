@@ -53,13 +53,15 @@ function parseSelectedPath(inputPath) {
 }
 
 // True when a Windows path names an NTFS alternate data stream (e.g. `report.pptx:Zone.Identifier`,
-// the Mark-of-the-Web stream on browser-downloaded files) rather than a real file. A colon in the
-// final path segment is the ADS marker: NTFS forbids colons in regular file names, and WSL's 9P
-// server escapes Linux-side colons to a private-use codepoint before they appear in a UNC path,
-// so no legitimately named file trips this.
+// the Mark-of-the-Web stream on browser-downloaded files) rather than a real file. The ADS marker
+// is a colon in the final path segment — either literal, or as U+F03A: Chromium materializes a
+// drag's virtual-file entries (how Explorer exposes ADS) into temp files with the colon escaped to
+// that private-use codepoint, and writing such a name through \\wsl.localhost gets mapped back by
+// the 9P server to a literal-colon junk file on ext4 (observed in #47). NTFS forbids colons in
+// regular file names and neither codepoint appears in legitimately named files.
 function isNtfsAdsPath(windowsPath) {
   const segment = String(windowsPath || '').split(/[\\/]/).pop();
-  return segment.includes(':');
+  return /[:\uF03A]/.test(segment);
 }
 
 // Back-compat wrapper: convert a selected path to a WSL path. The `distro` argument is no longer
