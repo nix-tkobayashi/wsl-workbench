@@ -52,6 +52,16 @@ function parseSelectedPath(inputPath) {
   return { distro: null, wslPath: inputPath };
 }
 
+// True when a Windows path names an NTFS alternate data stream (e.g. `report.pptx:Zone.Identifier`,
+// the Mark-of-the-Web stream on browser-downloaded files) rather than a real file. A colon in the
+// final path segment is the ADS marker: NTFS forbids colons in regular file names, and WSL's 9P
+// server escapes Linux-side colons to a private-use codepoint before they appear in a UNC path,
+// so no legitimately named file trips this.
+function isNtfsAdsPath(windowsPath) {
+  const segment = String(windowsPath || '').split(/[\\/]/).pop();
+  return segment.includes(':');
+}
+
 // Back-compat wrapper: convert a selected path to a WSL path. The `distro` argument is no longer
 // used for matching (the distro is read from the path itself); callers that need the distro should
 // use parseSelectedPath instead.
@@ -59,4 +69,4 @@ function uncToWsl(_distro, inputPath) {
   return parseSelectedPath(inputPath).wslPath;
 }
 
-module.exports = { wslToUnc, wslPathToWindowsFsPath, windowsDrivePathToWsl, uncToWsl, parseSelectedPath };
+module.exports = { wslToUnc, wslPathToWindowsFsPath, windowsDrivePathToWsl, uncToWsl, parseSelectedPath, isNtfsAdsPath };

@@ -144,7 +144,7 @@ function setCurrentWorkspaceForWindow(win, next) {
   }
 }
 
-const { wslPathToWindowsFsPath, parseSelectedPath } = require('./wsl-paths');
+const { wslPathToWindowsFsPath, parseSelectedPath, isNtfsAdsPath } = require('./wsl-paths');
 
 
 function safeStat(fullPath) {
@@ -1078,6 +1078,11 @@ ipcMain.handle('fs:copyExternal', (_event, { distro = DEFAULT_DISTRO, sourcePath
 
   const result = { copied: [], skipped: [] };
   for (const sourcePath of sourcePaths) {
+    // Explorer drags of browser-downloaded files also enumerate the file's NTFS Zone.Identifier
+    // stream (Mark of the Web) as its own `name:Zone.Identifier` entry; ext4 has no ADS concept,
+    // so copying it would materialize a junk file next to the real one. Exclude silently rather
+    // than record a skip, so a real copy failure stays first in the reported skip list.
+    if (isNtfsAdsPath(sourcePath)) continue;
     const sourceStat = safeStat(sourcePath);
     if (!sourceStat) {
       result.skipped.push({ source: sourcePath, reason: 'source not found' });
