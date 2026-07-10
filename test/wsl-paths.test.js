@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { wslToUnc, wslPathToWindowsFsPath, windowsDrivePathToWsl, uncToWsl, parseSelectedPath } = require('../src/wsl-paths');
+const { wslToUnc, wslPathToWindowsFsPath, windowsDrivePathToWsl, uncToWsl, parseSelectedPath, isNtfsAdsPath } = require('../src/wsl-paths');
 
 test('wslToUnc builds a \\\\wsl.localhost UNC path', () => {
   assert.equal(wslToUnc('Ubuntu', '/home/skype/projects'), '\\\\wsl.localhost\\Ubuntu\\home\\skype\\projects');
@@ -88,4 +88,25 @@ test('uncToWsl no longer corrupts a non-default distro path (regression)', () =>
     uncToWsl('Ubuntu', '\\\\wsl.localhost\\Ubuntu-22.04\\home\\x'),
     '/home/x'
   );
+});
+
+test('isNtfsAdsPath detects alternate-data-stream entries from an Explorer drag (#47)', () => {
+  assert.equal(isNtfsAdsPath('C:\\Users\\skype\\Downloads\\サンプル資料 (1).pptx:Zone.Identifier'), true);
+  assert.equal(isNtfsAdsPath('C:\\Users\\skype\\Downloads\\file.txt:stream:$DATA'), true);
+  assert.equal(isNtfsAdsPath('report.pptx:Zone.Identifier'), true); // no directory part
+});
+
+test('isNtfsAdsPath detects the U+F03A-escaped colon Chromium uses when materializing ADS drag entries (#47)', () => {
+  // Chromium writes a drag's virtual-file entries to temp files with ':' escaped to U+F03A;
+  // copied through \\wsl.localhost, the 9P server maps it back to a literal ':' on ext4.
+  assert.equal(isNtfsAdsPath('C:\\Users\\skype\\AppData\\Local\\Temp\\提案書_20260612-2.pptx\uF03AZone.Identifier'), true);
+  assert.equal(isNtfsAdsPath('report.pptx\uF03AZone.Identifier'), true);
+});
+
+test('isNtfsAdsPath passes regular files, directories, and UNC paths', () => {
+  assert.equal(isNtfsAdsPath('C:\\Users\\skype\\Downloads\\サンプル資料 (1).pptx'), false);
+  assert.equal(isNtfsAdsPath('C:\\dev\\repo'), false);
+  assert.equal(isNtfsAdsPath('C:\\'), false); // drive root: colon is in the drive segment, not the name
+  assert.equal(isNtfsAdsPath('\\\\wsl.localhost\\Ubuntu\\home\\skype\\notes.md'), false);
+  assert.equal(isNtfsAdsPath(''), false);
 });

@@ -144,7 +144,8 @@ function setCurrentWorkspaceForWindow(win, next) {
   }
 }
 
-const { wslPathToWindowsFsPath, parseSelectedPath } = require('./wsl-paths');
+const { wslPathToWindowsFsPath, parseSelectedPath, isNtfsAdsPath } = require('./wsl-paths');
+const { copyFileContentsSync } = require('./fs-copy');
 
 
 function safeStat(fullPath) {
@@ -215,7 +216,10 @@ function copyRecursiveSafeSync(source, destination, result) {
 
   if (stat.isFile()) {
     try {
-      fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+      // Not fs.copyFileSync: that maps to Win32 CopyFile, which drags NTFS alternate data streams
+      // along, and WSL's 9P server materializes them as literal `name:stream` junk files on ext4
+      // (Zone.Identifier on downloaded files, #47). Copy only the default stream instead.
+      copyFileContentsSync(source, destination);
       result.copied.push(destination);
     } catch (error) {
       result.skipped.push({ source, reason: error.code || error.message });
@@ -1078,6 +1082,11 @@ ipcMain.handle('fs:copyExternal', (_event, { distro = DEFAULT_DISTRO, sourcePath
 
   const result = { copied: [], skipped: [] };
   for (const sourcePath of sourcePaths) {
+    // Explorer drags of browser-downloaded files also enumerate the file's NTFS Zone.Identifier
+    // stream (Mark of the Web) as its own `name:Zone.Identifier` entry; ext4 has no ADS concept,
+    // so copying it would materialize a junk file next to the real one. Exclude silently rather
+    // than record a skip, so a real copy failure stays first in the reported skip list.
+    if (isNtfsAdsPath(sourcePath)) continue;
     const sourceStat = safeStat(sourcePath);
     if (!sourceStat) {
       result.skipped.push({ source: sourcePath, reason: 'source not found' });
