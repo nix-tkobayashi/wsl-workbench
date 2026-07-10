@@ -145,6 +145,7 @@ function setCurrentWorkspaceForWindow(win, next) {
 }
 
 const { wslPathToWindowsFsPath, parseSelectedPath, isNtfsAdsPath } = require('./wsl-paths');
+const { copyFileContentsSync } = require('./fs-copy');
 
 
 function safeStat(fullPath) {
@@ -215,7 +216,10 @@ function copyRecursiveSafeSync(source, destination, result) {
 
   if (stat.isFile()) {
     try {
-      fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+      // Not fs.copyFileSync: that maps to Win32 CopyFile, which drags NTFS alternate data streams
+      // along, and WSL's 9P server materializes them as literal `name:stream` junk files on ext4
+      // (Zone.Identifier on downloaded files, #47). Copy only the default stream instead.
+      copyFileContentsSync(source, destination);
       result.copied.push(destination);
     } catch (error) {
       result.skipped.push({ source, reason: error.code || error.message });
