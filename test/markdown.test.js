@@ -22,6 +22,12 @@ test('code spans/blocks are shown verbatim and escaped', () => {
   assert.ok(block.includes('&lt;x&gt; a &amp; b'));
 });
 
+test('mermaid fences keep the language-mermaid class and verbatim source (preview swaps them for SVG)', () => {
+  const out = render('```mermaid\ngraph TD\n  A --> B\n```');
+  assert.ok(out.includes('<pre><code class="language-mermaid">'));
+  assert.ok(out.includes('A --&gt; B')); // escaped, un-mangled source for mermaid.render
+});
+
 test('a number surrounded by spaces is not mistaken for a code-span placeholder', () => {
   assert.equal(render('in 5 out'), '<p>in 5 out</p>');
 });

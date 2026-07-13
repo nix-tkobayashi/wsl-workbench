@@ -1,8 +1,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseGitInfoOutput, MAX_STATUS_ENTRIES } = require('../src/git-status');
+const { parseGitInfoOutput, remoteWebUrl, MAX_STATUS_ENTRIES } = require('../src/git-status');
 
-const HEADER = 'main\n/home/u/repo\n';
+// branch, toplevel, remote URL (empty here — remote handling has its own tests below)
+const HEADER = 'main\n/home/u/repo\n\n';
 
 test('parses branch, toplevel-joined paths, and codes', () => {
   const out = parseGitInfoOutput(HEADER + ' M src/a.js\n?? notes.txt\n');
@@ -64,6 +65,36 @@ test('caps entries at MAX_STATUS_ENTRIES and flags truncation', () => {
 });
 
 test('missing toplevel falls back to the relative path', () => {
-  const out = parseGitInfoOutput('main\n\n M a.js\n');
+  const out = parseGitInfoOutput('main\n\n\n M a.js\n');
   assert.deepEqual(out.statuses, [{ code: ' M', dir: false, path: 'a.js' }]);
+});
+
+test('remote line becomes a normalized web URL; empty remote gives null', () => {
+  const out = parseGitInfoOutput('main\n/home/u/repo\ngit@github.com:user/repo.git\n M a.js\n');
+  assert.equal(out.remoteUrl, 'https://github.com/user/repo');
+  assert.equal(out.statuses.length, 1);
+  assert.equal(parseGitInfoOutput(HEADER + ' M a.js\n').remoteUrl, null);
+});
+
+test('remoteWebUrl normalizes https / ssh / scp-like forms', () => {
+  assert.equal(remoteWebUrl('https://github.com/user/repo.git'), 'https://github.com/user/repo');
+  assert.equal(remoteWebUrl('https://github.com/user/repo'), 'https://github.com/user/repo');
+  assert.equal(remoteWebUrl('http://gitea.local/user/repo.git'), 'http://gitea.local/user/repo');   // http scheme kept
+  assert.equal(remoteWebUrl('https://gitea.local:3000/user/repo.git'), 'https://gitea.local:3000/user/repo'); // web port kept
+  assert.equal(remoteWebUrl('https://user@bitbucket.org/team/repo.git'), 'https://bitbucket.org/team/repo');
+  assert.equal(remoteWebUrl('ssh://git@github.com/user/repo.git'), 'https://github.com/user/repo');
+  assert.equal(remoteWebUrl('ssh://git@gitlab.com:2222/group/sub/repo.git'), 'https://gitlab.com/group/sub/repo');
+  assert.equal(remoteWebUrl('git@github.com:user/repo.git'), 'https://github.com/user/repo');
+  assert.equal(remoteWebUrl('git@github.com:user/repo'), 'https://github.com/user/repo');
+  assert.equal(remoteWebUrl('git@gitlab.com:group/sub/repo.git/'), 'https://gitlab.com/group/sub/repo');
+  assert.equal(remoteWebUrl('git@github.com:/user/repo.git'), 'https://github.com/user/repo'); // leading slash variant
+});
+
+test('remoteWebUrl rejects non-web remotes', () => {
+  assert.equal(remoteWebUrl(''), null);
+  assert.equal(remoteWebUrl('/home/u/bare-repo.git'), null);          // local path
+  assert.equal(remoteWebUrl('../sibling/repo'), null);                 // relative path
+  assert.equal(remoteWebUrl('file:///home/u/repo.git'), null);         // file scheme
+  assert.equal(remoteWebUrl('C:\\repos\\thing.git'), null);            // windows path
+  assert.equal(remoteWebUrl('git@github.com:'), null);                 // empty path
 });

@@ -972,6 +972,9 @@ ipcMain.handle('git:info', (_event, { distro = DEFAULT_DISTRO, wslPath } = {}) =
     '[ -z "$b" ] && b=$(git rev-parse --short HEAD 2>/dev/null); ' +
     '[ -z "$b" ] && exit 0; ' +
     'echo "$b"; git rev-parse --show-toplevel 2>/dev/null; ' +
+    // Remote URL (origin, else the first remote) for the repo-link icon; always exactly one line
+    // (possibly empty) so the porcelain lines below stay at a fixed offset for the parser.
+    'git remote get-url origin 2>/dev/null || git remote get-url "$(git remote 2>/dev/null | head -n1)" 2>/dev/null || echo; ' +
     // quotepath=false keeps UTF-8 names (e.g. Japanese) unescaped so tree paths match.
     'git -c core.quotepath=false status --porcelain 2>/dev/null';
   const res = require('child_process').spawnSync(
@@ -983,7 +986,7 @@ ipcMain.handle('git:info', (_event, { distro = DEFAULT_DISTRO, wslPath } = {}) =
   if (!parsed) return null;
   // dirty counts EVERY porcelain line (rawCount), including entries the parser skipped (C-quoted
   // control-char names) or capped — the badge must not claim clean when git said otherwise.
-  return { branch: parsed.branch, dirty: parsed.rawCount > 0, statuses: parsed.statuses };
+  return { branch: parsed.branch, dirty: parsed.rawCount > 0, statuses: parsed.statuses, remoteUrl: parsed.remoteUrl };
 });
 
 ipcMain.handle('fs:move', (_event, { distro = DEFAULT_DISTRO, sourcePath, targetDirPath }) => {
