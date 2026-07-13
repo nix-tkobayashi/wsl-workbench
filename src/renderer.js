@@ -654,7 +654,50 @@ function showMarkdownPreview(on) {
   editor.style.display = on ? 'none' : '';
   editorGutter.style.display = on ? 'none' : '';
   editorBackdrop.style.display = on ? 'none' : '';
-  if (on) { editorPreview.innerHTML = window.markdown.render(editor.value); editorPreview.scrollTop = 0; }
+  if (on) {
+    editorPreview.innerHTML = window.markdown.render(editor.value);
+    editorPreview.scrollTop = 0;
+    renderMermaidBlocks();
+  }
+}
+
+// --- Mermaid diagrams in the Markdown preview ---
+// markdown.js renders ```mermaid fences as ordinary escaped code blocks; this pass swaps each for
+// the diagram SVG. Rendering is async, so a generation counter drops results that finish after the
+// preview was re-rendered (tab switch, edit/preview toggle) — never paint into a newer preview.
+let mermaidInited = false;
+let mermaidGeneration = 0;
+async function renderMermaidBlocks() {
+  const blocks = editorPreview.querySelectorAll('pre > code.language-mermaid');
+  if (!blocks.length || typeof mermaid === 'undefined') return;
+  if (!mermaidInited) {
+    // securityLevel 'strict' sanitizes labels and disables click bindings; suppressErrorRendering
+    // keeps mermaid from appending its error bomb to the document on parse failures.
+    mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict', suppressErrorRendering: true });
+    mermaidInited = true;
+  }
+  const gen = ++mermaidGeneration;
+  for (let k = 0; k < blocks.length; k++) {
+    const code = blocks[k];
+    const src = code.textContent;
+    try {
+      // The id must be unique per call: mermaid uses it as the SVG element id.
+      const { svg } = await mermaid.render(`mermaid-${gen}-${k}`, src);
+      if (gen !== mermaidGeneration) return;
+      const box = document.createElement('div');
+      box.className = 'mermaid-diagram';
+      box.innerHTML = svg;
+      code.parentElement.replaceWith(box);
+    } catch (error) {
+      if (gen !== mermaidGeneration) return;
+      // Leave the source visible and flag the block; the message pinpoints the syntax error.
+      const note = document.createElement('div');
+      note.className = 'mermaid-error';
+      note.textContent = `Mermaid: ${(error && error.message) || error}`;
+      code.parentElement.classList.add('mermaid-failed');
+      code.parentElement.before(note);
+    }
+  }
 }
 
 // Load the active tab into the shared editor/image view (or blank when no tab is open).
@@ -1333,28 +1376,65 @@ function decorateTreeGitStatus() {
 // Show the workspace's current git branch (⎇ name, plus * when dirty) in the tree header, or hide the
 // badge when it isn't a git repo. Re-run on an interval since branch/dirtiness change via the terminal.
 let updatingGitBranch = false;
+
+// The repo-link icon next to the branch badge: shown when the repo has a web-mappable remote
+// (git:info normalizes ssh/scp forms to https), clicking opens it in the default browser.
+function updateGitRemoteLink(remoteUrl) {
+  const link = document.getElementById('gitRemoteLink');
+  if (!link) return;
+  if (remoteUrl) {
+    link.dataset.url = remoteUrl;
+    link.title = remoteUrl;
+    link.classList.remove('hidden');
+  } else {
+    delete link.dataset.url;
+    link.classList.add('hidden');
+  }
+}
+
+// stopPropagation: a plain click on the #cwd header retargets the tree paste target (see
+// initTreePasteTarget); clicking the icon should only open the browser.
+function initGitRemoteLink() {
+  document.getElementById('gitRemoteLink').addEventListener('click', (event) => {
+    event.stopPropagation();
+    const url = event.currentTarget.dataset.url;
+    if (url) window.api.openExternal(url);
+  });
+}
+
 async function updateGitBranch() {
   const badge = document.getElementById('gitBranch');
   if (!badge) return;
-  if (!config) { badge.classList.add('hidden'); return; }
+  if (!config) { badge.classList.add('hidden'); updateGitRemoteLink(null); return; }
   if (updatingGitBranch) return;
   updatingGitBranch = true;
   const cfgAtStart = config;
   try {
     const info = await window.api.gitInfo({ distro: cfgAtStart.distro, wslPath: cfgAtStart.wslPath });
-    if (config !== cfgAtStart) return; // workspace switched mid-call
+    if (config !== cfgAtStart) {
+      // Workspace switched mid-call: this result is stale, and the switch-time refresh was dropped
+      // by the updatingGitBranch guard. Hide the old repo's badge/link and redo the fetch for the
+      // new workspace (queued so the finally below releases the guard first).
+      badge.classList.add('hidden');
+      updateGitRemoteLink(null);
+      queueMicrotask(updateGitBranch);
+      return;
+    }
     if (info && info.branch) {
       badge.textContent = `⎇ ${info.branch}${info.dirty ? ' *' : ''}`;
       badge.title = info.branch + (info.dirty ? ' (uncommitted changes)' : '');
       badge.classList.remove('hidden');
+      updateGitRemoteLink(info.remoteUrl);
       applyGitStatuses(info.statuses);
     } else {
       badge.classList.add('hidden');
+      updateGitRemoteLink(null);
       applyGitStatuses([]); // not a repo: clear any leftover tinting
     }
     decorateTreeGitStatus();
   } catch {
     badge.classList.add('hidden');
+    updateGitRemoteLink(null);
   } finally {
     updatingGitBranch = false;
   }
@@ -1589,9 +1669,12 @@ async function renderTree() {
   tree.appendChild(fragment);
   tree.scrollTop = prevScroll;
   const cwdEl = document.getElementById('cwd');
-  const cwdText = `${cfg.distro}:${cfg.wslPath}`;
-  document.getElementById('cwdPath').textContent = cwdText;
-  cwdEl.title = cwdText;
+  // Distro name as a badge, path as plain text (the full distro:path stays in the tooltip).
+  const distroEl = document.getElementById('cwdDistro');
+  distroEl.textContent = cfg.distro;
+  distroEl.classList.remove('hidden');
+  document.getElementById('cwdPath').textContent = cfg.wslPath;
+  cwdEl.title = `${cfg.distro}:${cfg.wslPath}`;
   updateWorkspaceName();
   decorateTreeGitStatus(); // fresh rows: re-apply the last known git tinting immediately
   updateGitBranch();       // then refresh branch + statuses asynchronously
@@ -2019,6 +2102,7 @@ window.api.onUpdateProgress((p) => {
   initLanding();
   initMenubar();
   initEditorPreview();
+  initGitRemoteLink();
   setInterval(pollTreeChanges, 1500);
   setInterval(checkExternalChanges, 2000); // reload open files edited on disk (e.g. by the AI CLI)
   setInterval(updateGitBranch, 4000);      // keep the tree-header branch badge current
