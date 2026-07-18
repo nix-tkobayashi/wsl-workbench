@@ -2121,7 +2121,20 @@ window.api.onUpdateProgress((p) => {
   landing.classList.add('hidden');
   config = initial;
   expanded.add(config.wslPath);
-  await renderTree();
+  try {
+    await renderTree();
+  } catch (error) {
+    // A saved WSL workspace may be unavailable during startup. Keep the window usable and fall
+    // back to the landing screen instead of leaving a blank renderer behind a wedged main process.
+    console.error('Failed to restore the last workspace:', error);
+    config = null;
+    expanded.clear();
+    landing.classList.remove('hidden');
+    updateWorkspaceName();
+    renderLandingRecent();
+    await window.api.resyncWorkspace({ showLanding: true });
+    return;
+  }
   createTerminal();
   restoreEditorSession(); // reopen this workspace's files from the last session
 })();

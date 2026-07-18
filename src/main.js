@@ -21,6 +21,7 @@ const WSLG_WAYLAND_FIX =
   'then export WAYLAND_DISPLAY=/mnt/wslg/runtime-dir/wayland-0; fi';
 const DEFAULT_WSL_PATH = process.env.WSLWB_PATH || `/home/${os.userInfo().username}/projects`;
 const DEFAULT_WSL_HOME_PATH = process.env.WSLWB_HOME_PATH || `/home/${os.userInfo().username}`;
+const WSL_FS_TIMEOUT_MS = Math.max(1000, Number(process.env.WSLWB_FS_TIMEOUT_MS) || 5000);
 
 const { WORKSPACE_EXT } = require('./workspace-args'); // single source for the extension + argv parsing
 
@@ -74,6 +75,8 @@ function defaultWorkspace() {
 // findWorkspaceArg comes from workspace-args.js too (unit-tested; it also parses the argv the
 // 'second-instance' event forwards, which carries Chromium switches).
 const { findWorkspaceArg } = require('./workspace-args');
+const { initialWindowState } = require('./startup-workspace');
+const { withTimeout } = require('./async-timeout');
 
 function readWorkspaceFile(filePath, fallback = defaultWorkspace()) {
   const raw = fs.readFileSync(filePath, 'utf8');
@@ -230,11 +233,26 @@ function copyRecursiveSafeSync(source, destination, result) {
   result.skipped.push({ source, reason: 'not a regular file or directory' });
 }
 
-function readDirTree({ distro = DEFAULT_DISTRO, wslPath = DEFAULT_WSL_PATH }) {
+async function readDirTree({ distro = DEFAULT_DISTRO, wslPath = DEFAULT_WSL_PATH }) {
   const fullPath = wslPathToWindowsFsPath(distro, wslPath);
-  const stat = safeStat(fullPath);
+  let stat;
+  try {
+    stat = await withTimeout(
+      fs.promises.stat(fullPath),
+      WSL_FS_TIMEOUT_MS,
+      `WSL path did not respond within ${WSL_FS_TIMEOUT_MS}ms: ${fullPath}`
+    );
+  } catch (error) {
+    if (error && error.code === 'ETIMEDOUT') throw error;
+    stat = null;
+  }
   if (!stat) throw new Error(`Path not found: ${fullPath}`);
-  const entries = fs.readdirSync(fullPath, { withFileTypes: true })
+  const dirEntries = await withTimeout(
+    fs.promises.readdir(fullPath, { withFileTypes: true }),
+    WSL_FS_TIMEOUT_MS,
+    `WSL directory did not respond within ${WSL_FS_TIMEOUT_MS}ms: ${fullPath}`
+  );
+  const entries = dirEntries
     .filter((entry) => !entry.name.startsWith('.git'))
     .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
     .map((entry) => {
@@ -694,17 +712,12 @@ if (!app.requestSingleInstanceLock()) {
         dialog.showErrorBox(tr('dialog.openFileFailed'), error.message || String(error));
       }
     }
-    // Normal launch: restore the last workspace when it still exists; otherwise start on the
-    // landing screen so the user picks one. (The Workspace menu can always open a different one.)
-    const last = readSettings().lastWorkspace;
-    if (last && last.wslPath) {
-      const stat = safeStat(wslPathToWindowsFsPath(last.distro || DEFAULT_DISTRO, last.wslPath));
-      if (stat && stat.isDirectory()) {
-        createWindow(normalizeWorkspace(last), { showLanding: false });
-        return;
-      }
-    }
-    createWindow(defaultWorkspace(), { showLanding: true });
+    // Never synchronously touch a WSL UNC path before the first BrowserWindow exists. A stopped or
+    // wedged WSL provider can otherwise block the main process while it holds the single-instance
+    // lock, making every later launch appear to do nothing. The renderer validates the restored
+    // workspace through readDirTree(), which is asynchronous and time-limited.
+    const initial = initialWindowState(readSettings(), defaultWorkspace());
+    createWindow(normalizeWorkspace(initial.workspace), { showLanding: initial.showLanding });
   });
 }
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
@@ -780,19 +793,18 @@ ipcMain.handle('workspace:clone', async (event, { distro = DEFAULT_DISTRO, paren
 ipcMain.handle('workspace:recent', () => {
   const list = readSettings().recentWorkspaces;
   if (!Array.isArray(list)) return [];
-  return list.filter((e) => {
-    if (!e || !e.wslPath) return false;
-    const stat = safeStat(wslPathToWindowsFsPath(e.distro || DEFAULT_DISTRO, e.wslPath));
-    return !!stat && stat.isDirectory();
-  }).map((e) => ({ distro: e.distro || DEFAULT_DISTRO, wslPath: e.wslPath }));
+  // Do not probe every \\wsl.localhost entry while rendering the landing screen. Stale entries are
+  // harmless: selecting one goes through the asynchronous, time-limited tree load and rolls back.
+  return list.filter((e) => e && e.wslPath)
+    .map((e) => ({ distro: e.distro || DEFAULT_DISTRO, wslPath: e.wslPath }));
 });
 
 // Open one of the recent workspaces (clicked on the landing screen).
 ipcMain.handle('workspace:openRecent', (event, { distro = DEFAULT_DISTRO, wslPath } = {}) => {
   const { win } = getStateForWebContents(event.sender);
   if (!wslPath) throw new Error('wslPath is required.');
-  const stat = safeStat(wslPathToWindowsFsPath(distro, wslPath));
-  if (!stat || !stat.isDirectory()) throw new Error(`Workspace not found: ${wslPath}`);
+  // applyWorkspace() validates this through readDirTree() and rolls back on failure. Doing a
+  // synchronous stat here would freeze the Electron main process when WSL is unresponsive.
   setCurrentWorkspaceForWindow(win, { distro, wslPath });
   return { ok: true };
 });
