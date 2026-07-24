@@ -291,7 +291,8 @@ function createWindow(initialWorkspace = defaultWorkspace(), { showLanding = fal
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      plugins: true // Chromium's built-in PDF viewer (used by the editor's PDF preview iframe)
     }
   });
 
@@ -329,6 +330,14 @@ function createWindow(initialWorkspace = defaultWorkspace(), { showLanding = fal
   win.webContents.on('will-navigate', (event, url) => {
     event.preventDefault();
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+  });
+
+  // Windows created after the startup update check completed still get the notification (the
+  // pre-load webContents.send from checkForUpdatesInBackground is lost if the page isn't ready).
+  win.webContents.on('did-finish-load', () => {
+    if (startupUpdate && !win.isDestroyed()) {
+      win.webContents.send('update:available', { version: startupUpdate.version });
+    }
   });
 
   win.loadFile(path.join(__dirname, 'index.html'));
@@ -513,6 +522,28 @@ async function downloadAndInstallUpdate(win, installer) {
     dialog.showErrorBox(tr('update.failed'), error.message || String(error));
   }
 }
+
+// Startup update check: fetched once, cached, and pushed to every window so the menubar can show
+// an "update available" button next to Help. Its click handler (update:install below) reuses the
+// same one-click download/verify/install path as the About dialog.
+let startupUpdate = null;
+async function checkForUpdatesInBackground() {
+  const latest = await fetchLatestRelease();
+  if (!latest || !latest.version || !isNewer(latest.version, app.getVersion())) return;
+  startupUpdate = latest;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('update:available', { version: latest.version });
+  }
+}
+
+ipcMain.handle('update:install', (event) => {
+  const latest = startupUpdate;
+  if (!latest) return { ok: false };
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (latest.installer) downloadAndInstallUpdate(win, latest.installer);
+  else shell.openExternal(latest.url || RELEASES_PAGE).catch(() => {});
+  return { ok: true };
+});
 
 // "About" dialog: shows the current version, checks GitHub for the latest, and offers to open the
 // release page when a newer version exists.
@@ -712,6 +743,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     initLanguage();
+    checkForUpdatesInBackground(); // fire-and-forget; windows are notified when a newer release exists
     const workspaceFile = findWorkspaceArg(process.argv);
     if (workspaceFile) {
       try {
@@ -962,6 +994,16 @@ ipcMain.handle('file:readImage', (_event, { distro = DEFAULT_DISTRO, wslPath }) 
   if (stat.size > 16 * 1024 * 1024) throw new Error('Image is larger than 16MB.');
   const data = fs.readFileSync(fullPath).toString('base64');
   return `data:${imageMimeForPath(wslPath)};base64,${data}`;
+});
+
+// Read a PDF as a data: URL for the renderer's PDF preview iframe (Chromium's built-in viewer).
+ipcMain.handle('file:readPdf', (_event, { distro = DEFAULT_DISTRO, wslPath }) => {
+  const fullPath = wslPathToWindowsFsPath(distro, wslPath);
+  const stat = safeStat(fullPath);
+  if (!stat || !stat.isFile()) throw new Error(`File not found: ${wslPath}`);
+  if (stat.size > 50 * 1024 * 1024) throw new Error('PDF is larger than 50MB.');
+  const data = fs.readFileSync(fullPath).toString('base64');
+  return `data:application/pdf;base64,${data}`;
 });
 
 ipcMain.handle('file:write', (_event, { distro = DEFAULT_DISTRO, wslPath, content }) => {

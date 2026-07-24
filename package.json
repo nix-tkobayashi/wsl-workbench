@@ -1,6 +1,6 @@
 {
   "name": "wsl-workbench",
-  "version": "0.13.10",
+  "version": "0.13.11",
   "description": "Lightweight WSL file tree, editor, and terminal workbench for AI CLIs",
   "main": "src/main.js",
   "scripts": {
