@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { terminalRightClick, shouldHandleRightClick } = require('../src/terminal-actions');
+const { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand } = require('../src/terminal-actions');
 
 // Build a mock io that records calls and lets the test control selection/clipboard.
 function makeIO({ selection = '', clipboard = '' } = {}) {
@@ -91,6 +91,53 @@ test('shouldHandleRightClick: with mouse reporting on, only a clipboard image is
 test('shouldHandleRightClick: coerces truthy/undefined hasImage to a boolean', () => {
   assert.equal(shouldHandleRightClick({ mouseReporting: true, hasImage: undefined }), false);
   assert.strictEqual(shouldHandleRightClick({ mouseReporting: false }), true);
+});
+
+test('parseOsc7Cwd: accepts the raw path our PROMPT_COMMAND emits (no hostname)', () => {
+  assert.equal(parseOsc7Cwd('file:///home/skype/projects'), '/home/skype/projects');
+  assert.equal(parseOsc7Cwd('file:///'), '/');
+  assert.equal(parseOsc7Cwd('file:///dir with spaces/sub'), '/dir with spaces/sub');
+});
+
+test('parseOsc7Cwd: drops a hostname and percent-decodes standard OSC 7 payloads', () => {
+  assert.equal(parseOsc7Cwd('file://myhost/home/skype'), '/home/skype');
+  assert.equal(parseOsc7Cwd('file://myhost/with%20space'), '/with space');
+});
+
+test('parseOsc7Cwd: keeps the raw path when percent-decoding fails', () => {
+  assert.equal(parseOsc7Cwd('file:///tmp/100%done'), '/tmp/100%done');
+});
+
+test('parseOsc7Cwd: literal % sent as %25 by our PROMPT_COMMAND decodes back losslessly', () => {
+  // The emitter sends "${PWD//%/%25}", so a real dir "/tmp/a %20b" arrives as "a %2520b".
+  assert.equal(parseOsc7Cwd('file:///tmp/a%20%2520b'), '/tmp/a %20b');
+  assert.equal(parseOsc7Cwd('file:///tmp/50%25off'), '/tmp/50%off');
+});
+
+test('parseOsc7Cwd: rejects non-file URLs, relative paths, and control characters', () => {
+  assert.equal(parseOsc7Cwd('http://evil/path'), null);
+  assert.equal(parseOsc7Cwd('file://hostonly'), null);
+  assert.equal(parseOsc7Cwd(''), null);
+  assert.equal(parseOsc7Cwd(null), null);
+  assert.equal(parseOsc7Cwd('file:///bad%0apath'), null); // decoded newline
+  assert.equal(parseOsc7Cwd('file:///bad\x1bpath'), null); // raw escape
+});
+
+test('shellCdCommand: builds a silenced, quoted best-effort cd', () => {
+  assert.equal(shellCdCommand('/home/skype'), "cd -- '/home/skype' 2>/dev/null");
+  assert.equal(shellCdCommand('/dir with spaces'), "cd -- '/dir with spaces' 2>/dev/null");
+});
+
+test('shellCdCommand: single quotes in the path cannot break out of the quoting', () => {
+  assert.equal(shellCdCommand("/a'b"), "cd -- '/a'\\''b' 2>/dev/null");
+});
+
+test('shellCdCommand: returns empty for unusable input (caller stays at the workspace root)', () => {
+  assert.equal(shellCdCommand(''), '');
+  assert.equal(shellCdCommand('relative/path'), '');
+  assert.equal(shellCdCommand('/has\nnewline'), '');
+  assert.equal(shellCdCommand(null), '');
+  assert.equal(shellCdCommand(42), '');
 });
 
 test('terminal-actions.js is IIFE-wrapped and sets window.terminalActions without leaking globals', () => {
