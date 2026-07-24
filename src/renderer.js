@@ -406,11 +406,11 @@ function makeTermDivider(group) {
 }
 
 // One terminal pane (its own xterm + pty) appended to the group's flex row.
-function createPane(group, { command = '' } = {}) {
+function createPane(group, { command = '', cwd = '' } = {}) {
   const id = nextTermId++;
   const host = document.createElement('div');
   host.className = 'term-pane';
-  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false };
+  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null };
   if (group.paneIds.length > 0) {
     entry.divider = makeTermDivider(group);
     group.container.appendChild(entry.divider);
@@ -428,6 +428,13 @@ function createPane(group, { command = '' } = {}) {
   term.open(host);
   entry.term = term;
   entry.fit = fit;
+  // The shell reports its cwd on every prompt via OSC 7 (PROMPT_COMMAND set by the main process);
+  // Split Terminal / New Terminal read it so a new shell starts where the user actually is.
+  term.parser.registerOscHandler(7, (payload) => {
+    const parsed = window.terminalActions.parseOsc7Cwd(payload);
+    if (parsed) entry.cwd = parsed;
+    return true;
+  });
   // Per-pane close (shown only while split): kills this pane's shell and gives its space back.
   const closeBtn = document.createElement('button');
   closeBtn.className = 'term-pane-close';
@@ -442,11 +449,11 @@ function createPane(group, { command = '' } = {}) {
   wireTerminal(entry);
   group.paneIds.push(id);
   group.activePaneId = id;
-  window.api.terminalStart({ id, ...config, command });
+  window.api.terminalStart({ id, ...config, command, cwd });
   return entry;
 }
 
-function createTerminal({ command = '' } = {}) {
+function createTerminal({ command = '', cwd = '' } = {}) {
   if (!config) return null;
   const id = nextGroupId++;
   const container = document.createElement('div');
@@ -455,7 +462,7 @@ function createTerminal({ command = '' } = {}) {
   const group = { id, name: null, tab: null, container, paneIds: [], activePaneId: null };
   group.tab = makeTermTab(group);
   termGroups.set(id, group);
-  const entry = createPane(group, { command });
+  const entry = createPane(group, { command, cwd });
   activateTerminal(id);
   refreshPaneChrome(group);
   setTimeout(() => fitPane(entry), 60);
@@ -463,25 +470,29 @@ function createTerminal({ command = '' } = {}) {
 }
 
 // Split the active tab: another shell pane beside the existing ones (widths reset to equal shares).
+// The new shell starts in the focused pane's current directory (workspace root until the first
+// prompt has reported a cwd).
 function splitActiveTerminal() {
   const group = activeGroup();
   if (!group || !config || group.paneIds.length >= MAX_PANES) return null;
+  const source = terminals.get(group.activePaneId);
   for (const pid of group.paneIds) {
     const e = terminals.get(pid);
     if (e) e.host.style.flex = ''; // drop dragged widths so the new pane gets an equal share
   }
-  const entry = createPane(group);
+  const entry = createPane(group, { cwd: (source && source.cwd) || '' });
   refreshPaneChrome(group);
   setTimeout(() => { fitGroupPanes(group); entry.term.focus(); }, 60);
   return entry;
 }
 
-// After the shell exits, the pty is gone; any keystroke (or the menu) restarts that pane's shell.
+// After the shell exits, the pty is gone; any keystroke (or the menu) restarts that pane's shell,
+// back in the directory the old shell was last in.
 function restartTerminal(entry) {
   if (!entry || !config) return;
   entry.exited = false;
   entry.term.clear();
-  window.api.terminalStart({ id: entry.id, ...config, command: '' });
+  window.api.terminalStart({ id: entry.id, ...config, command: '', cwd: entry.cwd || '' });
   setTimeout(() => fitPane(entry), 200);
 }
 
@@ -563,7 +574,11 @@ window.api.onTerminalExit((id) => {
   entry.term.write(`\r\n\x1b[90m${t('terminal.restartHint')}\x1b[0m\r\n`);
 });
 
-document.getElementById('newTerminalBtn').addEventListener('click', () => createTerminal());
+// New Terminal follows the focused terminal's current directory, same as Split Terminal.
+document.getElementById('newTerminalBtn').addEventListener('click', () => {
+  const from = activeTerminal();
+  createTerminal({ cwd: (from && from.cwd) || '' });
+});
 document.getElementById('splitTerminalBtn').addEventListener('click', () => splitActiveTerminal());
 
 // Path of the tree item currently being dragged within the app. This is the authoritative

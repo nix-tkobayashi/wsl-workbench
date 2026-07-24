@@ -19,11 +19,21 @@ const DEFAULT_DISTRO = process.env.WSLWB_DISTRO || 'Ubuntu';
 const WSLG_WAYLAND_FIX =
   'if [ -S /mnt/wslg/runtime-dir/wayland-0 ] && [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wayland-0" ]; ' +
   'then export WAYLAND_DISPLAY=/mnt/wslg/runtime-dir/wayland-0; fi';
+// Every prompt reports the shell's cwd via OSC 7, so the renderer can start splits/new tabs in the
+// directory the user is actually in. Literal % in $PWD is sent as %25 so the renderer's
+// percent-decode is lossless; a $PWD containing control characters is not reported at all (a BEL/ESC
+// in the path would terminate the OSC early or inject an escape sequence — such a cwd just keeps the
+// previous tracked value). A PROMPT_COMMAND inherited from the login profile is kept by appending
+// it. A user bashrc that later overwrites PROMPT_COMMAND just disables the tracking — splits then
+// fall back to the workspace root, the pre-tracking behavior.
+const CWD_PROMPT_EXPORT =
+  'export PROMPT_COMMAND=\'case "$PWD" in *[[:cntrl:]]*) ;; *) printf "\\033]7;file://%s\\007" "${PWD//%/%25}";; esac\'"${PROMPT_COMMAND:+; $PROMPT_COMMAND}"';
 const DEFAULT_WSL_PATH = process.env.WSLWB_PATH || `/home/${os.userInfo().username}/projects`;
 const DEFAULT_WSL_HOME_PATH = process.env.WSLWB_HOME_PATH || `/home/${os.userInfo().username}`;
 const WSL_FS_TIMEOUT_MS = Math.max(1000, Number(process.env.WSLWB_FS_TIMEOUT_MS) || 5000);
 
 const { WORKSPACE_EXT } = require('./workspace-args'); // single source for the extension + argv parsing
+const { shellCdCommand } = require('./terminal-actions'); // inherited-cwd `cd` for terminal:start
 
 const windowState = new Map();
 
@@ -125,7 +135,7 @@ function getDefaultOpenWorkspacePath(distro = DEFAULT_DISTRO) {
 
 // Track opened workspaces in settings: `recentWorkspaces` feeds the landing screen's quick-open
 // list, `lastWorkspace` lets the next launch restore where the user left off.
-const RECENT_WORKSPACES_MAX = 8;
+const RECENT_WORKSPACES_MAX = 12;
 function rememberWorkspace(ws) {
   const workspace = normalizeWorkspace(ws);
   const key = `${workspace.distro}:${workspace.wslPath}`;
@@ -1132,7 +1142,7 @@ ipcMain.handle('folder:pick', async (event) => {
   return { windowsPath: selected, wslPath: parsed.wslPath, distro: parsed.distro || state.workspace.distro };
 });
 
-ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '' }) => {
+ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = '' }) => {
   const { win, state } = getStateForWebContents(event.sender);
   const workspace = normalizeWorkspace({ distro, wslPath }, state.workspace);
   state.workspace = workspace;
@@ -1144,8 +1154,15 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '' }) => {
     try { existing.kill(); } catch {}
   }
   // Repair the Wayland env first so CLIs in the shell (e.g. Claude Code) can read clipboard images.
+  // `cwd` (the source pane's tracked cwd for splits / new tabs / restarts) is applied as a
+  // best-effort `cd` on top of the workspace-root --cd, so a bad path lands at the root, not in an
+  // error. The workspace itself is NOT changed by an inherited cwd.
   const launch = command ? `${command}; exec bash` : 'exec bash';
-  const args = ['-d', workspace.distro, '--cd', workspace.wslPath, '--exec', 'bash', '-lc', `${WSLG_WAYLAND_FIX}; ${launch}`];
+  const parts = [WSLG_WAYLAND_FIX, CWD_PROMPT_EXPORT];
+  const cd = shellCdCommand(cwd);
+  if (cd) parts.push(cd);
+  parts.push(launch);
+  const args = ['-d', workspace.distro, '--cd', workspace.wslPath, '--exec', 'bash', '-lc', parts.join('; ')];
   const ptyProc = pty.spawn('wsl.exe', args, {
     name: 'xterm-256color',
     cols: 100,

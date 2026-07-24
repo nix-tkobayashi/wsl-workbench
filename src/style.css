@@ -217,7 +217,8 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .landing-actions button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
 .landing-actions button.primary:hover:not(:disabled) { background:#739bff; }
 /* Recent workspaces under the landing buttons: a compact clickable list (hidden when empty). */
-.landing-recent { margin-top:28px; text-align:left; }
+/* Cap the list so 12 recents still fit a short window; the list scrolls, the landing box doesn't. */
+.landing-recent { margin-top:28px; text-align:left; max-height:46vh; overflow-y:auto; }
 .landing-recent.hidden { display:none; }
 .landing-recent-title { color:var(--muted); font-size:12px; margin-bottom:6px; }
 .landing-recent-item { display:block; width:100%; max-width:520px; box-sizing:border-box; margin:0 auto 4px; padding:7px 12px; background:transparent; border:1px solid transparent; border-radius:6px; color:var(--accent); font-size:13px; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
