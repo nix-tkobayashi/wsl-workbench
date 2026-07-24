@@ -24,6 +24,24 @@ test('imageMimeForPath maps known types and falls back to octet-stream', () => {
   assert.equal(ft.imageMimeForPath('a.txt'), 'application/octet-stream');
 });
 
+test('isHtmlPath recognizes .html/.htm (case-insensitive) and rejects others', () => {
+  for (const p of ['/a/b/page.html', '/a/b/page.htm', 'INDEX.HTML', 'C:\\x\\y.Htm']) {
+    assert.equal(ft.isHtmlPath(p), true, p);
+  }
+  for (const p of ['/a/b/page.xhtml', '/a/b/page.html.txt', 'html', '/a/.html', 'x.md']) {
+    assert.equal(ft.isHtmlPath(p), false, p);
+  }
+});
+
+test('isPdfPath recognizes .pdf (case-insensitive) and rejects others', () => {
+  for (const p of ['/a/b/doc.pdf', 'DOC.PDF', 'C:\\x\\y.Pdf']) {
+    assert.equal(ft.isPdfPath(p), true, p);
+  }
+  for (const p of ['/a/b/doc.pdf.txt', 'pdf', '/a/.pdf', 'x.ps']) {
+    assert.equal(ft.isPdfPath(p), false, p);
+  }
+});
+
 test('extOf handles both separators and dotfiles', () => {
   assert.equal(ft.extOf('C:\\\\x\\\\y.PNG'), '.png');
   assert.equal(ft.extOf('/a/b/c.tar.gz'), '.gz');

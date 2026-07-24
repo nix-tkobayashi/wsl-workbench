@@ -14,11 +14,13 @@ const editorBackdrop = document.getElementById('editorBackdrop');
 const editorGutter = document.getElementById('editorGutter');
 const editorMeasure = document.getElementById('editorMeasure');
 const imagePreview = document.getElementById('imagePreview');
+const pdfPreview = document.getElementById('pdfPreview');
 const editorPreview = document.getElementById('editorPreview');
+const htmlPreview = document.getElementById('htmlPreview');
 const previewToggle = document.getElementById('previewToggle');
 const wrapToggle = document.getElementById('wrapToggle');
 let gutterLineCount = -1;
-let previewMode = false; // Markdown preview on/off (applies only while a Markdown file is active)
+let previewMode = false; // preview on/off (applies only while a Markdown or HTML file is active)
 let wrapMode = localStorage.getItem('editorWrap') === '1'; // soft-wrap long lines in the viewer
 let editorRenderedFor = null; // tab path the textarea currently holds; guards undo-destroying rewrites
 
@@ -77,9 +79,10 @@ function renderGutter() {
     syncEditorOverlays();
     return;
   }
-  // Don't re-show the gutter over the Markdown preview (showMarkdownPreview hid it; renderGutter
+  // Don't re-show the gutter over the Markdown/HTML preview (showPreviewPane hid it; renderGutter
   // runs after it in renderActiveEditor and would otherwise get the final say).
-  editorGutter.style.display = editorPreview.classList.contains('hidden') ? '' : 'none';
+  const previewShown = !editorPreview.classList.contains('hidden') || !htmlPreview.classList.contains('hidden');
+  editorGutter.style.display = previewShown ? 'none' : '';
   const n = editor.value ? (editor.value.match(/\n/g) || []).length + 1 : 1;
   if (n !== gutterLineCount) {
     gutterLineCount = n;
@@ -122,6 +125,7 @@ function applyLanguage() {
   document.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle); });
   // Re-label open terminal tabs in the new language (custom pane names, if set, are kept).
   for (const group of termGroups.values()) renderTermTab(group);
+  refreshUpdateBtn(); // its tooltip is built manually (has a {version} slot), not via data-i18n
 }
 
 // Promise-based replacement for the unsupported window.prompt() in Electron.
@@ -660,6 +664,13 @@ editorTabList.addEventListener('wheel', (event) => {
 
 function showImagePreview(on) {
   imagePreview.style.display = on ? 'block' : 'none';
+  if (!on && pdfPreview.style.display === 'block') return; // the PDF pane owns the hidden editor
+  editorScroll.style.display = on ? 'none' : '';
+}
+
+function showPdfPreview(on) {
+  pdfPreview.style.display = on ? 'block' : 'none';
+  if (!on && imagePreview.style.display === 'block') return; // the image pane owns the hidden editor
   editorScroll.style.display = on ? 'none' : '';
 }
 
@@ -700,25 +711,41 @@ function highlightTreeRow(path) {
 // Persist the live textarea content into the active tab before switching away from it.
 function persistActiveEditor() {
   const tab = editorTabs.get(selectedPath);
-  if (tab && !tab.isImage && !tab.disabled) tab.value = editor.value;
+  if (tab && !tab.isImage && !tab.isPdf && !tab.disabled) tab.value = editor.value;
 }
 
-// A live, editable Markdown file can be previewed.
-function activeTabIsMarkdown() {
+// The preview kind of the active tab: 'md' (rendered Markdown), 'html' (sandboxed iframe), or
+// null (not previewable). Only live, editable text tabs can be previewed.
+function activeTabPreviewKind() {
   const tab = editorTabs.get(selectedPath);
-  return !!(tab && !tab.isImage && !tab.disabled && window.fileTypes.isMarkdownPath(tab.path));
+  if (!tab || tab.isImage || tab.isPdf || tab.disabled) return null;
+  if (window.fileTypes.isMarkdownPath(tab.path)) return 'md';
+  if (window.fileTypes.isHtmlPath(tab.path)) return 'html';
+  return null;
 }
 
-// Swap the editor area between the textarea (+gutter/backdrop) and the rendered Markdown preview.
-function showMarkdownPreview(on) {
-  editorPreview.classList.toggle('hidden', !on);
+// Swap the editor area between the textarea (+gutter/backdrop) and a rendered preview:
+// kind 'md' = Markdown preview div, 'html' = sandboxed iframe, null = plain textarea.
+function showPreviewPane(kind) {
+  const md = kind === 'md';
+  const html = kind === 'html';
+  editorPreview.classList.toggle('hidden', !md);
+  htmlPreview.classList.toggle('hidden', !html);
+  const on = md || html;
   editor.style.display = on ? 'none' : '';
   editorGutter.style.display = on ? 'none' : '';
   editorBackdrop.style.display = on ? 'none' : '';
-  if (on) {
+  if (md) {
     editorPreview.innerHTML = window.markdown.render(editor.value);
     editorPreview.scrollTop = 0;
     renderMermaidBlocks();
+  }
+  // The empty sandbox (no allow-scripts / allow-same-origin) renders the document statically:
+  // scripts never run, and the frame cannot reach the app's origin or window.api.
+  if (html) {
+    if (htmlPreview.srcdoc !== editor.value) htmlPreview.srcdoc = editor.value;
+  } else if (htmlPreview.srcdoc) {
+    htmlPreview.srcdoc = ''; // drop the rendered document when leaving the preview
   }
 }
 
@@ -767,10 +794,12 @@ function renderActiveEditor() {
   if (!tab) {
     showImagePreview(false);
     imagePreview.removeAttribute('src');
+    showPdfPreview(false);
+    pdfPreview.removeAttribute('src');
     editor.value = '';
     editorRenderedFor = null;
     editor.disabled = false;
-    showMarkdownPreview(false);
+    showPreviewPane(null);
     previewToggle.classList.add('hidden');
     wrapToggle.classList.add('hidden');
     refreshEditorTabs();
@@ -781,13 +810,26 @@ function renderActiveEditor() {
   if (tab.isImage) {
     showImagePreview(true);
     if (tab.imageSrc) imagePreview.src = tab.imageSrc; else imagePreview.removeAttribute('src');
+    showPdfPreview(false);
+    pdfPreview.removeAttribute('src');
     editor.disabled = false;
-    showMarkdownPreview(false);
+    showPreviewPane(null);
+    previewToggle.classList.add('hidden');
+    wrapToggle.classList.add('hidden');
+  } else if (tab.isPdf) {
+    showPdfPreview(true);
+    if (tab.pdfSrc) pdfPreview.src = tab.pdfSrc; else pdfPreview.removeAttribute('src');
+    showImagePreview(false);
+    imagePreview.removeAttribute('src');
+    editor.disabled = false;
+    showPreviewPane(null);
     previewToggle.classList.add('hidden');
     wrapToggle.classList.add('hidden');
   } else {
     showImagePreview(false);
     imagePreview.removeAttribute('src');
+    showPdfPreview(false);
+    pdfPreview.removeAttribute('src');
     // Rewrite the textarea only when it holds a different tab or stale content: assigning .value
     // clears the browser's undo stack, so a same-tab re-render (preview toggle, tab strip updates)
     // must leave it untouched to keep Ctrl+Z working.
@@ -799,12 +841,12 @@ function renderActiveEditor() {
     editor.disabled = !!tab.disabled;
     wrapToggle.classList.toggle('hidden', !!tab.disabled);
     wrapToggle.classList.toggle('active', wrapMode);
-    const isMd = activeTabIsMarkdown();
-    previewToggle.classList.toggle('hidden', !isMd);
-    const showPreview = previewMode && isMd;
+    const kind = activeTabPreviewKind();
+    previewToggle.classList.toggle('hidden', !kind);
+    const showPreview = previewMode && !!kind;
     previewToggle.classList.toggle('active', showPreview);
     previewToggle.textContent = showPreview ? t('editor.edit') : t('editor.preview');
-    showMarkdownPreview(showPreview);
+    showPreviewPane(showPreview ? kind : null);
   }
   refreshEditorTabs();
   scrollActiveEditorTabIntoView();
@@ -906,7 +948,7 @@ async function openFileInEditor(node) {
   persistActiveEditor(); // save the previously active tab before switching
   // Register and activate synchronously (read-only while loading) so a second open of the same
   // file activates this tab instead of creating a duplicate, and edits can't be lost mid-load.
-  const tab = { path: node.path, name: basenameFor(node.path), value: '', dirty: false, isImage: false, imageSrc: null, disabled: true, el: null, mtimeMs: null, size: null, externallyChanged: false };
+  const tab = { path: node.path, name: basenameFor(node.path), value: '', dirty: false, isImage: false, imageSrc: null, isPdf: false, pdfSrc: null, disabled: true, el: null, mtimeMs: null, size: null, externallyChanged: false };
   tab.el = makeEditorTabEl(tab);
   editorTabs.set(node.path, tab);
   selectedPath = node.path;
@@ -920,6 +962,9 @@ async function openFileInEditor(node) {
   let disabled = false;
   if (window.fileTypes.isImagePath(node.path)) {
     try { tab.imageSrc = await window.api.readImage({ distro: cfg.distro, wslPath: node.path }); tab.isImage = true; }
+    catch (error) { tab.value = String(error.message || error); disabled = true; }
+  } else if (window.fileTypes.isPdfPath(node.path)) {
+    try { tab.pdfSrc = await window.api.readPdf({ distro: cfg.distro, wslPath: node.path }); tab.isPdf = true; }
     catch (error) { tab.value = String(error.message || error); disabled = true; }
   } else {
     try {
@@ -1108,7 +1153,7 @@ async function checkExternalChanges() {
   const cfgAtStart = config;
   try {
     for (const tab of [...editorTabs.values()]) {
-      if (tab.isImage || tab.disabled || tab.mtimeMs == null) continue;
+      if (tab.isImage || tab.isPdf || tab.disabled || tab.mtimeMs == null) continue;
       let st;
       try { st = await window.api.statFile({ distro: cfgAtStart.distro, wslPath: tab.path }); } catch { continue; }
       if (config !== cfgAtStart) return; // workspace switched mid-poll
@@ -2152,6 +2197,27 @@ window.api.onUpdateProgress((p) => {
     updateBarFill.style.width = '';
     updatePercent.textContent = p.received > 0 ? `${toMB(p.received)} MB` : '';
   }
+});
+
+// Update-available button (next to Help in the menubar): shown when main's startup check found a
+// newer release. Click = confirm, then the same one-click download/verify/install as About.
+const updateBtn = document.getElementById('updateBtn');
+let updateVersion = null;
+function refreshUpdateBtn() {
+  if (!updateVersion) return;
+  updateBtn.textContent = `⬆ v${updateVersion}`;
+  updateBtn.title = t('update.availableTitle').replace('{version}', updateVersion);
+  updateBtn.classList.remove('hidden');
+}
+window.api.onUpdateAvailable((payload) => {
+  if (!payload || !payload.version) return;
+  updateVersion = String(payload.version);
+  refreshUpdateBtn();
+});
+updateBtn.addEventListener('click', () => {
+  if (!updateVersion) return;
+  if (!confirm(t('update.confirmInstall').replace('{version}', updateVersion))) return;
+  window.api.installUpdate();
 });
 
 (async function init() {

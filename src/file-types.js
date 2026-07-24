@@ -34,7 +34,16 @@
     return ext === '.md' || ext === '.markdown';
   }
 
-  const fileTypes = { isImagePath, imageMimeForPath, extOf, isMarkdownPath };
+  function isHtmlPath(p) {
+    const ext = extOf(p);
+    return ext === '.html' || ext === '.htm';
+  }
+
+  function isPdfPath(p) {
+    return extOf(p) === '.pdf';
+  }
+
+  const fileTypes = { isImagePath, imageMimeForPath, extOf, isMarkdownPath, isHtmlPath, isPdfPath };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = fileTypes; // main process: require('./file-types')

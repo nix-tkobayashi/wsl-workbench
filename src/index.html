@@ -16,6 +16,7 @@
       <button class="menubtn" data-menu="2" data-i18n="menu.view">View</button>
       <button class="menubtn" data-menu="3" data-i18n="menu.language">Language</button>
       <button class="menubtn" data-menu="4" data-i18n="menu.help">Help</button>
+      <button id="updateBtn" class="menubtn update-avail hidden"></button>
     </nav>
     <div id="winControls">
       <button id="winMin" class="winctl" aria-label="Minimize">&#xE921;</button>
@@ -58,8 +59,10 @@
           <div id="editorBackdrop" aria-hidden="true"></div>
           <textarea id="editor" spellcheck="false" data-i18n-placeholder="editor.placeholder" placeholder="Select a text file from the left tree."></textarea>
           <div id="editorPreview" class="hidden"></div>
+          <iframe id="htmlPreview" class="hidden" sandbox=""></iframe>
         </div>
         <img id="imagePreview" alt="" />
+        <iframe id="pdfPreview"></iframe>
       </section>
       <div id="horizontalResizer" class="resizer horizontal" data-i18n-title="ui.dragToResize" title="Drag to resize"></div>
       <section id="terminalPane">
