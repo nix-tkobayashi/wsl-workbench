@@ -147,6 +147,12 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .term-tab { display:flex; align-items:center; gap:6px; height:22px; padding:0 8px; border-radius:4px 4px 0 0; background:transparent; color:var(--muted); font-size:12px; white-space:nowrap; cursor:pointer; }
 .term-tab:hover { background:var(--hover); }
 .term-tab.active { background:#181818; color:var(--text); }
+/* One segment per pane inside a tab (Cursor-style split naming): click focuses that pane,
+   double-click renames it; the focused pane's segment is marked while the tab is split. */
+.term-tab-label { display:flex; align-items:center; gap:4px; }
+.term-tab-seg { padding:0 3px; border-radius:3px; }
+.term-tab-seg.focused { background:#333; color:var(--text); }
+.term-tab-sep { opacity:.55; }
 .term-tab .term-tab-close { width:14px; text-align:center; border-radius:3px; color:var(--muted); }
 .term-tab .term-tab-close:hover { background:#555; color:#fff; }
 #newTerminalBtn, #splitTerminalBtn { background:transparent; border:0; color:var(--muted); font-size:16px; line-height:1; padding:2px 8px; border-radius:4px; cursor:pointer; }

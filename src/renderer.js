@@ -120,8 +120,8 @@ function applyLanguage() {
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
   document.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle); });
-  // Re-label open terminal tabs in the new language (a custom name, if set, is kept).
-  for (const group of termGroups.values()) relabelTermTab(group);
+  // Re-label open terminal tabs in the new language (custom pane names, if set, are kept).
+  for (const group of termGroups.values()) renderTermTab(group);
 }
 
 // Promise-based replacement for the unsupported window.prompt() in Electron.
@@ -212,30 +212,77 @@ function refreshPaneChrome(group) {
   }
 }
 
+// Move the focused mark between existing segments IN PLACE: a focus change must not rebuild the
+// segment nodes, or the second click of a double-click lands on a replaced element and the rename
+// dblclick never fires.
+function refreshTabSegmentFocus(group) {
+  const label = group.tab && group.tab.querySelector('.term-tab-label');
+  if (!label) return;
+  const multi = group.paneIds.length > 1;
+  for (const el of label.querySelectorAll('.term-tab-seg')) {
+    el.classList.toggle('focused', multi && Number(el.dataset.paneId) === group.activePaneId);
+  }
+}
+
 function setActivePane(group, paneId) {
   if (group.activePaneId === paneId) return;
   group.activePaneId = paneId;
   refreshPaneChrome(group);
+  refreshTabSegmentFocus(group);
 }
 
-// A terminal tab shows its custom name when set, otherwise the localized default "Terminal <id>".
-function termTabText(group) { return group.name || `${t('terminal.tab')} ${group.id}`; }
+// Every PANE has its own name (Cursor-style): custom when set, else localized "Terminal <pane id>".
+function paneTabText(entry) { return entry.name || `${t('terminal.tab')} ${entry.id}`; }
 
-function relabelTermTab(group) {
-  const lbl = group.tab && group.tab.querySelector('.term-tab-label');
-  if (!lbl) return;
-  lbl.textContent = termTabText(group);
-  lbl.title = t('terminal.renameHint');
+// Rebuild a tab's label: one clickable segment per pane, so split panes stay individually
+// selectable and renameable. Called whenever panes are added/closed/renamed/refocused and on
+// language change.
+function renderTermTab(group) {
+  const label = group.tab && group.tab.querySelector('.term-tab-label');
+  if (!label) return;
+  label.textContent = '';
+  const segments = window.terminalActions.buildTabSegments({
+    panes: group.paneIds.map((pid) => ({ id: pid, name: (terminals.get(pid) || {}).name || null })),
+    activePaneId: group.activePaneId,
+    defaultWord: t('terminal.tab')
+  });
+  segments.forEach((seg, i) => {
+    if (i > 0) {
+      const sep = document.createElement('span');
+      sep.className = 'term-tab-sep';
+      sep.textContent = '|';
+      label.appendChild(sep);
+    }
+    const el = document.createElement('span');
+    el.className = 'term-tab-seg' + (seg.focused ? ' focused' : '');
+    el.dataset.paneId = String(seg.id);
+    el.textContent = seg.label;
+    el.title = t('terminal.renameHint');
+    // Segment click focuses THAT pane (the tab-level handler would only re-focus the last active
+    // one); stopPropagation keeps the tab handler from racing it.
+    el.addEventListener('mousedown', (event) => {
+      event.stopPropagation();
+      setActivePane(group, seg.id);
+      activateTerminal(group.id);
+    });
+    el.addEventListener('dblclick', (event) => {
+      event.stopPropagation();
+      const entry = terminals.get(seg.id);
+      if (entry) renamePane(entry);
+    });
+    label.appendChild(el);
+  });
 }
 
-// Double-click a terminal tab to rename it (empty input restores the default name).
-async function renameTerminal(group) {
-  const next = await askPrompt(t('prompt.renameTerminal'), termTabText(group));
+// Double-click a tab segment to rename that pane (empty input restores the default name).
+async function renamePane(entry) {
+  const next = await askPrompt(t('prompt.renameTerminal'), paneTabText(entry));
   if (next === null) return;
   const trimmed = next.trim();
   // Empty, or unchanged from the localized default, means "no custom name" (keep localizing it).
-  group.name = (!trimmed || trimmed === `${t('terminal.tab')} ${group.id}`) ? null : trimmed;
-  relabelTermTab(group);
+  entry.name = (!trimmed || trimmed === `${t('terminal.tab')} ${entry.id}`) ? null : trimmed;
+  const group = termGroups.get(entry.groupId);
+  if (group) renderTermTab(group);
 }
 
 function makeTermTab(group) {
@@ -243,8 +290,6 @@ function makeTermTab(group) {
   tab.className = 'term-tab';
   const label = document.createElement('span');
   label.className = 'term-tab-label';
-  label.textContent = termTabText(group);
-  label.title = t('terminal.renameHint');
   const close = document.createElement('span');
   close.className = 'term-tab-close';
   close.textContent = '×';
@@ -253,10 +298,9 @@ function makeTermTab(group) {
     if (event.target === close) return;
     activateTerminal(group.id);
   });
-  label.addEventListener('dblclick', (event) => { event.stopPropagation(); renameTerminal(group); });
   close.addEventListener('click', (event) => { event.stopPropagation(); closeTerminal(group.id); });
   terminalTabList.appendChild(tab);
-  return tab;
+  return tab; // segments are rendered by renderTermTab once the first pane exists
 }
 
 // Paste a clipboard image into the terminal by pushing it onto the WSL clipboard as PNG, then sending
@@ -410,7 +454,7 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   const id = nextTermId++;
   const host = document.createElement('div');
   host.className = 'term-pane';
-  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null };
+  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null };
   if (group.paneIds.length > 0) {
     entry.divider = makeTermDivider(group);
     group.container.appendChild(entry.divider);
@@ -449,6 +493,7 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   wireTerminal(entry);
   group.paneIds.push(id);
   group.activePaneId = id;
+  renderTermTab(group); // the new pane gets its own tab segment
   window.api.terminalStart({ id, ...config, command, cwd });
   return entry;
 }
@@ -459,7 +504,7 @@ function createTerminal({ command = '', cwd = '' } = {}) {
   const container = document.createElement('div');
   container.className = 'term-group';
   terminalHost.appendChild(container);
-  const group = { id, name: null, tab: null, container, paneIds: [], activePaneId: null };
+  const group = { id, tab: null, container, paneIds: [], activePaneId: null }; // names live on panes
   group.tab = makeTermTab(group);
   termGroups.set(id, group);
   const entry = createPane(group, { command, cwd });
@@ -522,6 +567,7 @@ function closePane(paneId) {
   }
   if (group.activePaneId === paneId) group.activePaneId = group.paneIds[group.paneIds.length - 1];
   refreshPaneChrome(group);
+  renderTermTab(group); // drop the closed pane's tab segment
   setTimeout(() => {
     fitGroupPanes(group);
     const focus = terminals.get(group.activePaneId);
