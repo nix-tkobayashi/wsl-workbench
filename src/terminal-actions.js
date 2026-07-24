@@ -59,7 +59,19 @@
     return `cd -- '${cwd.replace(/'/g, "'\\''")}' 2>/dev/null`;
   }
 
-  const terminalActions = { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand };
+  // One label segment per pane for a terminal tab (Cursor-style split naming): every pane keeps its
+  // own name — custom when set, else "<defaultWord> <pane id>" — and the focused pane is marked
+  // only when the tab is actually split (a single-pane mark would just be noise).
+  function buildTabSegments({ panes = [], activePaneId = null, defaultWord = 'Terminal' } = {}) {
+    const multi = panes.length > 1;
+    return panes.map((p) => ({
+      id: p.id,
+      label: p.name || `${defaultWord} ${p.id}`,
+      focused: multi && p.id === activePaneId
+    }));
+  }
+
+  const terminalActions = { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = terminalActions;
   }

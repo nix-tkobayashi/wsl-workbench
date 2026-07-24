@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand } = require('../src/terminal-actions');
+const { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments } = require('../src/terminal-actions');
 
 // Build a mock io that records calls and lets the test control selection/clipboard.
 function makeIO({ selection = '', clipboard = '' } = {}) {
@@ -138,6 +138,28 @@ test('shellCdCommand: returns empty for unusable input (caller stays at the work
   assert.equal(shellCdCommand('/has\nnewline'), '');
   assert.equal(shellCdCommand(null), '');
   assert.equal(shellCdCommand(42), '');
+});
+
+test('buildTabSegments: default names use the localized word + pane id, custom names win', () => {
+  const segs = buildTabSegments({
+    panes: [{ id: 1, name: null }, { id: 4, name: 'build' }],
+    activePaneId: 4,
+    defaultWord: 'ターミナル'
+  });
+  assert.deepEqual(segs, [
+    { id: 1, label: 'ターミナル 1', focused: false },
+    { id: 4, label: 'build', focused: true }
+  ]);
+});
+
+test('buildTabSegments: a single pane is never marked focused (mark only matters when split)', () => {
+  const segs = buildTabSegments({ panes: [{ id: 2, name: null }], activePaneId: 2, defaultWord: 'Terminal' });
+  assert.deepEqual(segs, [{ id: 2, label: 'Terminal 2', focused: false }]);
+});
+
+test('buildTabSegments: tolerates empty/missing input', () => {
+  assert.deepEqual(buildTabSegments({}), []);
+  assert.deepEqual(buildTabSegments(), []);
 });
 
 test('terminal-actions.js is IIFE-wrapped and sets window.terminalActions without leaking globals', () => {
