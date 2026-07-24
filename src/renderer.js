@@ -1836,35 +1836,45 @@ function initResizers() {
   const vertical = document.getElementById('verticalResizer');
   const horizontal = document.getElementById('horizontalResizer');
 
-  vertical.addEventListener('mousedown', (event) => {
-    event.preventDefault();
-    const onMove = (moveEvent) => {
-      const width = Math.max(180, Math.min(700, moveEvent.clientX));
-      layout.style.gridTemplateColumns = `${width}px 1px 1fr`;
-      fitActiveTerminal();
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+  // Pointer capture (not window mousemove/mouseup): releasing the button over an iframe (PDF/HTML
+  // preview) never delivers mouseup to this window, which left the old drag stuck to the hovering
+  // mouse. Capture keeps move/up events flowing to the handle wherever the pointer is; the
+  // `buttons` check self-heals if the up event is lost anyway, and body.resizing turns off iframe
+  // hit-testing so a fast drag across a preview can't swallow events mid-drag.
+  function attachDrag(handle, applyMove) {
+    handle.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      try { handle.setPointerCapture(event.pointerId); } catch {}
+      document.body.classList.add('resizing');
+      const onMove = (moveEvent) => {
+        if (moveEvent.buttons === 0) { onEnd(); return; }
+        applyMove(moveEvent);
+      };
+      const onEnd = () => {
+        handle.removeEventListener('pointermove', onMove);
+        handle.removeEventListener('pointerup', onEnd);
+        handle.removeEventListener('pointercancel', onEnd);
+        try { handle.releasePointerCapture(event.pointerId); } catch {}
+        document.body.classList.remove('resizing');
+      };
+      handle.addEventListener('pointermove', onMove);
+      handle.addEventListener('pointerup', onEnd);
+      handle.addEventListener('pointercancel', onEnd);
+    });
+  }
+
+  attachDrag(vertical, (moveEvent) => {
+    const width = Math.max(180, Math.min(700, moveEvent.clientX));
+    layout.style.gridTemplateColumns = `${width}px 1px 1fr`;
+    fitActiveTerminal();
   });
 
-  horizontal.addEventListener('mousedown', (event) => {
-    event.preventDefault();
-    const onMove = (moveEvent) => {
-      const rect = rightPane.getBoundingClientRect();
-      const topHeight = Math.max(120, Math.min(rect.height - 140, moveEvent.clientY - rect.top));
-      rightPane.style.gridTemplateRows = `${topHeight}px 1px 1fr`;
-      fitActiveTerminal();
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+  attachDrag(horizontal, (moveEvent) => {
+    const rect = rightPane.getBoundingClientRect();
+    const topHeight = Math.max(120, Math.min(rect.height - 140, moveEvent.clientY - rect.top));
+    rightPane.style.gridTemplateRows = `${topHeight}px 1px 1fr`;
+    fitActiveTerminal();
   });
 }
 
