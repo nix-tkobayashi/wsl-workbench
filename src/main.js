@@ -157,7 +157,7 @@ function setCurrentWorkspaceForWindow(win, next) {
   }
 }
 
-const { wslPathToWindowsFsPath, parseSelectedPath, isNtfsAdsPath } = require('./wsl-paths');
+const { wslPathToWindowsFsPath, parseSelectedPath, isNtfsAdsPath, isZoneIdentifierName } = require('./wsl-paths');
 const { copyFileContentsSync } = require('./fs-copy');
 
 
@@ -243,6 +243,17 @@ function copyRecursiveSafeSync(source, destination, result) {
   result.skipped.push({ source, reason: 'not a regular file or directory' });
 }
 
+// Entries the tree never shows: Git internals, plus the `name:Zone.Identifier` files Windows
+// Explorer leaves in a WSL directory when it copies a downloaded file's Mark-of-the-Web stream
+// onto ext4 (#57). They carry no content, cannot be created by this app (it strips ADS while
+// copying, #47) and their name renders as garbled next to the real file. Also applied to the
+// change signature below, so a stray one appearing does not trigger a tree refresh either.
+// Only regular files are hidden: such a name on a directory is a real one the user made, since
+// the stream residue is always a plain file.
+function isHiddenTreeEntry(entry) {
+  return entry.name.startsWith('.git') || (entry.isFile() && isZoneIdentifierName(entry.name));
+}
+
 async function readDirTree({ distro = DEFAULT_DISTRO, wslPath = DEFAULT_WSL_PATH }) {
   const fullPath = wslPathToWindowsFsPath(distro, wslPath);
   let stat;
@@ -263,7 +274,7 @@ async function readDirTree({ distro = DEFAULT_DISTRO, wslPath = DEFAULT_WSL_PATH
     `WSL directory did not respond within ${WSL_FS_TIMEOUT_MS}ms: ${fullPath}`
   );
   const entries = dirEntries
-    .filter((entry) => !entry.name.startsWith('.git'))
+    .filter((entry) => !isHiddenTreeEntry(entry))
     .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
     .map((entry) => {
       const childWslPath = path.posix.join(wslPath, entry.name);
@@ -959,7 +970,7 @@ ipcMain.handle('tree:signature', async (_event, { distro = DEFAULT_DISTRO, paths
     try {
       const entries = await fs.promises.readdir(fullPath, { withFileTypes: true });
       const names = entries
-        .filter((entry) => !entry.name.startsWith('.git'))
+        .filter((entry) => !isHiddenTreeEntry(entry))
         .map((entry) => `${entry.isDirectory() ? 'd' : 'f'}:${entry.name}`)
         .sort();
       parts.push(`${wslPath}|${names.join(',')}`);

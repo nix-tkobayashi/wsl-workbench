@@ -64,6 +64,16 @@ function isNtfsAdsPath(windowsPath) {
   return /[:\uF03A]/.test(segment);
 }
 
+// True when a Linux file name is the residue of a Mark-of-the-Web stream. Copying a downloaded
+// file into a WSL directory *with Windows Explorer* (rather than with this app, which strips ADS
+// while copying — #47) leaves the file's Zone.Identifier stream behind as its own
+// `name:Zone.Identifier` file, because ext4 has no ADS concept. Unlike NTFS, ext4 does allow
+// colons in real file names, so this matches only the exact stream suffix — U+F03A included,
+// since that is how Chromium escapes the colon and either codepoint can reach ext4 (#57).
+function isZoneIdentifierName(name) {
+  return /[:\uF03A]Zone\.Identifier$/i.test(String(name || ''));
+}
+
 // Back-compat wrapper: convert a selected path to a WSL path. The `distro` argument is no longer
 // used for matching (the distro is read from the path itself); callers that need the distro should
 // use parseSelectedPath instead.
@@ -71,4 +81,4 @@ function uncToWsl(_distro, inputPath) {
   return parseSelectedPath(inputPath).wslPath;
 }
 
-module.exports = { wslToUnc, wslPathToWindowsFsPath, windowsDrivePathToWsl, uncToWsl, parseSelectedPath, isNtfsAdsPath };
+module.exports = { wslToUnc, wslPathToWindowsFsPath, windowsDrivePathToWsl, uncToWsl, parseSelectedPath, isNtfsAdsPath, isZoneIdentifierName };

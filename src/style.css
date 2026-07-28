@@ -87,7 +87,7 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 /* The UI is always dark, so force dark native scrollbars on every scrollable pane (otherwise they
    render light when the Windows "app mode" is Light, showing white bars on the dark UI). Scoped to
    the scroll containers so form-control rendering elsewhere is untouched. */
-#editor, .xterm-viewport, #treePane, #editorPreview { color-scheme: dark; }
+#editor, .xterm-viewport, #treePane, #editorPreview, #landingRecentList { color-scheme: dark; }
 /* Force a classic, always-visible scrollbar on the terminal viewport. The native (overlay) dark
    scrollbar auto-hides and, with a large scrollback, its thumb shrinks until it vanishes. The
    ::-webkit-scrollbar rules restore a persistent track; customizing the thumb, however, drops
@@ -227,7 +227,11 @@ body.resizing iframe { pointer-events:none; }
    no workspace is open. Modals still use inset:0 to cover the whole window (standard modal behavior). */
 .landing { position:fixed; top:42px; left:0; right:0; bottom:0; background:var(--bg); display:flex; align-items:center; justify-content:center; z-index:3000; }
 .landing.hidden { display:none; }
-.landing-box { text-align:center; padding:32px 40px; }
+/* A column so the recents list — and only it — absorbs the leftover height (see .landing-recent).
+   max-height keeps the box inside the landing area instead of overflowing it when the list is long. */
+.landing-box { text-align:center; padding:32px 40px; max-height:100%; display:flex; flex-direction:column; }
+/* Everything above the list keeps its natural height; flex items would otherwise shrink to fit. */
+.landing-box > * { flex:0 0 auto; }
 .landing-title { font-size:24px; font-weight:600; margin-bottom:8px; }
 .landing-subtitle { color:var(--muted); font-size:13px; margin-bottom:26px; }
 .landing-actions { display:flex; gap:12px; justify-content:center; }
@@ -235,11 +239,15 @@ body.resizing iframe { pointer-events:none; }
 .landing-actions button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
 .landing-actions button.primary:hover:not(:disabled) { background:#739bff; }
 /* Recent workspaces under the landing buttons: a compact clickable list (hidden when empty). */
-/* Cap the list so 12 recents still fit a short window; the list scrolls, the landing box doesn't. */
-.landing-recent { margin-top:28px; text-align:left; max-height:46vh; overflow-y:auto; }
+/* The list takes all the height the box has left (rather than a fixed 46vh), so all 12 recents fit
+   without a scrollbar on a normal-sized window; only a genuinely short window scrolls, and then the
+   "Recent Workspaces" heading stays pinned because #landingRecentList is the scroller (#58). */
+.landing-recent { margin-top:20px; text-align:left; display:flex; flex-direction:column; min-height:0; }
+.landing-box > .landing-recent { flex:0 1 auto; }
 .landing-recent.hidden { display:none; }
 .landing-recent-title { color:var(--muted); font-size:12px; margin-bottom:6px; }
-.landing-recent-item { display:block; width:100%; max-width:520px; box-sizing:border-box; margin:0 auto 4px; padding:7px 12px; background:transparent; border:1px solid transparent; border-radius:6px; color:var(--accent); font-size:13px; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
+#landingRecentList { min-height:0; overflow-y:auto; }
+.landing-recent-item { display:block; width:100%; max-width:520px; box-sizing:border-box; margin:0 auto 3px; padding:6px 12px; background:transparent; border:1px solid transparent; border-radius:6px; color:var(--accent); font-size:13px; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
 .landing-recent-item:hover { background:var(--hover); border-color:var(--border); }
 
 /* Modal prompt (replacement for unsupported window.prompt) */
