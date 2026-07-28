@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { wslToUnc, wslPathToWindowsFsPath, windowsDrivePathToWsl, uncToWsl, parseSelectedPath, isNtfsAdsPath } = require('../src/wsl-paths');
+const { wslToUnc, wslPathToWindowsFsPath, windowsDrivePathToWsl, uncToWsl, parseSelectedPath, isNtfsAdsPath, isZoneIdentifierName } = require('../src/wsl-paths');
 
 test('wslToUnc builds a \\\\wsl.localhost UNC path', () => {
   assert.equal(wslToUnc('Ubuntu', '/home/skype/projects'), '\\\\wsl.localhost\\Ubuntu\\home\\skype\\projects');
@@ -109,4 +109,20 @@ test('isNtfsAdsPath passes regular files, directories, and UNC paths', () => {
   assert.equal(isNtfsAdsPath('C:\\'), false); // drive root: colon is in the drive segment, not the name
   assert.equal(isNtfsAdsPath('\\\\wsl.localhost\\Ubuntu\\home\\skype\\notes.md'), false);
   assert.equal(isNtfsAdsPath(''), false);
+});
+
+test('isZoneIdentifierName detects the junk file an Explorer copy leaves on ext4 (#57)', () => {
+  assert.equal(isZoneIdentifierName('.mcp.json:Zone.Identifier'), true);
+  // Reported in #57 as `.mcp.jsonZone.Identifier`: the separator is U+F03A, which renders as nothing.
+  assert.equal(isZoneIdentifierName('.mcp.jsonZone.Identifier'), true);
+  assert.equal(isZoneIdentifierName('サンプル資料 (1).pptx:Zone.Identifier'), true);
+  assert.equal(isZoneIdentifierName('setup.exe:zone.identifier'), true); // NTFS stream names are case-insensitive
+});
+
+test('isZoneIdentifierName passes real files, including ones with a colon (#57)', () => {
+  assert.equal(isZoneIdentifierName('.mcp.json'), false);
+  assert.equal(isZoneIdentifierName('Zone.Identifier'), false); // no stream separator: a real file
+  assert.equal(isZoneIdentifierName('notes:2026-07-29.md'), false); // ext4 allows colons in names
+  assert.equal(isZoneIdentifierName('report:Zone.Identifier.bak'), false); // suffix must end the name
+  assert.equal(isZoneIdentifierName(''), false);
 });
