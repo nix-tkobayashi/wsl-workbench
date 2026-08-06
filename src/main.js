@@ -436,12 +436,16 @@ function pushTabsState(win) {
   if (!ws || win.isDestroyed()) return;
   const tabs = ws.tabs.map((id) => {
     const state = viewState.get(id);
+    const landing = !!(state && state.showLanding);
     return {
       id,
       title: tabTitleForWorkspace(
-        { wslPath: state ? state.workspace.wslPath : '', showLanding: !!(state && state.showLanding) },
+        { wslPath: state ? state.workspace.wslPath : '', showLanding: landing },
         tr('tabs.newTab')
       ),
+      // Hover tooltip: the untruncated identity of the tab (full workspace path; ellipsized
+      // labels and same-named leaf directories are both disambiguated by it).
+      tooltip: landing || !state ? tr('tabs.newTab') : `${state.workspace.distro}: ${state.workspace.wslPath}`,
       attention: !!(state && state.attention > 0)
     };
   });
