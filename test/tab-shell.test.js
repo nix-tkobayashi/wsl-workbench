@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { tabTitleForWorkspace, classifyTabDrop, insertionIndex, nextActiveTab, shellWindowTitle } = require('../src/tab-shell');
+const { tabTitleForWorkspace, classifyTabDrop, startsTabDrag, insertionIndex, nextActiveTab, shellWindowTitle } = require('../src/tab-shell');
 
 test('tabTitleForWorkspace: last two path segments, like the in-view workspace name', () => {
   assert.equal(tabTitleForWorkspace({ wslPath: '/home/skype/projects/nix/wb' }), 'nix/wb');
@@ -45,6 +45,18 @@ test('classifyTabDrop: overlapping strips resolve to the first (front-most) wind
     { id: 8, x: 100, y: 0, width: 800, stripHeight: 34 }
   ];
   assert.equal(classifyTabDrop({ point: { x: 200, y: 5 }, windows: overlapping, sourceWinId: 8 }).winId, 7);
+});
+
+test('startsTabDrag: primary button on the tab body starts the activate/drag flow', () => {
+  assert.equal(startsTabDrag({ button: 0, onCloseButton: false }), true);
+  assert.equal(startsTabDrag({}), true);
+});
+
+test('startsTabDrag: the close button and non-primary buttons never start a drag', () => {
+  // Capturing the pointer on the × would swallow its click, making the tab impossible to close.
+  assert.equal(startsTabDrag({ button: 0, onCloseButton: true }), false);
+  assert.equal(startsTabDrag({ button: 1, onCloseButton: false }), false);
+  assert.equal(startsTabDrag({ button: 2, onCloseButton: false }), false);
 });
 
 test('insertionIndex: counts the tab centers the pointer has passed', () => {

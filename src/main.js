@@ -1461,8 +1461,14 @@ ipcMain.handle('folder:pick', async (event) => {
   return { windowsPath: selected, wslPath: parsed.wslPath, distro: parsed.distro || state.workspace.distro };
 });
 
+// Fire-and-forget terminal channels resolve their view state leniently: closing a window tears
+// views down asynchronously (viewState is unregistered, then webContents.close() runs the page
+// teardown), and the closing renderer can still emit a resize/write/close. Dropping such a
+// message is correct — throwing would surface an uncaught-exception dialog per tab.
 ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = '' }) => {
-  const { win, state } = getStateForWebContents(event.sender);
+  const state = viewState.get(event.sender.id);
+  const win = state && state.winId != null ? BrowserWindow.fromId(state.winId) : null;
+  if (!state || !win || win.isDestroyed()) return;
   // pty output goes to the VIEW's webContents (event.sender): it is the stable endpoint that
   // survives the tab being re-parented to another window mid-session.
   const wc = event.sender;
@@ -1509,19 +1515,20 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = 
 });
 
 ipcMain.on('terminal:write', (event, { id, data }) => {
-  const { state } = getStateForWebContents(event.sender);
-  const ptyProc = state.terminals.get(id);
+  const state = viewState.get(event.sender.id);
+  const ptyProc = state && state.terminals.get(id);
   if (ptyProc) ptyProc.write(data);
 });
 
 ipcMain.on('terminal:resize', (event, { id, cols, rows }) => {
-  const { state } = getStateForWebContents(event.sender);
-  const ptyProc = state.terminals.get(id);
+  const state = viewState.get(event.sender.id);
+  const ptyProc = state && state.terminals.get(id);
   if (ptyProc && cols && rows) ptyProc.resize(cols, rows);
 });
 
 ipcMain.on('terminal:close', (event, { id }) => {
-  const { state } = getStateForWebContents(event.sender);
+  const state = viewState.get(event.sender.id);
+  if (!state) return;
   const ptyProc = state.terminals.get(id);
   if (ptyProc) {
     try { ptyProc.kill(); } catch {}
