@@ -21,6 +21,12 @@ body { margin:0; height:100vh; overflow:hidden; background:var(--bg); color:var(
 .menubtn { background:transparent; border:0; padding:4px 8px; border-radius:4px; color:var(--text); font-size:13px; cursor:pointer; }
 .menubtn:hover { background:var(--hover); }
 .menubtn.update-avail { color:var(--accent); font-weight:600; }
+/* Top-left "waiting for your input" chip: lit only by an explicit OSC 9 notification from a CLI
+   in some pane (never by mere idleness); click jumps to that pane. */
+.attention-chip { -webkit-app-region: no-drag; background:transparent; border:0; padding:4px 8px; border-radius:4px; color:#e8a33d; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; flex:none; }
+.attention-chip:hover { background:var(--hover); }
+.attention-chip::before { content:'●'; margin-right:5px; }
+.attention-chip.hidden { display:none; }
 button { background:#2a2a2a; color:var(--text); border:1px solid #444; padding:5px 10px; border-radius:6px; cursor:pointer; }
 button:hover:not(:disabled) { background:#3a3a3a; }
 button:disabled { opacity:.45; cursor:not-allowed; }
@@ -164,6 +170,8 @@ body.resizing iframe { pointer-events:none; }
 .term-tab-label { display:flex; align-items:center; gap:4px; }
 .term-tab-seg { padding:0 3px; border-radius:3px; }
 .term-tab-seg.focused { background:#333; color:var(--text); }
+/* Pane-level attention dot: this pane's CLI finished and waits for input (cleared on keystroke). */
+.term-tab-seg.attention::before { content:'●'; color:#e8a33d; margin-right:3px; }
 .term-tab-sep { opacity:.55; }
 .term-tab .term-tab-close { width:14px; text-align:center; border-radius:3px; color:var(--muted); }
 .term-tab .term-tab-close:hover { background:#555; color:#fff; }

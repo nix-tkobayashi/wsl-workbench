@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('api', {
   onUpdateProgress: (cb) => ipcRenderer.on('update:progress', (_event, payload) => cb(payload)),
   onUpdateAvailable: (cb) => ipcRenderer.on('update:available', (_event, payload) => cb(payload)),
   installUpdate: () => ipcRenderer.invoke('update:install'),
+  setAttention: (payload) => ipcRenderer.send('window:attention', payload),
   windowMinimize: () => ipcRenderer.send('window:minimize'),
   windowToggleMaximize: () => ipcRenderer.send('window:toggleMaximize'),
   windowClose: () => ipcRenderer.send('window:close'),

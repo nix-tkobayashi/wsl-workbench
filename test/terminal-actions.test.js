@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments } = require('../src/terminal-actions');
+const { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionSummary } = require('../src/terminal-actions');
 
 // Build a mock io that records calls and lets the test control selection/clipboard.
 function makeIO({ selection = '', clipboard = '' } = {}) {
@@ -147,19 +147,78 @@ test('buildTabSegments: default names use the localized word + pane id, custom n
     defaultWord: 'ターミナル'
   });
   assert.deepEqual(segs, [
-    { id: 1, label: 'ターミナル 1', focused: false },
-    { id: 4, label: 'build', focused: true }
+    { id: 1, label: 'ターミナル 1', focused: false, attention: false },
+    { id: 4, label: 'build', focused: true, attention: false }
   ]);
 });
 
 test('buildTabSegments: a single pane is never marked focused (mark only matters when split)', () => {
   const segs = buildTabSegments({ panes: [{ id: 2, name: null }], activePaneId: 2, defaultWord: 'Terminal' });
-  assert.deepEqual(segs, [{ id: 2, label: 'Terminal 2', focused: false }]);
+  assert.deepEqual(segs, [{ id: 2, label: 'Terminal 2', focused: false, attention: false }]);
+});
+
+test('buildTabSegments: passes each pane\'s attention flag through as a boolean', () => {
+  const segs = buildTabSegments({
+    panes: [{ id: 1, name: null, attention: true }, { id: 2, name: null }],
+    activePaneId: 1,
+    defaultWord: 'Terminal'
+  });
+  assert.equal(segs[0].attention, true);
+  assert.equal(segs[1].attention, false);
 });
 
 test('buildTabSegments: tolerates empty/missing input', () => {
   assert.deepEqual(buildTabSegments({}), []);
   assert.deepEqual(buildTabSegments(), []);
+});
+
+test('parseOsc9Attention: a plain tool name becomes the attention label', () => {
+  assert.equal(parseOsc9Attention('claude'), 'claude');
+  assert.equal(parseOsc9Attention('codex'), 'codex');
+  assert.equal(parseOsc9Attention('  codex  '), 'codex'); // trimmed
+});
+
+test('parseOsc9Attention: an empty payload still signals attention (label falls back later)', () => {
+  assert.equal(parseOsc9Attention(''), '');
+  assert.equal(parseOsc9Attention(null), '');
+  assert.equal(parseOsc9Attention(undefined), '');
+});
+
+test('parseOsc9Attention: structured "<digit>;" payloads (progress reports) are not attention', () => {
+  assert.equal(parseOsc9Attention('4;1;50'), null);   // Windows Terminal / ConEmu progress
+  assert.equal(parseOsc9Attention('9;10'), null);     // ConEmu sub-commands
+  assert.equal(parseOsc9Attention('12;something'), null);
+});
+
+test('parseOsc9Attention: strips control characters and caps the label length', () => {
+  assert.equal(parseOsc9Attention('cla\x07ude\x1b'), 'claude');
+  assert.equal(parseOsc9Attention('x'.repeat(100)).length, 32);
+});
+
+test('attentionSummary: null when nothing waits', () => {
+  assert.equal(attentionSummary({ items: [] }), null);
+  assert.equal(attentionSummary(), null);
+});
+
+test('attentionSummary: one waiting pane names the tool and the pane', () => {
+  const s = attentionSummary({ items: [{ label: 'codex', paneName: 'Terminal 2' }], waitingWord: 'Waiting', appName: 'WSL Workbench' });
+  assert.equal(s.chip, 'codex — Terminal 2');
+  assert.equal(s.docTitle, '● codex — Terminal 2 — WSL Workbench');
+});
+
+test('attentionSummary: an unnamed notification falls back to the pane name alone', () => {
+  const s = attentionSummary({ items: [{ label: '', paneName: 'build' }], waitingWord: 'Waiting', appName: 'WSL Workbench' });
+  assert.equal(s.chip, 'build');
+});
+
+test('attentionSummary: several waiting panes collapse to a localized count', () => {
+  const s = attentionSummary({
+    items: [{ label: 'claude', paneName: 'A' }, { label: 'codex', paneName: 'B' }],
+    waitingWord: '確認待ち',
+    appName: 'WSL Workbench'
+  });
+  assert.equal(s.chip, '確認待ち (2)');
+  assert.equal(s.docTitle, '● 確認待ち (2) — WSL Workbench');
 });
 
 test('terminal-actions.js is IIFE-wrapped and sets window.terminalActions without leaking globals', () => {

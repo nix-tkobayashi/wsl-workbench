@@ -67,11 +67,35 @@
     return panes.map((p) => ({
       id: p.id,
       label: p.name || `${defaultWord} ${p.id}`,
-      focused: multi && p.id === activePaneId
+      focused: multi && p.id === activePaneId,
+      attention: !!p.attention
     }));
   }
 
-  const terminalActions = { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments };
+  // Payload of an OSC 9 sequence → attention label ("this pane's CLI finished and waits for input").
+  // OSC 9 is what a Claude Code Stop hook / codex notify emits; the payload names the tool (may be
+  // empty — the badge then falls back to the pane name). Returns null for structured payloads like
+  // "4;1;50" (ConEmu / Windows Terminal progress reports share OSC 9 with a "<digit>;" prefix) so a
+  // build showing a progress bar never lights the badge. Control characters are stripped and the
+  // label capped, since it lands in the menubar chip and the window title.
+  function parseOsc9Attention(payload) {
+    const text = String(payload == null ? '' : payload);
+    if (/^\d+;/.test(text)) return null;
+    return text.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 32);
+  }
+
+  // Chip + window-title text for the panes currently waiting on the user. One waiting pane names
+  // the tool and the pane ("codex — Terminal 2"); several collapse to a count ("<waitingWord> (3)").
+  // Returns null when nothing waits (chip hidden, title back to the plain app name).
+  function attentionSummary({ items = [], waitingWord = 'Waiting', appName = 'WSL Workbench' } = {}) {
+    if (!items.length) return null;
+    const first = items[0];
+    const one = first.label ? `${first.label} — ${first.paneName}` : String(first.paneName || '');
+    const chip = items.length === 1 ? one : `${waitingWord} (${items.length})`;
+    return { chip, docTitle: `● ${chip} — ${appName}` };
+  }
+
+  const terminalActions = { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionSummary };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = terminalActions;
   }
