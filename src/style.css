@@ -11,13 +11,8 @@ body { margin:0; height:100vh; overflow:hidden; background:var(--bg); color:var(
 .title:empty { display:none; }
 #menubar { display:flex; gap:2px; }
 /* Interactive elements must opt out of the drag region or clicks become window drags. */
-.menubtn, #winControls { -webkit-app-region: no-drag; }
-/* Custom window controls (min/max/close), flush to the top-right corner like VS Code / Cursor.
-   margin-left:auto pushes them right (the removed Start Claude button used to do this). */
-#winControls { display:flex; align-self:stretch; margin:0 -12px 0 auto; }
-.winctl { width:46px; height:42px; display:flex; align-items:center; justify-content:center; padding:0; background:transparent; border:0; border-radius:0; color:var(--text); font-family:"Segoe Fluent Icons","Segoe MDL2 Assets",sans-serif; font-size:10px; line-height:1; cursor:pointer; }
-.winctl:hover:not(:disabled) { background:#2d2d2d; }
-.wctl-close:hover:not(:disabled) { background:#c42b1c; color:#fff; }
+.menubtn { -webkit-app-region: no-drag; }
+/* Window controls (min/max/close) moved to the tab strip shell — see tabstrip.css. */
 .menubtn { background:transparent; border:0; padding:4px 8px; border-radius:4px; color:var(--text); font-size:13px; cursor:pointer; }
 .menubtn:hover { background:var(--hover); }
 .menubtn.update-avail { color:var(--accent); font-weight:600; }

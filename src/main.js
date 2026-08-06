@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, nativeImage } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, Menu, clipboard, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -34,8 +34,20 @@ const WSL_FS_TIMEOUT_MS = Math.max(1000, Number(process.env.WSLWB_FS_TIMEOUT_MS)
 
 const { WORKSPACE_EXT } = require('./workspace-args'); // single source for the extension + argv parsing
 const { shellCdCommand } = require('./terminal-actions'); // inherited-cwd `cd` for terminal:start
+const { tabTitleForWorkspace, classifyTabDrop, nextActiveTab, shellWindowTitle } = require('./tab-shell');
 
-const windowState = new Map();
+// --- Tabbed windows: every BrowserWindow is a thin shell (its own webContents renders only the
+// tab strip + window controls), and each open workspace is a WebContentsView child. A view keeps
+// the same webContents for its whole life, so dragging a tab to another window (or tearing it off
+// into a new one) re-parents the view without reloading — terminals (ptys), the editor, and all
+// renderer state survive the move. ---
+const TABSTRIP_H = 34; // must match the strip height in tabstrip.html
+const windowState = new Map(); // BrowserWindow id -> { tabs: [view webContents id...], activeId }
+const viewState = new Map();   // view webContents id -> { view, workspace, terminals, showLanding, attention, winId }
+// Most-recently-focused window ids, front first. Electron exposes no z-order, so this stands in
+// for it when a tab drop lands where two windows' strips overlap (classifyTabDrop picks the first
+// hit, which must be the front-most strip).
+const windowFocusOrder = [];
 
 // --- Language / settings persistence ---
 let currentLang = 'en';
@@ -72,8 +84,12 @@ function setLanguage(lang) {
   currentLang = next;
   writeSettings({ lang: currentLang });
   buildAppMenu();
+  // Workspace views localize their whole UI; shells re-localize tab titles via tabs:state.
+  for (const state of viewState.values()) {
+    if (!state.view.webContents.isDestroyed()) state.view.webContents.send('lang:changed', currentLang);
+  }
   for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) win.webContents.send('lang:changed', currentLang);
+    if (!win.isDestroyed()) { win.webContents.send('lang:changed', currentLang); pushTabsState(win); }
   }
 }
 const tr = (key) => i18n.t(currentLang, key);
@@ -101,30 +117,38 @@ function normalizeWorkspace(next = {}, fallback = defaultWorkspace()) {
   };
 }
 
+// Per-view state for an IPC sender (a workspace view's webContents). `win` is the view's CURRENT
+// owner window — resolved through our own registry, not BrowserWindow.fromWebContents, because a
+// tear-off re-parents the view and the registry is what tracks that.
 function getStateForWebContents(webContents) {
-  const win = BrowserWindow.fromWebContents(webContents);
-  if (!win) throw new Error('Window not found.');
-  const state = windowState.get(win.id);
-  if (!state) throw new Error('Window state not found.');
+  const state = viewState.get(webContents.id);
+  if (!state) throw new Error('View state not found.');
+  const win = state.winId != null ? BrowserWindow.fromId(state.winId) : null;
+  if (!win || win.isDestroyed()) throw new Error('Window not found.');
   return { win, state };
 }
 
+// The window an IPC sender belongs to: a shell strip sends from the window's own webContents,
+// a workspace view resolves through the registry.
+function windowForSender(sender) {
+  const state = viewState.get(sender.id);
+  if (state) return state.winId != null ? BrowserWindow.fromId(state.winId) : null;
+  return BrowserWindow.fromWebContents(sender);
+}
+
+// The focused window plus its ACTIVE TAB's view state (menu actions target the visible workspace).
 function getFocusedWindowAndState() {
   const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
   if (!win) return { win: null, state: null };
-  return { win, state: windowState.get(win.id) };
+  const ws = windowState.get(win.id);
+  return { win, state: (ws && viewState.get(ws.activeId)) || null };
 }
 
-// Forward a menu action to the focused window's renderer (for actions that live in the renderer,
-// e.g. saving the open editor file or refreshing the tree).
+// Forward a menu action to the focused window's ACTIVE workspace view (the shell webContents
+// only renders the tab strip and knows nothing about trees or terminals).
 function sendToFocusedWindow(channel) {
-  const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
-  if (win && !win.isDestroyed()) win.webContents.send(channel);
-}
-
-function getCurrentWorkspaceForWindow(win) {
-  const state = windowState.get(win.id);
-  return normalizeWorkspace(state?.workspace);
+  const { state } = getFocusedWindowAndState();
+  if (state && !state.view.webContents.isDestroyed()) state.view.webContents.send(channel);
 }
 
 function getDefaultOpenWorkspacePath(distro = DEFAULT_DISTRO) {
@@ -145,16 +169,16 @@ function rememberWorkspace(ws) {
   writeSettings({ recentWorkspaces: next, lastWorkspace: workspace });
 }
 
-function setCurrentWorkspaceForWindow(win, next) {
-  const state = windowState.get(win.id);
+function setCurrentWorkspaceForView(state, next) {
   if (!state) return;
   state.workspace = normalizeWorkspace(next, state.workspace);
   state.showLanding = false;
   // NOT remembered here: the renderer may still reject this switch (dirty-tab discard prompt).
   // rememberWorkspace() runs on terminal:start, which only fires once a workspace is really applied.
-  if (!win.isDestroyed()) {
-    win.webContents.send('workspace:changed', { ...state.workspace });
-  }
+  const wc = state.view.webContents;
+  if (!wc.isDestroyed()) wc.send('workspace:changed', { ...state.workspace });
+  const win = state.winId != null ? BrowserWindow.fromId(state.winId) : null;
+  if (win) pushTabsState(win); // the tab label follows the workspace
 }
 
 const { wslPathToWindowsFsPath, parseSelectedPath, isNtfsAdsPath, isZoneIdentifierName } = require('./wsl-paths');
@@ -288,17 +312,74 @@ async function readDirTree({ distro = DEFAULT_DISTRO, wslPath = DEFAULT_WSL_PATH
   return { name: path.posix.basename(wslPath) || '/', path: wslPath, type: 'directory', children: entries };
 }
 
-function createWindow(initialWorkspace = defaultWorkspace(), { showLanding = false } = {}) {
+// Security hardening shared by the shell and every workspace view: never let content (e.g. a link
+// in the Markdown preview) open an Electron window or navigate away from our page. http(s) targets
+// are handed to the OS browser; everything else is denied. This also backstops any click path
+// (middle-click, window.open) that the renderer's own link handler doesn't intercept.
+function hardenWebContents(wc) {
+  wc.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  wc.on('will-navigate', (event, url) => {
+    event.preventDefault();
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+  });
+}
+
+// A shell window: frameless, its own webContents renders only the tab strip (drag region, tabs,
+// window controls). Workspace views are attached below the strip by addTab().
+function createShellWindow() {
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
     minWidth: 880,
     minHeight: 560,
-    // Custom title bar (like VS Code / Cursor): frameless window with the toolbar drawn in its place.
-    // The toolbar is the drag region; min/max/close are custom buttons wired to IPC below. The app
-    // menu is retained only for keyboard accelerators (autoHideMenuBar keeps it from drawing a row).
     frame: false,
-    autoHideMenuBar: true,
+    autoHideMenuBar: true, // the real menu is kept for accelerators; the strip has no menu row
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  windowState.set(win.id, { tabs: [], activeId: null });
+  windowFocusOrder.unshift(win.id); // a new window opens in front
+
+  win.on('focus', () => {
+    const i = windowFocusOrder.indexOf(win.id);
+    if (i > 0) { windowFocusOrder.splice(i, 1); windowFocusOrder.unshift(win.id); }
+  });
+
+  win.on('closed', () => {
+    // Destroy every view still parented here (a re-parented view has already changed winId).
+    for (const [id, state] of viewState) {
+      if (state.winId === win.id) destroyView(id);
+    }
+    windowState.delete(win.id);
+    const i = windowFocusOrder.indexOf(win.id);
+    if (i >= 0) windowFocusOrder.splice(i, 1);
+  });
+
+  const relayout = () => layoutViews(win);
+  win.on('resize', relayout);
+  win.on('maximize', () => { relayout(); sendMaximized(win); });
+  win.on('unmaximize', () => { relayout(); sendMaximized(win); });
+
+  hardenWebContents(win.webContents);
+  win.loadFile(path.join(__dirname, 'tabstrip.html'));
+  return win;
+}
+
+// Keep the strip's custom maximize/restore button glyph in sync with the actual window state.
+function sendMaximized(win) {
+  if (!win.isDestroyed()) win.webContents.send('window:maximized', win.isMaximized());
+}
+
+// A workspace view: the full existing single-page app (tree/editor/terminals) in a
+// WebContentsView. Its webContents is the stable identity every per-workspace IPC keys on.
+function createWorkspaceView(initialWorkspace = defaultWorkspace(), { showLanding = false } = {}) {
+  const view = new WebContentsView({
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -306,52 +387,141 @@ function createWindow(initialWorkspace = defaultWorkspace(), { showLanding = fal
       plugins: true // Chromium's built-in PDF viewer (used by the editor's PDF preview iframe)
     }
   });
-
-  windowState.set(win.id, {
+  const wc = view.webContents;
+  viewState.set(wc.id, {
+    view,
     workspace: normalizeWorkspace(initialWorkspace),
-    terminals: new Map(), // terminal id -> pty (multiple tabs per window)
-    showLanding
+    terminals: new Map(), // terminal id -> pty (multiple terminal tabs per workspace)
+    showLanding,
+    attention: 0, // panes in this view currently waiting for user input (OSC 9)
+    winId: null
   });
-
-  win.on('closed', () => {
-    const state = windowState.get(win.id);
-    if (state) {
-      for (const ptyProc of state.terminals.values()) {
-        try { ptyProc.kill(); } catch {}
-      }
-    }
-    windowState.delete(win.id);
-  });
-
-  // Keep the custom maximize/restore button glyph in sync with the actual window state.
-  const sendMaximized = () => {
-    if (!win.isDestroyed()) win.webContents.send('window:maximized', win.isMaximized());
-  };
-  win.on('maximize', sendMaximized);
-  win.on('unmaximize', sendMaximized);
-
-  // Security hardening for the single-page app: never let content (e.g. a link in the Markdown
-  // preview) open an Electron window or navigate the renderer away from index.html. http(s) targets
-  // are handed to the OS browser; everything else is denied. This also backstops any click path
-  // (middle-click, window.open) that the renderer's own link handler doesn't intercept.
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
-    return { action: 'deny' };
-  });
-  win.webContents.on('will-navigate', (event, url) => {
-    event.preventDefault();
-    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
-  });
-
-  // Windows created after the startup update check completed still get the notification (the
+  hardenWebContents(wc);
+  // Views created after the startup update check completed still get the notification (the
   // pre-load webContents.send from checkForUpdatesInBackground is lost if the page isn't ready).
-  win.webContents.on('did-finish-load', () => {
-    if (startupUpdate && !win.isDestroyed()) {
-      win.webContents.send('update:available', { version: startupUpdate.version });
-    }
+  wc.on('did-finish-load', () => {
+    if (startupUpdate && !wc.isDestroyed()) wc.send('update:available', { version: startupUpdate.version });
   });
+  wc.loadFile(path.join(__dirname, 'index.html'));
+  return view;
+}
 
-  win.loadFile(path.join(__dirname, 'index.html'));
+function destroyView(id) {
+  const state = viewState.get(id);
+  if (!state) return;
+  for (const ptyProc of state.terminals.values()) {
+    try { ptyProc.kill(); } catch {}
+  }
+  viewState.delete(id);
+  try { state.view.webContents.close(); } catch {}
+}
+
+// Every view of a window shares the same bounds (the area under the strip); only the active one
+// is visible. Sized on every window resize and on attach.
+function layoutViews(win) {
+  const ws = windowState.get(win.id);
+  if (!ws || win.isDestroyed()) return;
+  const [width, height] = win.getContentSize();
+  const bounds = { x: 0, y: TABSTRIP_H, width, height: Math.max(0, height - TABSTRIP_H) };
+  for (const id of ws.tabs) {
+    const state = viewState.get(id);
+    if (state) state.view.setBounds(bounds);
+  }
+}
+
+// Push the full strip model to a shell (tabs, active tab, aggregated attention) and mirror the
+// aggregate on the window title (Alt+Tab) + taskbar overlay. One source of truth: main.
+function pushTabsState(win) {
+  const ws = windowState.get(win.id);
+  if (!ws || win.isDestroyed()) return;
+  const tabs = ws.tabs.map((id) => {
+    const state = viewState.get(id);
+    const landing = !!(state && state.showLanding);
+    return {
+      id,
+      title: tabTitleForWorkspace(
+        { wslPath: state ? state.workspace.wslPath : '', showLanding: landing },
+        tr('tabs.newTab')
+      ),
+      // Hover tooltip: the untruncated identity of the tab (full workspace path; ellipsized
+      // labels and same-named leaf directories are both disambiguated by it).
+      tooltip: landing || !state ? tr('tabs.newTab') : `${state.workspace.distro}: ${state.workspace.wslPath}`,
+      attention: !!(state && state.attention > 0)
+    };
+  });
+  const attentionTotal = ws.tabs.reduce((n, id) => n + ((viewState.get(id) || {}).attention || 0), 0);
+  const active = tabs.find((tab) => tab.id === ws.activeId);
+  win.webContents.send('tabs:state', {
+    tabs,
+    activeId: ws.activeId,
+    lang: currentLang,
+    title: shellWindowTitle({ activeTitle: active ? active.title : '', attentionCount: attentionTotal })
+  });
+  updateWindowOverlay(win, attentionTotal);
+}
+
+// The overlay dot travels from a workspace renderer as a data URL once (canvas-drawn); reuse it
+// for every window. setOverlayIcon is a no-op outside Windows and must never break the caller.
+let attentionIconDataUrl = null;
+function updateWindowOverlay(win, attentionTotal) {
+  try {
+    if (attentionTotal > 0 && attentionIconDataUrl) {
+      const image = nativeImage.createFromDataURL(attentionIconDataUrl);
+      if (!image.isEmpty()) win.setOverlayIcon(image, tr('attention.waiting'));
+    } else {
+      win.setOverlayIcon(null, '');
+    }
+  } catch {}
+}
+
+function addTab(win, viewId, { activate = true } = {}) {
+  const ws = windowState.get(win.id);
+  const state = viewState.get(viewId);
+  if (!ws || !state || win.isDestroyed()) return;
+  ws.tabs.push(viewId);
+  state.winId = win.id;
+  win.contentView.addChildView(state.view);
+  layoutViews(win);
+  if (activate || ws.tabs.length === 1) activateTab(win, viewId);
+  else { state.view.setVisible(false); pushTabsState(win); }
+}
+
+function activateTab(win, viewId) {
+  const ws = windowState.get(win.id);
+  if (!ws || !ws.tabs.includes(viewId)) return;
+  ws.activeId = viewId;
+  for (const id of ws.tabs) {
+    const state = viewState.get(id);
+    if (state) state.view.setVisible(id === viewId);
+  }
+  const active = viewState.get(viewId);
+  if (active && !active.view.webContents.isDestroyed()) active.view.webContents.focus();
+  pushTabsState(win);
+}
+
+// Remove a tab from its window: destroy=true closes the workspace (tab ×, Ctrl+W), destroy=false
+// keeps the view alive for re-parenting (tear-off / merge). Closing the last tab closes the window.
+function removeTab(win, viewId, { destroy = true } = {}) {
+  const ws = windowState.get(win.id);
+  const state = viewState.get(viewId);
+  if (!ws || !ws.tabs.includes(viewId)) return;
+  const nextId = nextActiveTab(ws.tabs, viewId, ws.activeId);
+  ws.tabs = ws.tabs.filter((id) => id !== viewId);
+  if (state) {
+    try { win.contentView.removeChildView(state.view); } catch {}
+    state.winId = null;
+  }
+  if (destroy) destroyView(viewId);
+  if (!ws.tabs.length) { win.close(); return; }
+  if (nextId != null && nextId !== ws.activeId) activateTab(win, nextId);
+  else pushTabsState(win);
+}
+
+// Public window factory (same signature as before the tab refactor): a shell with one workspace tab.
+function createWindow(initialWorkspace = defaultWorkspace(), { showLanding = false } = {}) {
+  const win = createShellWindow();
+  const view = createWorkspaceView(initialWorkspace, { showLanding });
+  addTab(win, view.webContents.id, { activate: true });
   buildAppMenu();
   return win;
 }
@@ -365,7 +535,7 @@ async function openWorkspaceDialog(win, state) {
   });
   if (result.canceled || !result.filePaths[0]) return;
   const parsed = parseSelectedPath(result.filePaths[0]);
-  setCurrentWorkspaceForWindow(win, {
+  setCurrentWorkspaceForView(state, {
     // Use the distro from the selected path (supports non-default distros like Ubuntu-22.04);
     // fall back to the current distro for drive (/mnt) selections.
     distro: parsed.distro || state.workspace.distro,
@@ -385,7 +555,7 @@ async function openWorkspaceFileDialog(win, state) {
   });
   if (result.canceled || !result.filePaths[0]) return;
   try {
-    setCurrentWorkspaceForWindow(win, readWorkspaceFile(result.filePaths[0], state.workspace));
+    setCurrentWorkspaceForView(state, readWorkspaceFile(result.filePaths[0], state.workspace));
   } catch (error) {
     dialog.showErrorBox(tr('dialog.openFileFailed'), error.message || String(error));
   }
@@ -494,7 +664,13 @@ async function downloadAndInstallUpdate(win, installer) {
   updateInProgress = true;
   const { pipeline } = require('stream/promises');
   const { Readable } = require('stream');
-  const send = (payload) => { if (win && !win.isDestroyed()) win.webContents.send('update:progress', payload); };
+  // Progress UI lives in the workspace renderer, so route to the window's active view (the shell
+  // webContents only draws the tab strip).
+  const send = (payload) => {
+    const ws = win && !win.isDestroyed() ? windowState.get(win.id) : null;
+    const state = ws ? viewState.get(ws.activeId) : null;
+    if (state && !state.view.webContents.isDestroyed()) state.view.webContents.send('update:progress', payload);
+  };
   const setBar = (frac) => { if (win && !win.isDestroyed()) win.setProgressBar(frac); };
   const dest = path.join(app.getPath('temp'), installer.name);
   const controller = new AbortController();
@@ -542,15 +718,16 @@ async function checkForUpdatesInBackground() {
   const latest = await fetchLatestRelease();
   if (!latest || !latest.version || !isNewer(latest.version, app.getVersion())) return;
   startupUpdate = latest;
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) win.webContents.send('update:available', { version: latest.version });
+  // The update button lives in the workspace toolbar, so notify views (not shells).
+  for (const state of viewState.values()) {
+    if (!state.view.webContents.isDestroyed()) state.view.webContents.send('update:available', { version: latest.version });
   }
 }
 
 ipcMain.handle('update:install', (event) => {
   const latest = startupUpdate;
   if (!latest) return { ok: false };
-  const win = BrowserWindow.fromWebContents(event.sender);
+  const win = windowForSender(event.sender);
   if (latest.installer) downloadAndInstallUpdate(win, latest.installer);
   else shell.openExternal(latest.url || RELEASES_PAGE).catch(() => {});
   return { ok: true };
@@ -613,6 +790,16 @@ function buildAppMenu() {
           }
         },
         {
+          label: tr('menu.newTab'),
+          accelerator: 'CmdOrCtrl+T',
+          click: () => {
+            const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+            if (!win || !windowState.has(win.id)) return;
+            const view = createWorkspaceView(defaultWorkspace(), { showLanding: true });
+            addTab(win, view.webContents.id, { activate: true });
+          }
+        },
+        {
           label: tr('menu.openWorkspace'),
           accelerator: 'CmdOrCtrl+O',
           click: () => {
@@ -662,11 +849,14 @@ function buildAppMenu() {
         {
           label: tr('menu.exit'),
           accelerator: 'CmdOrCtrl+W',
-          // Close only the window this menu acted on, not the whole app. When the last window
-          // closes, the existing window-all-closed handler quits the app.
+          // Close only the active TAB of the window this menu acted on (the window itself closes
+          // with its last tab; window-all-closed then quits the app as before).
           click: (_item, focusedWindow) => {
             const win = focusedWindow || BrowserWindow.getFocusedWindow();
-            if (win && !win.isDestroyed()) win.close();
+            if (!win || win.isDestroyed()) return;
+            const ws = windowState.get(win.id);
+            if (ws && ws.activeId != null) removeTab(win, ws.activeId, { destroy: true });
+            else win.close();
           }
         }
       ]
@@ -783,9 +973,8 @@ ipcMain.handle('window:new', (_event, workspace) => {
 });
 
 ipcMain.handle('config:get', (event) => {
-  const { win } = getStateForWebContents(event.sender);
-  const state = windowState.get(win.id);
-  return { ...getCurrentWorkspaceForWindow(win), showLanding: !!state?.showLanding, lang: currentLang };
+  const { state } = getStateForWebContents(event.sender);
+  return { ...normalizeWorkspace(state.workspace), showLanding: !!state.showLanding, lang: currentLang };
 });
 
 ipcMain.handle('workspace:openDirectory', (event) => {
@@ -824,7 +1013,7 @@ function runWslGitClone(distro, parentDirPath, url, name) {
 
 // Clone a repo into the chosen parent folder, then open the cloned directory as the workspace.
 ipcMain.handle('workspace:clone', async (event, { distro = DEFAULT_DISTRO, parentDirPath, url } = {}) => {
-  const { win } = getStateForWebContents(event.sender);
+  const { state } = getStateForWebContents(event.sender);
   if (!url || !url.trim()) throw new Error('Repository URL is required.');
   if (!parentDirPath) throw new Error('Destination folder is required.');
   const cleanUrl = url.trim();
@@ -838,7 +1027,7 @@ ipcMain.handle('workspace:clone', async (event, { distro = DEFAULT_DISTRO, paren
   if (!res.ok) throw new Error(res.message || 'git clone failed.');
   if (!safeStat(targetFsPath)) throw new Error('Clone succeeded but the folder was not found.');
 
-  setCurrentWorkspaceForWindow(win, { distro, wslPath: targetWslPath });
+  setCurrentWorkspaceForView(state, { distro, wslPath: targetWslPath });
   return { ok: true, wslPath: targetWslPath, name };
 });
 
@@ -854,11 +1043,11 @@ ipcMain.handle('workspace:recent', () => {
 
 // Open one of the recent workspaces (clicked on the landing screen).
 ipcMain.handle('workspace:openRecent', (event, { distro = DEFAULT_DISTRO, wslPath } = {}) => {
-  const { win } = getStateForWebContents(event.sender);
+  const { state } = getStateForWebContents(event.sender);
   if (!wslPath) throw new Error('wslPath is required.');
   // applyWorkspace() validates this through readDirTree() and rolls back on failure. Doing a
   // synchronous stat here would freeze the Electron main process when WSL is unresponsive.
-  setCurrentWorkspaceForWindow(win, { distro, wslPath });
+  setCurrentWorkspaceForView(state, { distro, wslPath });
   return { ok: true };
 });
 
@@ -883,12 +1072,10 @@ ipcMain.handle('session:get', (_event, { key } = {}) => {
 // Re-assert renderer state as the source of truth (e.g. the user cancelled a discard prompt, or a
 // workspace failed to load) without re-broadcasting or restarting the terminal.
 ipcMain.handle('workspace:resync', (event, { workspace, showLanding = false } = {}) => {
-  const { win } = getStateForWebContents(event.sender);
-  const state = windowState.get(win.id);
-  if (state) {
-    if (workspace) state.workspace = normalizeWorkspace(workspace, state.workspace);
-    state.showLanding = !!showLanding;
-  }
+  const { win, state } = getStateForWebContents(event.sender);
+  if (workspace) state.workspace = normalizeWorkspace(workspace, state.workspace);
+  state.showLanding = !!showLanding;
+  pushTabsState(win); // the tab label follows the re-asserted workspace / landing state
   return { ok: true };
 });
 
@@ -931,47 +1118,109 @@ ipcMain.handle('clipboard:pushImageToWsl', (_event, { distro = DEFAULT_DISTRO } 
   return { ok: true };
 });
 
-// Custom window controls (frameless window): the toolbar's min/max/close buttons drive these.
+// Custom window controls (frameless window): the tab strip's min/max/close buttons drive these.
 ipcMain.on('window:minimize', (event) => {
-  BrowserWindow.fromWebContents(event.sender)?.minimize();
+  windowForSender(event.sender)?.minimize();
 });
 ipcMain.on('window:toggleMaximize', (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
+  const win = windowForSender(event.sender);
   if (!win) return;
   if (win.isMaximized()) win.unmaximize();
   else win.maximize();
 });
 ipcMain.on('window:close', (event) => {
-  BrowserWindow.fromWebContents(event.sender)?.close();
+  windowForSender(event.sender)?.close();
 });
 
-// Attention state from the renderer (an AI CLI in some pane finished and waits for input):
-// mirror it on the taskbar as an icon overlay so the right window is identifiable even when
-// it's behind others or minimized. The dot is drawn by the renderer (canvas → data URL);
-// setOverlayIcon is a no-op outside Windows, and a malformed icon must never break the IPC.
+// Attention state from a workspace view (panes whose AI CLI finished and waits for input, OSC 9).
+// Stored per view, then mirrored per window: a dot on the view's tab, the aggregated count on the
+// window title and the taskbar icon overlay — the right tab and the right window stay identifiable
+// even when hidden. The dot image is drawn by the renderer (canvas → data URL).
 ipcMain.on('window:attention', (event, { count = 0, icon = '' } = {}) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win) return;
-  try {
-    if (count > 0 && icon) {
-      const image = nativeImage.createFromDataURL(String(icon));
-      if (!image.isEmpty()) win.setOverlayIcon(image, tr('attention.waiting'));
-    } else {
-      win.setOverlayIcon(null, '');
-    }
-  } catch {}
+  const state = viewState.get(event.sender.id);
+  if (!state) return;
+  state.attention = Math.max(0, Number(count) || 0);
+  if (icon) attentionIconDataUrl = String(icon);
+  const win = state.winId != null ? BrowserWindow.fromId(state.winId) : null;
+  if (win && !win.isDestroyed()) pushTabsState(win);
 });
 
 // Pop a top-level application menu's submenu at a screen position, so the in-app toolbar buttons
 // can show the real menus (the native menu bar itself is hidden via autoHideMenuBar). index maps
 // to the application menu's top-level order: 0 Workspace, 1 Edit, 2 View, 3 Language, 4 Help.
+// A workspace view's coordinates are view-relative, so its strip-height offset is added back.
 ipcMain.on('menu:popup', (event, { index, x, y } = {}) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
+  const win = windowForSender(event.sender);
   const appMenu = Menu.getApplicationMenu();
   if (!win || !appMenu) return;
+  const yOffset = viewState.has(event.sender.id) ? TABSTRIP_H : 0;
   const item = appMenu.items[index];
   if (item && item.submenu) {
-    item.submenu.popup({ window: win, x: Math.round(x || 0), y: Math.round(y || 0) });
+    item.submenu.popup({ window: win, x: Math.round(x || 0), y: Math.round((y || 0) + yOffset) });
+  }
+});
+
+// --- Tab strip IPC (sender = a shell window's own webContents) ---
+ipcMain.on('tabs:ready', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return;
+  pushTabsState(win);
+  sendMaximized(win);
+});
+ipcMain.on('tabs:activate', (event, { id } = {}) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win) activateTab(win, id);
+});
+ipcMain.on('tabs:close', (event, { id } = {}) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win) removeTab(win, id, { destroy: true });
+});
+ipcMain.on('tabs:new', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return;
+  const view = createWorkspaceView(defaultWorkspace(), { showLanding: true });
+  addTab(win, view.webContents.id, { activate: true });
+});
+
+// A tab was dropped after a drag: back on its own strip at toIndex (reorder), on another window's
+// strip (merge: re-parent the view there), or anywhere else (tear off into a new window at the
+// cursor). The drop point is classified in screen coordinates against every shell's strip rect.
+ipcMain.on('tabs:drop', (event, { id, screenX = 0, screenY = 0, toIndex = -1 } = {}) => {
+  const sourceWin = BrowserWindow.fromWebContents(event.sender);
+  const ws = sourceWin && windowState.get(sourceWin.id);
+  if (!ws || !ws.tabs.includes(id)) return;
+  // Front-most first (see windowFocusOrder): classifyTabDrop picks the first strip hit, and where
+  // strips overlap the visible one must win.
+  const zIndex = new Map(windowFocusOrder.map((winId, i) => [winId, i]));
+  const windows = BrowserWindow.getAllWindows()
+    .filter((w) => !w.isDestroyed() && windowState.has(w.id))
+    .sort((a, b) => (zIndex.get(a.id) ?? Infinity) - (zIndex.get(b.id) ?? Infinity))
+    .map((w) => ({ id: w.id, ...w.getContentBounds(), stripHeight: TABSTRIP_H }));
+  const verdict = classifyTabDrop({
+    point: { x: Math.round(screenX), y: Math.round(screenY) },
+    windows,
+    sourceWinId: sourceWin.id
+  });
+  if (verdict.type === 'reorder') {
+    if (toIndex < 0) return;
+    const rest = ws.tabs.filter((t) => t !== id);
+    rest.splice(Math.min(Math.max(0, toIndex), rest.length), 0, id);
+    ws.tabs = rest;
+    pushTabsState(sourceWin);
+  } else if (verdict.type === 'merge') {
+    const target = BrowserWindow.fromId(verdict.winId);
+    if (!target || target.isDestroyed()) return;
+    removeTab(sourceWin, id, { destroy: false });
+    addTab(target, id, { activate: true });
+    target.focus();
+  } else {
+    // Tear-off. A single-tab window is already its own window: dragging it out is a no-op.
+    if (ws.tabs.length <= 1) return;
+    removeTab(sourceWin, id, { destroy: false });
+    const win = createShellWindow();
+    win.setPosition(Math.max(0, Math.round(screenX - 120)), Math.max(0, Math.round(screenY - 10)));
+    addTab(win, id, { activate: true });
+    win.focus();
   }
 });
 
@@ -1214,8 +1463,12 @@ ipcMain.handle('folder:pick', async (event) => {
 
 ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = '' }) => {
   const { win, state } = getStateForWebContents(event.sender);
+  // pty output goes to the VIEW's webContents (event.sender): it is the stable endpoint that
+  // survives the tab being re-parented to another window mid-session.
+  const wc = event.sender;
   const workspace = normalizeWorkspace({ distro, wslPath }, state.workspace);
   state.workspace = workspace;
+  pushTabsState(win); // the tab label follows the applied workspace
   // The renderer starts a terminal only after a workspace switch is really applied (a rejected
   // dirty-tab discard never gets here), so THIS is where recents/lastWorkspace are recorded.
   rememberWorkspace(workspace);
@@ -1243,14 +1496,14 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = 
   state.terminals.set(id, ptyProc);
   ptyProc.onData((data) => {
     if (state.terminals.get(id) !== ptyProc) return; // ignore output from a superseded pty
-    if (!win.isDestroyed()) win.webContents.send('terminal:data', { id, data });
+    if (!wc.isDestroyed()) wc.send('terminal:data', { id, data });
   });
   ptyProc.onExit(() => {
     if (state.terminals.get(id) !== ptyProc) return; // superseded by a newer pty for this id; ignore its late exit
     state.terminals.delete(id);
-    if (!win.isDestroyed()) {
-      win.webContents.send('terminal:data', { id, data: `\r\n\x1b[90m${tr('terminal.exited')}\x1b[0m\r\n` });
-      win.webContents.send('terminal:exit', { id });
+    if (!wc.isDestroyed()) {
+      wc.send('terminal:data', { id, data: `\r\n\x1b[90m${tr('terminal.exited')}\x1b[0m\r\n` });
+      wc.send('terminal:exit', { id });
     }
   });
 });

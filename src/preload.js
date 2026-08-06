@@ -48,6 +48,13 @@ contextBridge.exposeInMainWorld('api', {
   onUpdateAvailable: (cb) => ipcRenderer.on('update:available', (_event, payload) => cb(payload)),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   setAttention: (payload) => ipcRenderer.send('window:attention', payload),
+  // Tab strip (shell windows only): render state pushed by main, user intent sent back.
+  tabsReady: () => ipcRenderer.send('tabs:ready'),
+  onTabsState: (cb) => ipcRenderer.on('tabs:state', (_event, state) => cb(state)),
+  tabsActivate: (id) => ipcRenderer.send('tabs:activate', { id }),
+  tabsClose: (id) => ipcRenderer.send('tabs:close', { id }),
+  tabsNew: () => ipcRenderer.send('tabs:new'),
+  tabsDrop: (payload) => ipcRenderer.send('tabs:drop', payload),
   windowMinimize: () => ipcRenderer.send('window:minimize'),
   windowToggleMaximize: () => ipcRenderer.send('window:toggleMaximize'),
   windowClose: () => ipcRenderer.send('window:close'),

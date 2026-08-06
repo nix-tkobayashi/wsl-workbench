@@ -2271,15 +2271,7 @@ window.api.onWorkspaceChanged(async (nextConfig) => {
   await applyWorkspace(nextConfig);
 });
 
-// Custom window controls (frameless window).
-const winMaxBtn = document.getElementById('winMax');
-document.getElementById('winMin').addEventListener('click', () => window.api.windowMinimize());
-winMaxBtn.addEventListener('click', () => window.api.windowToggleMaximize());
-document.getElementById('winClose').addEventListener('click', () => window.api.windowClose());
-window.api.onWindowMaximized((isMax) => {
-  winMaxBtn.innerHTML = isMax ? '&#xE923;' : '&#xE922;'; // restore (overlapping squares) : maximize (single square)
-  winMaxBtn.setAttribute('aria-label', isMax ? 'Restore' : 'Maximize');
-});
+// Window controls moved to the tab strip shell (tabstrip.js) — a workspace is a tab now.
 
 // One-click update: main streams the installer download, then launches it and quits.
 const updateModal = document.getElementById('updateModal');

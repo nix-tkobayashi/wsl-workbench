@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>WSL Workbench</title>
+  <link rel="stylesheet" href="./tabstrip.css" />
+</head>
+<body>
+  <!-- The whole strip is the window drag region; tabs and buttons opt out (no-drag). -->
+  <div id="strip">
+    <img id="appIcon" src="./app-icon.ico" alt="" />
+    <div id="tabs"></div>
+    <button id="newTab" title="">+</button>
+    <div id="dragSpace"></div>
+    <div id="winControls">
+      <button id="winMin" class="winctl" aria-label="Minimize">&#xE921;</button>
+      <button id="winMax" class="winctl" aria-label="Maximize">&#xE922;</button>
+      <button id="winClose" class="winctl wctl-close" aria-label="Close">&#xE8BB;</button>
+    </div>
+  </div>
+  <script src="./i18n.js"></script>
+  <script src="./tab-shell.js"></script>
+  <script src="./tabstrip.js"></script>
+</body>
+</html>
