@@ -14,7 +14,10 @@ Lightweight Windows Electron app for working in WSL:
 - Tree auto-refreshes (files created in the terminal appear without a manual refresh)
 - English / Japanese UI (Language menu)
 - Drag & drop to move within the tree, or copy in from Windows Explorer
-- Multi-window; Exit closes only the active window
+- Workspace tabs: one window hosts multiple workspaces as tabs (`Ctrl+T` for a new tab). Drag a
+  tab out of the window to split it into its own window, or drop it on another window's tab strip
+  to merge — terminals and editor state survive the move (the view is re-parented, never reloaded)
+- Multi-window; Exit (`Ctrl+W`) closes only the active tab (the window closes with its last tab)
 - Resizable left/right and editor/terminal panes
 
 ## Download (Windows)

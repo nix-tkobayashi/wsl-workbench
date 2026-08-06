@@ -1,0 +1,30 @@
+/* Tab strip shell: the only content of a window's own webContents. Height must match
+   TABSTRIP_H in main.js. Visual language follows style.css (dark toolbar). */
+:root { color-scheme: dark; --bg:#111; --text:#ddd; --muted:#9a9a9a; --hover:#2a2a2a; --border:#2b2b2b; }
+* { box-sizing: border-box; user-select: none; }
+body { margin:0; overflow:hidden; background:var(--bg); color:var(--text); font-family:"Segoe UI",sans-serif; }
+#strip { height:34px; display:flex; align-items:center; gap:6px; padding:0 0 0 10px; border-bottom:1px solid var(--border); -webkit-app-region: drag; }
+#appIcon { width:16px; height:16px; flex:none; }
+
+#tabs { display:flex; align-items:flex-end; align-self:stretch; overflow:hidden; -webkit-app-region: no-drag; }
+.wtab { display:flex; align-items:center; gap:6px; max-width:220px; min-width:60px; height:28px; margin-top:6px; padding:0 8px 0 10px; border-radius:6px 6px 0 0; color:var(--muted); font-size:12px; white-space:nowrap; cursor:pointer; position:relative; }
+.wtab:hover { background:var(--hover); }
+.wtab.active { background:#1e1e1e; color:var(--text); }
+.wtab-title { overflow:hidden; text-overflow:ellipsis; }
+/* Attention dot: a CLI in this tab's workspace waits for user input (same amber as in-view badges). */
+.wtab.attention .wtab-title::before { content:'●'; color:#e8a33d; margin-right:5px; }
+.wtab-close { width:16px; height:16px; line-height:14px; text-align:center; border-radius:3px; color:var(--muted); flex:none; }
+.wtab-close:hover { background:#555; color:#fff; }
+/* Drag feedback: the grabbed tab follows the pointer inside the strip, dims when torn outside. */
+.wtab.dragging { opacity:.85; z-index:2; }
+.wtab.tearing { opacity:.4; }
+
+#newTab { -webkit-app-region: no-drag; width:26px; height:26px; margin-top:4px; background:transparent; border:0; border-radius:4px; color:var(--muted); font-size:16px; cursor:pointer; }
+#newTab:hover { background:var(--hover); color:var(--text); }
+
+#dragSpace { flex:1; align-self:stretch; }
+
+#winControls { display:flex; align-self:stretch; -webkit-app-region: no-drag; }
+.winctl { width:46px; height:34px; display:flex; align-items:center; justify-content:center; padding:0; background:transparent; border:0; border-radius:0; color:var(--text); font-family:"Segoe Fluent Icons","Segoe MDL2 Assets",sans-serif; font-size:10px; line-height:1; cursor:pointer; }
+.winctl:hover { background:#2d2d2d; }
+.wctl-close:hover { background:#c42b1c; color:#fff; }
