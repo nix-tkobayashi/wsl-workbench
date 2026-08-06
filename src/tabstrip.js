@@ -24,6 +24,7 @@
       const el = document.createElement('div');
       el.className = 'wtab' + (tab.id === state.activeId ? ' active' : '') + (tab.attention ? ' attention' : '');
       el.dataset.id = String(tab.id);
+      el.title = tab.tooltip || tab.title; // hover shows the full text even when the tab is ellipsized
       const title = document.createElement('span');
       title.className = 'wtab-title';
       title.textContent = tab.title;
