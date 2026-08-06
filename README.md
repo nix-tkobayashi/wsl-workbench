@@ -8,6 +8,9 @@ Lightweight Windows Electron app for working in WSL:
 - Landing screen on startup / New Window to pick a workspace
 - Terminal: right-click to copy (selection) / paste, drag a tree item in to insert its path,
   paste an image with `Ctrl+V` or right-click (Claude Code reads it as `[Image #N]`), and press any key to restart after `exit`
+- Waiting-for-input badge: when an AI CLI (Claude Code, codex, ...) finishes its turn it can notify
+  the app via OSC 9 — the pane's tab segment and a top-left chip light up until you type in that
+  pane, and the taskbar icon gets an overlay dot (see [Waiting-for-input badge](#waiting-for-input-badge-ai-clis))
 - Tree auto-refreshes (files created in the terminal appear without a manual refresh)
 - English / Japanese UI (Language menu)
 - Drag & drop to move within the tree, or copy in from Windows Explorer
@@ -25,6 +28,37 @@ No Node.js needed to run. Grab one of these from the [**latest release**](https:
 Requires WSL. On first launch, choose a workspace (Open Workspace / Open Workspace File).
 The builds are **self-signed**, so Windows may show **"Unknown publisher"** / a SmartScreen warning on first run. To remove it (and to enable in-app updates), trust the publisher once — see [Trusting the publisher](#trusting-the-publisher-unknown-publisher-warning).
 Check **Help > About WSL Workbench** for your version and update notifications.
+
+## Waiting-for-input badge (AI CLIs)
+
+A terminal pane can report "I finished — waiting for your input" by printing an OSC 9 escape
+sequence (`ESC ] 9 ; <name> BEL`). The badge is only lit by that explicit notification — a
+terminal that is merely quiet is never marked — and it clears on your next keystroke into that
+pane. While lit you get: a dot on the pane's tab segment, a clickable chip at the top-left of the
+window (jumps to the waiting pane), the window title prefixed with `●` (visible in Alt+Tab), and
+an overlay dot on the taskbar icon. Structured OSC 9 payloads such as progress reports (`4;1;50`)
+are ignored.
+
+Configure your CLIs to send it:
+
+**Claude Code** — `~/.claude/settings.json` (fires when a turn ends or Claude asks for permission):
+
+```json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": "printf '\\033]9;claude\\007' > /dev/tty" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "printf '\\033]9;claude\\007' > /dev/tty" }] }]
+  }
+}
+```
+
+**codex** — `~/.codex/config.toml`:
+
+```toml
+notify = ["/bin/sh", "-c", "printf '\\033]9;codex\\007' > /dev/tty"]
+```
+
+Any other tool works the same way: `printf '\033]9;mytool\007'` at the moment it starts waiting.
 
 ## Run from source
 

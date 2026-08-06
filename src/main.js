@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -943,6 +943,23 @@ ipcMain.on('window:toggleMaximize', (event) => {
 });
 ipcMain.on('window:close', (event) => {
   BrowserWindow.fromWebContents(event.sender)?.close();
+});
+
+// Attention state from the renderer (an AI CLI in some pane finished and waits for input):
+// mirror it on the taskbar as an icon overlay so the right window is identifiable even when
+// it's behind others or minimized. The dot is drawn by the renderer (canvas → data URL);
+// setOverlayIcon is a no-op outside Windows, and a malformed icon must never break the IPC.
+ipcMain.on('window:attention', (event, { count = 0, icon = '' } = {}) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return;
+  try {
+    if (count > 0 && icon) {
+      const image = nativeImage.createFromDataURL(String(icon));
+      if (!image.isEmpty()) win.setOverlayIcon(image, tr('attention.waiting'));
+    } else {
+      win.setOverlayIcon(null, '');
+    }
+  } catch {}
 });
 
 // Pop a top-level application menu's submenu at a screen position, so the in-app toolbar buttons
