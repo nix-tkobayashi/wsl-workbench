@@ -49,7 +49,7 @@
   // once the pointer moves past a small threshold. Pointer capture keeps move/up events flowing to
   // the tab even outside the window, and pointerup's screen coordinates are what main classifies.
   function onTabPointerDown(event, id, el) {
-    if (event.button !== 0) return;
+    if (!window.tabShell.startsTabDrag({ button: event.button, onCloseButton: !!event.target.closest('.wtab-close') })) return;
     window.api.tabsActivate(id);
     dragging = { id, el, startX: event.clientX, startY: event.clientY, moved: false };
     el.setPointerCapture(event.pointerId);

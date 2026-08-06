@@ -24,6 +24,13 @@
     return { type: 'outside' };
   }
 
+  // Whether a pointerdown on a tab may begin the activate/drag flow: primary button only, and
+  // never from the close button — capturing the pointer there would retarget the pointerup to the
+  // tab element and swallow the ×'s derived click, making the tab impossible to close.
+  function startsTabDrag({ button = 0, onCloseButton = false } = {}) {
+    return button === 0 && !onCloseButton;
+  }
+
   // Insertion index for a tab dropped at pointer x, given the other tabs' center x positions:
   // it lands after every tab whose center the pointer has passed.
   function insertionIndex(centers = [], x = 0) {
@@ -50,7 +57,7 @@
     return attentionCount > 0 ? `● ${base}` : base;
   }
 
-  const tabShell = { tabTitleForWorkspace, classifyTabDrop, insertionIndex, nextActiveTab, shellWindowTitle };
+  const tabShell = { tabTitleForWorkspace, classifyTabDrop, startsTabDrag, insertionIndex, nextActiveTab, shellWindowTitle };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = tabShell;
   }
