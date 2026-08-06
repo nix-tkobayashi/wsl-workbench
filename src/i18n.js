@@ -108,6 +108,8 @@ const translations = {
     'terminal.imagePasteFailed': 'Could not paste the image into the terminal. Install a clipboard tool in WSL (e.g. "sudo apt install wl-clipboard") so the CLI can read it.',
     'attention.waiting': 'Waiting for you',
     'attention.jumpHint': 'A CLI is waiting for your input — click to jump to that terminal',
+    'menu.newTab': 'New Tab',
+    'tabs.newTab': 'New Tab',
   },
   ja: {
     'menu.workspace': 'ワークスペース',
@@ -210,6 +212,8 @@ const translations = {
     'terminal.imagePasteFailed': 'ターミナルへ画像を貼り付けできませんでした。CLI が読めるよう WSL にクリップボードツール（例: sudo apt install wl-clipboard）を導入してください。',
     'attention.waiting': '確認待ち',
     'attention.jumpHint': 'CLI が入力を待っています — クリックでそのターミナルへ移動',
+    'menu.newTab': '新しいタブ',
+    'tabs.newTab': '新しいタブ',
   }
 };
 
