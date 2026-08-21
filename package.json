@@ -1,11 +1,11 @@
 {
   "name": "wsl-workbench",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "description": "Lightweight WSL file tree, editor, and terminal workbench for AI CLIs",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/",
+    "test": "node --test \"test/**/*.test.js\"",
     "dist": "electron-builder --win nsis portable",
     "dist:zip": "electron-builder --win zip",
     "audit": "npm audit",
