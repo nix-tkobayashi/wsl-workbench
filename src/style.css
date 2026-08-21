@@ -206,9 +206,14 @@ body.resizing iframe { pointer-events:none; }
 .row { display:flex; align-items:center; gap:5px; height:24px; padding:2px 4px; border-radius:4px; cursor:default; white-space:nowrap; }
 .row:hover { background:var(--hover); }
 .row.selected { background:#26385f; }
-.twisty { width:14px; text-align:center; color:var(--muted); cursor:pointer; }
-.icon { width:18px; text-align:center; }
-.name { overflow:hidden; text-overflow:ellipsis; }
+/* flex:none on the gutter cells. Without it they share the row's flex shrinking, so a row whose name
+   overflows loses gutter width while a row whose name fits keeps it — neighbouring rows end up with
+   different twisty/icon widths and their names stop lining up. (An empty twisty on file rows can
+   shrink to 0 where a folder's glyph floors it, widening the gap further.) Only the name may
+   shrink — it ellipsizes. */
+.twisty { width:14px; flex:none; text-align:center; color:var(--muted); cursor:pointer; }
+.icon { width:18px; flex:none; text-align:center; }
+.name { min-width:0; overflow:hidden; text-overflow:ellipsis; }
 /* Git status tinting (VS Code palette): untracked green, modified/staged amber, and a muted amber
    for folders that contain changed descendants. On the name only, so selection stays readable. */
 #tree .row.git-untracked .name { color:#73c991; }
