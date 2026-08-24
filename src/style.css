@@ -254,7 +254,12 @@ body.resizing iframe { pointer-events:none; }
 .landing-box > .landing-recent { flex:0 1 auto; }
 .landing-recent.hidden { display:none; }
 .landing-recent-title { color:var(--muted); font-size:12px; margin-bottom:6px; }
+/* Filter box pinned above the scroller (#landingRecentList) so it stays put while the list scrolls;
+   up to 100 entries are kept, so narrowing by a path fragment is the way to find one. */
+#landingRecentFilter { display:block; width:100%; max-width:520px; box-sizing:border-box; margin:0 auto 6px; background:#1e1e1e; color:var(--text); border:1px solid #3c3c3c; border-radius:4px; padding:5px 8px; font-size:13px; outline:none; }
+#landingRecentFilter:focus { border-color:var(--accent); }
 #landingRecentList { min-height:0; overflow-y:auto; }
+.landing-recent-empty { max-width:520px; margin:0 auto; padding:6px 12px; color:var(--muted); font-size:13px; }
 .landing-recent-item { display:block; width:100%; max-width:520px; box-sizing:border-box; margin:0 auto 3px; padding:6px 12px; background:transparent; border:1px solid transparent; border-radius:6px; color:var(--accent); font-size:13px; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
 .landing-recent-item:hover { background:var(--hover); border-color:var(--border); }
 

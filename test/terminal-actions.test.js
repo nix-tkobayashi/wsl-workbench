@@ -3,7 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionSummary } = require('../src/terminal-actions');
+const { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionSummary, TTY_EXPORT, osc9HookCommand } = require('../src/terminal-actions');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
 
 // Build a mock io that records calls and lets the test control selection/clipboard.
 function makeIO({ selection = '', clipboard = '' } = {}) {
@@ -230,4 +232,52 @@ test('terminal-actions.js is IIFE-wrapped and sets window.terminalActions withou
   Object.defineProperty(sandbox, 'api', { value: { bridge: true }, configurable: false, writable: false });
   assert.doesNotThrow(() => vm.runInContext(src, sandbox, { filename: 'terminal-actions.js' }));
   assert.equal(typeof sandbox.window.terminalActions.terminalRightClick, 'function');
+});
+
+// --- OSC 9 hook plumbing (#66): hooks run without a controlling terminal, so the pane's tty is
+// handed down through WSL_WORKBENCH_TTY and the hook falls back to /dev/tty → parent stdout.
+
+test('TTY_EXPORT publishes the pane pty as WSL_WORKBENCH_TTY', () => {
+  assert.match(TTY_EXPORT, /^export WSL_WORKBENCH_TTY=/);
+  assert.match(TTY_EXPORT, /\$\(tty/);
+});
+
+test('osc9HookCommand sanitizes the label and only ever writes to pts/tty devices', () => {
+  const cmd = osc9HookCommand('claude');
+  assert.ok(cmd.includes("printf '\\033]9;claude\\007'"));
+  assert.ok(cmd.includes('WSL_WORKBENCH_TTY'));
+  assert.ok(cmd.includes('/dev/tty'));
+  assert.ok(cmd.includes('/proc/$PPID/fd/1'));
+  assert.ok(cmd.includes('T="$(readlink -f -- "$T" 2>/dev/null)"; case "$T" in /dev/pts/*|/dev/tty*) [ -c "$T" ] &&'));
+  assert.ok(osc9HookCommand("x'; rm -rf /").includes("9;xrm-rf\\007"));
+  assert.ok(osc9HookCommand(null).includes("9;\\007"));
+});
+
+const hasSh = process.platform !== 'win32' && spawnSync('sh', ['-c', ':']).status === 0;
+
+test('osc9HookCommand refuses to write when WSL_WORKBENCH_TTY is not a terminal device', { skip: !hasSh }, () => {
+  const victim = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'wb-osc9-')), 'victim.txt');
+  fs.writeFileSync(victim, '');
+  const link = path.join(path.dirname(victim), 'tty0'); // /dev/tty*-looking symlink to a plain file
+  fs.symlinkSync(victim, link);
+  for (const target of [victim, `/dev/pts/../..${victim}`, link]) { // plain file, traversal, symlink
+    spawnSync('sh', ['-c', osc9HookCommand('claude')], { env: { ...process.env, WSL_WORKBENCH_TTY: target }, stdio: 'ignore' });
+    assert.equal(fs.readFileSync(victim, 'utf8'), '', target);
+  }
+});
+
+const hasScript = hasSh && spawnSync('script', ['--version']).status === 0 && spawnSync('setsid', ['--version']).status === 0;
+
+test('osc9HookCommand reaches the pane pty from a hook with no controlling terminal', { skip: !hasScript }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-osc9-'));
+  const hook = path.join(dir, 'hook.sh');
+  fs.writeFileSync(hook, osc9HookCommand('claude') + '\n');
+  const run = (prelude) => {
+    const log = path.join(dir, 'out.log');
+    // setsid + stdin from /dev/null mimics how Claude Code launches hooks (new session, no tty).
+    spawnSync('script', ['-qfc', `${prelude}; setsid sh ${hook} </dev/null`, log], { stdio: 'ignore' });
+    return fs.readFileSync(log, 'latin1').includes('\x1b]9;claude\x07');
+  };
+  assert.equal(run(TTY_EXPORT), true, 'via WSL_WORKBENCH_TTY');
+  assert.equal(run('unset WSL_WORKBENCH_TTY'), true, 'via parent stdout fallback');
 });
