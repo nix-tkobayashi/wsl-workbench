@@ -42,15 +42,18 @@ window (jumps to the waiting pane), the window title prefixed with `●` (visibl
 an overlay dot on the taskbar icon. Structured OSC 9 payloads such as progress reports (`4;1;50`)
 are ignored.
 
-Configure your CLIs to send it:
+Configure your CLIs to send it. The pane's shell exports `WSL_WORKBENCH_TTY=/dev/pts/N`, and the
+commands below write there — Claude Code runs hooks in a new session without a controlling
+terminal, so a plain `> /dev/tty` silently fails (#66). Outside Workbench the commands fall back
+to `/dev/tty`, then to the CLI's own stdout, and never write to anything but a tty device.
 
 **Claude Code** — `~/.claude/settings.json` (fires when a turn ends or Claude asks for permission):
 
 ```json
 {
   "hooks": {
-    "Stop": [{ "hooks": [{ "type": "command", "command": "printf '\\033]9;claude\\007' > /dev/tty" }] }],
-    "Notification": [{ "hooks": [{ "type": "command", "command": "printf '\\033]9;claude\\007' > /dev/tty" }] }]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "T=\"${WSL_WORKBENCH_TTY:-}\"; { [ -n \"$T\" ] && [ -w \"$T\" ]; } || { T=/dev/tty; ( : > /dev/tty ) 2>/dev/null || T=\"$(readlink /proc/$PPID/fd/1 2>/dev/null)\"; }; T=\"$(readlink -f -- \"$T\" 2>/dev/null)\"; case \"$T\" in /dev/pts/*|/dev/tty*) [ -c \"$T\" ] && printf '\\033]9;claude\\007' > \"$T\";; esac" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "T=\"${WSL_WORKBENCH_TTY:-}\"; { [ -n \"$T\" ] && [ -w \"$T\" ]; } || { T=/dev/tty; ( : > /dev/tty ) 2>/dev/null || T=\"$(readlink /proc/$PPID/fd/1 2>/dev/null)\"; }; T=\"$(readlink -f -- \"$T\" 2>/dev/null)\"; case \"$T\" in /dev/pts/*|/dev/tty*) [ -c \"$T\" ] && printf '\\033]9;claude\\007' > \"$T\";; esac" }] }]
   }
 }
 ```
@@ -58,10 +61,11 @@ Configure your CLIs to send it:
 **codex** — `~/.codex/config.toml`:
 
 ```toml
-notify = ["/bin/sh", "-c", "printf '\\033]9;codex\\007' > /dev/tty"]
+notify = ["/bin/sh", "-c", "T=\"${WSL_WORKBENCH_TTY:-}\"; { [ -n \"$T\" ] && [ -w \"$T\" ]; } || { T=/dev/tty; ( : > /dev/tty ) 2>/dev/null || T=\"$(readlink /proc/$PPID/fd/1 2>/dev/null)\"; }; T=\"$(readlink -f -- \"$T\" 2>/dev/null)\"; case \"$T\" in /dev/pts/*|/dev/tty*) [ -c \"$T\" ] && printf '\\033]9;codex\\007' > \"$T\";; esac"]
 ```
 
-Any other tool works the same way: `printf '\033]9;mytool\007'` at the moment it starts waiting.
+Any other tool works the same way: `printf '\033]9;mytool\007' > "$WSL_WORKBENCH_TTY"` at the
+moment it starts waiting.
 
 ## Run from source
 
@@ -187,7 +191,7 @@ The editor is intentionally minimal. Test file editing and drag/drop operations 
 
 - **Single instance**: launching the app again (app icon or a `.wslwb-workspace` file) no longer boots a second full Electron (saving hundreds of MB) — the running instance opens a new window instead.
 - **Session restore**: the app reopens the last workspace on startup, and each workspace remembers which files were open (and which was active).
-- **Recent Workspaces** on the start screen — one click to reopen.
+- **Recent Workspaces** on the start screen — the last 100, with a filter box on top (type a path fragment; Enter opens the single match).
 - **Word wrap** toggle in the editor bar. Line numbers stay visible and correctly aligned with wrapped lines.
 - **Undo protection**: reloads after external changes (e.g. the AI CLI editing an open file) and Replace / Replace All are now single undoable edits — Ctrl+Z restores the previous buffer. Preview toggling no longer clears undo history.
 

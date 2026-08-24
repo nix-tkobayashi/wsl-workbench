@@ -95,7 +95,25 @@
     return { chip, docTitle: `● ${chip} — ${appName}` };
   }
 
-  const terminalActions = { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionSummary };
+  // Shell snippet run at pane startup: exports the pane's pty device (WSL_WORKBENCH_TTY=/dev/pts/N)
+  // so AI-CLI hooks can reach the pane without a controlling terminal. Claude Code runs its hooks
+  // in a new session (setsid; stdin is a socket), so `/dev/tty` fails there — the env var, inherited
+  // from the shell through the CLI to the hook, is the only PPID-independent route back to the pane.
+  const TTY_EXPORT = 'export WSL_WORKBENCH_TTY="$(tty 2>/dev/null)"';
+
+  // POSIX-sh one-liner for a hook / notify command that lights the badge for `name`. Resolution
+  // order: WSL_WORKBENCH_TTY (set above) → /dev/tty (a hook that does have a controlling terminal)
+  // → the parent process's stdout (the CLI itself writes to the pane). Only pts/tty devices are ever
+  // written to — the path is canonicalized (readlink -f: no `..` traversal, no symlink tricks) before
+  // the glob and a character-device check (`-c`) — so a stale or hostile value can't redirect it.
+  function osc9HookCommand(name) {
+    const label = String(name == null ? '' : name).replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 32);
+    return 'T="${WSL_WORKBENCH_TTY:-}"; { [ -n "$T" ] && [ -w "$T" ]; } || ' +
+      '{ T=/dev/tty; ( : > /dev/tty ) 2>/dev/null || T="$(readlink /proc/$PPID/fd/1 2>/dev/null)"; }; ' +
+      'T="$(readlink -f -- "$T" 2>/dev/null)"; case "$T" in /dev/pts/*|/dev/tty*) [ -c "$T" ] && printf \'\\033]9;' + label + '\\007\' > "$T";; esac';
+  }
+
+  const terminalActions = { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionSummary, TTY_EXPORT, osc9HookCommand };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = terminalActions;
   }

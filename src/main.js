@@ -33,7 +33,7 @@ const DEFAULT_WSL_HOME_PATH = process.env.WSLWB_HOME_PATH || `/home/${os.userInf
 const WSL_FS_TIMEOUT_MS = Math.max(1000, Number(process.env.WSLWB_FS_TIMEOUT_MS) || 5000);
 
 const { WORKSPACE_EXT } = require('./workspace-args'); // single source for the extension + argv parsing
-const { shellCdCommand } = require('./terminal-actions'); // inherited-cwd `cd` for terminal:start
+const { shellCdCommand, TTY_EXPORT } = require('./terminal-actions'); // inherited-cwd `cd` + pty export for terminal:start
 const { tabTitleForWorkspace, classifyTabDrop, nextActiveTab, shellWindowTitle } = require('./tab-shell');
 
 // --- Tabbed windows: every BrowserWindow is a thin shell (its own webContents renders only the
@@ -159,7 +159,7 @@ function getDefaultOpenWorkspacePath(distro = DEFAULT_DISTRO) {
 
 // Track opened workspaces in settings: `recentWorkspaces` feeds the landing screen's quick-open
 // list, `lastWorkspace` lets the next launch restore where the user left off.
-const RECENT_WORKSPACES_MAX = 12;
+const RECENT_WORKSPACES_MAX = 100; // the landing list is filterable, so a long history stays usable
 function rememberWorkspace(ws) {
   const workspace = normalizeWorkspace(ws);
   const key = `${workspace.distro}:${workspace.wslPath}`;
@@ -1487,7 +1487,7 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = 
   // best-effort `cd` on top of the workspace-root --cd, so a bad path lands at the root, not in an
   // error. The workspace itself is NOT changed by an inherited cwd.
   const launch = command ? `${command}; exec bash` : 'exec bash';
-  const parts = [WSLG_WAYLAND_FIX, CWD_PROMPT_EXPORT];
+  const parts = [WSLG_WAYLAND_FIX, CWD_PROMPT_EXPORT, TTY_EXPORT];
   const cd = shellCdCommand(cwd);
   if (cd) parts.push(cd);
   parts.push(launch);

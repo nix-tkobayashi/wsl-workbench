@@ -556,7 +556,9 @@ function createPane(group, { command = '', cwd = '' } = {}) {
     group.container.appendChild(entry.divider);
   }
   group.container.appendChild(host);
-  const term = new Terminal({ cursorBlink: true, fontFamily: 'Consolas, monospace', fontSize: 13 });
+  // minimumContrastRatio: AI CLIs pin the current prompt to the top of the viewport in dim grey on
+  // grey; xterm lifts any cell below WCAG AA (4.5:1) so that banner stays readable (#65).
+  const term = new Terminal({ cursorBlink: true, fontFamily: 'Consolas, monospace', fontSize: 13, minimumContrastRatio: 4.5 });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   // Clickable URLs: the web-links addon underlines http(s) URLs on hover; clicking routes through
@@ -2044,17 +2046,35 @@ function initLanding() {
 
 // Populate the landing screen's recent-workspaces list (hidden when there are none).
 // Clicking an entry opens it exactly like the dialogs do (main broadcasts workspace:changed).
+// Up to 100 entries are kept, so a filter box above the list narrows them (case-insensitive,
+// every whitespace-separated term must match; see recent-filter.js). The fetched list is cached in
+// `landingRecentItems` so typing re-renders without an IPC round trip; the query survives refreshes.
+let landingRecentItems = [];
 async function renderLandingRecent() {
   const box = document.getElementById('landingRecent');
-  const list = document.getElementById('landingRecentList');
   let items = [];
   try { items = await window.api.recentWorkspaces(); } catch { items = []; }
-  list.textContent = '';
+  landingRecentItems = items;
   box.classList.toggle('hidden', !items.length);
+  renderLandingRecentList();
+}
+
+function renderLandingRecentList() {
+  const list = document.getElementById('landingRecentList');
+  const query = document.getElementById('landingRecentFilter').value;
+  const items = window.recentFilter.filterRecentWorkspaces(landingRecentItems, query);
+  list.textContent = '';
+  if (!items.length && landingRecentItems.length) {
+    const empty = document.createElement('div');
+    empty.className = 'landing-recent-empty';
+    empty.textContent = t('landing.recentNoMatch');
+    list.appendChild(empty);
+    return;
+  }
   for (const item of items) {
     const btn = document.createElement('button');
     btn.className = 'landing-recent-item';
-    btn.textContent = `${item.distro}:${item.wslPath}`;
+    btn.textContent = window.recentFilter.recentLabel(item);
     btn.title = btn.textContent;
     btn.addEventListener('click', async () => {
       try {
@@ -2066,6 +2086,19 @@ async function renderLandingRecent() {
     });
     list.appendChild(btn);
   }
+}
+
+{
+  const filter = document.getElementById('landingRecentFilter');
+  filter.addEventListener('input', renderLandingRecentList);
+  filter.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && filter.value) { filter.value = ''; renderLandingRecentList(); e.stopPropagation(); }
+    // Enter opens the single remaining match — type a fragment, hit Enter, done.
+    if (e.key === 'Enter') {
+      const btns = document.getElementById('landingRecentList').querySelectorAll('.landing-recent-item');
+      if (btns.length === 1) btns[0].click();
+    }
+  });
 }
 
 // Landing "Clone Repository": ask for a Git URL, pick the destination parent folder, then clone. On
