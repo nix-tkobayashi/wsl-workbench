@@ -12,6 +12,11 @@
     <div id="tabs"></div>
     <button id="newTab" title="">+</button>
     <div id="dragSpace"></div>
+    <!-- CPU / memory meters (#69): fed by perf:stats pushes from main, hidden until the first sample. -->
+    <div id="perfStats" class="perf-stats hidden">
+      <span class="perf-seg"><span class="perf-name">CPU</span><span class="perf-track"><span id="perfCpuFill" class="perf-fill"></span></span><span id="perfCpuText" class="perf-text"></span></span>
+      <span class="perf-seg"><span class="perf-name">MEM</span><span class="perf-track"><span id="perfMemFill" class="perf-fill"></span></span><span id="perfMemText" class="perf-text"></span></span>
+    </div>
     <div id="winControls">
       <button id="winMin" class="winctl" aria-label="Minimize">&#xE921;</button>
       <button id="winMax" class="winctl" aria-label="Maximize">&#xE922;</button>
