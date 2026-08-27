@@ -62,6 +62,13 @@ test('deeper nesting unwinds level by level', () => {
   );
 });
 
+test('dedent to an intermediate indent stays nested under the parent', () => {
+  assert.equal(
+    render('- a\n    - b\n  - c'),
+    '<ul><li>a<ul><li>b</li></ul><ul><li>c</li></ul></li></ul>'
+  );
+});
+
 test('ordered list nests inside an unordered item and vice versa', () => {
   assert.equal(render('- a\n  1. b\n  2. c'), '<ul><li>a<ol><li>b</li><li>c</li></ol></li></ul>');
   assert.equal(render('1. a\n   - b'), '<ol><li>a<ul><li>b</li></ul></li></ol>');

@@ -68,14 +68,16 @@
     const stack = []; // open lists, outermost first: { indent, tag }
     for (const it of items) {
       const tag = it.ordered ? 'ol' : 'ul';
+      // Shallower than the current level: unwind. A dedent that lands between two open levels
+      // ("- a" / "    - b" / "  - c") stops at the nearest shallower one and re-nests below.
+      while (stack.length > 1 && it.indent < stack[stack.length - 1].indent) {
+        out.push(`</li></${stack.pop().tag}>`);
+      }
       if (!stack.length || it.indent > stack[stack.length - 1].indent) {
         // First item, or deeper than the current level: nest inside the still-open <li>.
         out.push(`<${tag}>`);
         stack.push({ indent: it.indent, tag });
       } else {
-        while (stack.length > 1 && it.indent < stack[stack.length - 1].indent) {
-          out.push(`</li></${stack.pop().tag}>`);
-        }
         out.push('</li>');
         if (stack[stack.length - 1].tag !== tag) {
           out.push(`</${stack.pop().tag}>`, `<${tag}>`);
