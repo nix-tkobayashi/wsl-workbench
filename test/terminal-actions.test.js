@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionSummary, TTY_EXPORT, osc9HookCommand } = require('../src/terminal-actions');
+const { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionTitle, attentionSummary, TTY_EXPORT, osc9HookCommand } = require('../src/terminal-actions');
 const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
@@ -174,16 +174,24 @@ test('buildTabSegments: tolerates empty/missing input', () => {
   assert.deepEqual(buildTabSegments(), []);
 });
 
-test('parseOsc9Attention: a plain tool name becomes the attention label', () => {
-  assert.equal(parseOsc9Attention('claude'), 'claude');
-  assert.equal(parseOsc9Attention('codex'), 'codex');
-  assert.equal(parseOsc9Attention('  codex  '), 'codex'); // trimmed
+test('parseOsc9Attention: a plain tool name becomes the attention label (no kind)', () => {
+  assert.deepEqual(parseOsc9Attention('claude'), { label: 'claude', kind: '' });
+  assert.deepEqual(parseOsc9Attention('codex'), { label: 'codex', kind: '' });
+  assert.deepEqual(parseOsc9Attention('  codex  '), { label: 'codex', kind: '' }); // trimmed
+});
+
+test('parseOsc9Attention: a second ";kind" field says why the CLI waits', () => {
+  assert.deepEqual(parseOsc9Attention('claude;permission'), { label: 'claude', kind: 'permission' });
+  assert.deepEqual(parseOsc9Attention('claude;done'), { label: 'claude', kind: 'done' });
+  assert.deepEqual(parseOsc9Attention('claude; Done '), { label: 'claude', kind: 'done' }); // normalized
+  assert.deepEqual(parseOsc9Attention('claude;permission;extra'), { label: 'claude', kind: 'permission' }); // extra fields ignored
+  assert.deepEqual(parseOsc9Attention(';permission'), { label: '', kind: 'permission' });
 });
 
 test('parseOsc9Attention: an empty payload still signals attention (label falls back later)', () => {
-  assert.equal(parseOsc9Attention(''), '');
-  assert.equal(parseOsc9Attention(null), '');
-  assert.equal(parseOsc9Attention(undefined), '');
+  assert.deepEqual(parseOsc9Attention(''), { label: '', kind: '' });
+  assert.deepEqual(parseOsc9Attention(null), { label: '', kind: '' });
+  assert.deepEqual(parseOsc9Attention(undefined), { label: '', kind: '' });
 });
 
 test('parseOsc9Attention: structured "<digit>;" payloads (progress reports) are not attention', () => {
@@ -192,9 +200,21 @@ test('parseOsc9Attention: structured "<digit>;" payloads (progress reports) are 
   assert.equal(parseOsc9Attention('12;something'), null);
 });
 
-test('parseOsc9Attention: strips control characters and caps the label length', () => {
-  assert.equal(parseOsc9Attention('cla\x07ude\x1b'), 'claude');
-  assert.equal(parseOsc9Attention('x'.repeat(100)).length, 32);
+test('parseOsc9Attention: strips control characters and caps both fields', () => {
+  assert.deepEqual(parseOsc9Attention('cla\x07ude\x1b;per\x1bmission'), { label: 'claude', kind: 'permission' });
+  const long = parseOsc9Attention('x'.repeat(100) + ';' + 'y'.repeat(100));
+  assert.equal(long.label.length, 32);
+  assert.equal(long.kind.length, 16);
+});
+
+test('attentionTitle: tool plus localized kind word; unknown kinds show raw; empty parts drop', () => {
+  const kindWords = { done: '完了', permission: '許可待ち' };
+  assert.equal(attentionTitle({ label: 'claude', kind: 'permission', kindWords }), 'claude · 許可待ち');
+  assert.equal(attentionTitle({ label: 'claude', kind: 'done', kindWords }), 'claude · 完了');
+  assert.equal(attentionTitle({ label: 'claude', kind: '', kindWords }), 'claude');
+  assert.equal(attentionTitle({ label: 'mytool', kind: 'custom', kindWords }), 'mytool · custom');
+  assert.equal(attentionTitle({ label: '', kind: 'permission', kindWords }), '許可待ち');
+  assert.equal(attentionTitle({}), '');
 });
 
 test('attentionSummary: null when nothing waits', () => {
@@ -206,6 +226,14 @@ test('attentionSummary: one waiting pane names the tool and the pane', () => {
   const s = attentionSummary({ items: [{ label: 'codex', paneName: 'Terminal 2' }], waitingWord: 'Waiting', appName: 'WSL Workbench' });
   assert.equal(s.chip, 'codex — Terminal 2');
   assert.equal(s.docTitle, '● codex — Terminal 2 — WSL Workbench');
+});
+
+test('attentionSummary: the kind word joins the chip so permission prompts read differently from turn ends', () => {
+  const kindWords = { done: 'finished', permission: 'permission' };
+  const s = attentionSummary({ items: [{ label: 'claude', kind: 'permission', paneName: 'Terminal 2' }], kindWords });
+  assert.equal(s.chip, 'claude · permission — Terminal 2');
+  assert.equal(s.docTitle, '● claude · permission — Terminal 2 — WSL Workbench');
+  assert.equal(attentionSummary({ items: [{ label: 'claude', kind: 'done', paneName: 'A' }], kindWords }).chip, 'claude · finished — A');
 });
 
 test('attentionSummary: an unnamed notification falls back to the pane name alone', () => {
@@ -251,6 +279,9 @@ test('osc9HookCommand sanitizes the label and only ever writes to pts/tty device
   assert.ok(cmd.includes('T="$(readlink -f -- "$T" 2>/dev/null)"; case "$T" in /dev/pts/*|/dev/tty*) [ -c "$T" ] &&'));
   assert.ok(osc9HookCommand("x'; rm -rf /").includes("9;xrm-rf\\007"));
   assert.ok(osc9HookCommand(null).includes("9;\\007"));
+  assert.ok(osc9HookCommand('claude', 'permission').includes("9;claude;permission\\007"));
+  assert.ok(osc9HookCommand('claude', "do;ne'").includes("9;claude;done\\007"));
+  assert.ok(osc9HookCommand('claude', '').includes("9;claude\\007"));
 });
 
 const hasSh = process.platform !== 'win32' && spawnSync('sh', ['-c', ':']).status === 0;

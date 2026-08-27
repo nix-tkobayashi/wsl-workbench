@@ -126,6 +126,7 @@ function applyLanguage() {
   // Re-label open terminal tabs in the new language (custom pane names, if set, are kept).
   for (const group of termGroups.values()) renderTermTab(group);
   refreshAttentionChip(); // its text mixes pane names and the localized waiting word
+  if (!notifyPanel.classList.contains('hidden')) renderNotifyList(); // kind words + empty text
   refreshUpdateBtn(); // its tooltip is built manually (has a {version} slot), not via data-i18n
 }
 
@@ -264,19 +265,140 @@ function refreshTabAttention(group) {
   }
 }
 
-function setPaneAttention(entry, label) {
+function setPaneAttention(entry, { label = '', kind = '' } = {}) {
   entry.attention = label; // '' = unnamed notification; displays fall back to the pane name
+  entry.attentionKind = kind; // 'done' / 'permission' / '' (or a custom word from another tool)
   const group = termGroups.get(entry.groupId);
   if (group) refreshTabAttention(group);
+  recordNotification(entry);
   refreshAttentionChip();
 }
 
 function clearPaneAttention(entry) {
   entry.attention = null;
+  entry.attentionKind = '';
   const group = termGroups.get(entry.groupId);
   if (group) refreshTabAttention(group);
   refreshAttentionChip();
 }
+
+// Localized words for the `;kind` field of an OSC 9 report (see parseOsc9Attention).
+function attentionKindWords() {
+  return { done: t('attention.kind.done'), permission: t('attention.kind.permission') };
+}
+
+function attentionTitleFor(entry) {
+  return window.terminalActions.attentionTitle({ label: entry.attention || '', kind: entry.attentionKind || '', kindWords: attentionKindWords() });
+}
+
+// Bring a pane to the front (its terminal tab active, the pane focused).
+function jumpToPane(entry) {
+  const group = termGroups.get(entry.groupId);
+  if (!group) return;
+  setActivePane(group, entry.id);
+  activateTerminal(group.id);
+}
+
+// --- Notification history (bell dropdown) + desktop toast. Every OSC 9 report lands in a bounded
+// newest-first list for this workspace, so "which tab finished while I was away?" has an answer
+// after the badges have cleared. A toast is raised only when the user isn't looking at this
+// workspace (window unfocused / minimized or tab hidden) — a visible pane already shows its badge.
+const notifyBell = document.getElementById('notifyBell');
+const notifyCount = document.getElementById('notifyCount');
+const notifyPanel = document.getElementById('notifyPanel');
+const notifyList = document.getElementById('notifyList');
+const notifyClear = document.getElementById('notifyClear');
+let notifications = []; // [{ id, paneId, label, kind, paneName, time }] newest first
+
+function recordNotification(entry) {
+  notifications = window.notificationLog.pushNotification(notifications, {
+    paneId: entry.id, label: entry.attention || '', kind: entry.attentionKind || '', paneName: paneTabText(entry), time: Date.now()
+  });
+  if (!notifyPanel.classList.contains('hidden')) renderNotifyList();
+  maybeToast(entry);
+}
+
+function maybeToast(entry) {
+  const focused = document.hasFocus();
+  const visible = document.visibilityState === 'visible';
+  if (!window.notificationLog.shouldToast({ focused, visible })) return;
+  if (typeof Notification !== 'function' || Notification.permission === 'denied') return;
+  const text = window.notificationLog.toastText({
+    title: attentionTitleFor(entry),
+    paneName: paneTabText(entry),
+    workspace: config ? lastTwoSegmentsFor(config.wslPath) : ''
+  });
+  try {
+    const toast = new Notification(text.title, { body: text.body, silent: false });
+    toast.onclick = () => {
+      window.api.focusWorkspace();
+      if (terminals.get(entry.id) === entry) jumpToPane(entry);
+    };
+  } catch {}
+}
+
+function renderNotifyList() {
+  notifyList.textContent = '';
+  if (!notifications.length) {
+    const empty = document.createElement('div');
+    empty.className = 'notify-empty';
+    empty.textContent = t('attention.historyEmpty');
+    notifyList.appendChild(empty);
+    notifyClear.disabled = true;
+    return;
+  }
+  notifyClear.disabled = false;
+  const kindWords = attentionKindWords();
+  for (const n of notifications) {
+    const entry = terminals.get(n.paneId);
+    const alive = !!entry;
+    const waiting = alive && entry.attention != null;
+    const item = document.createElement('button');
+    item.className = 'notify-item' + (waiting ? ' waiting' : '') + (alive ? '' : ' stale');
+    item.disabled = !alive; // pane closed: keep the record, nothing to jump to
+    const dot = document.createElement('span');
+    dot.className = 'notify-dot';
+    dot.textContent = '●';
+    const main = document.createElement('span');
+    main.className = 'notify-main';
+    const title = window.terminalActions.attentionTitle({ label: n.label, kind: n.kind, kindWords });
+    main.textContent = title || n.paneName;
+    if (title) {
+      const pane = document.createElement('span');
+      pane.className = 'notify-pane';
+      pane.textContent = ` — ${alive ? paneTabText(entry) : n.paneName}`;
+      main.appendChild(pane);
+    }
+    main.title = waiting ? t('attention.historyWaiting') : '';
+    const time = document.createElement('span');
+    time.className = 'notify-time';
+    time.textContent = window.notificationLog.formatClock(n.time);
+    item.append(dot, main, time);
+    item.addEventListener('click', () => {
+      closeNotifyPanel();
+      if (entry && terminals.get(n.paneId) === entry) jumpToPane(entry);
+    });
+    notifyList.appendChild(item);
+  }
+}
+
+function openNotifyPanel() {
+  renderNotifyList();
+  notifyPanel.classList.remove('hidden');
+  notifyBell.setAttribute('aria-expanded', 'true');
+}
+function closeNotifyPanel() {
+  notifyPanel.classList.add('hidden');
+  notifyBell.setAttribute('aria-expanded', 'false');
+}
+notifyBell.addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (notifyPanel.classList.contains('hidden')) openNotifyPanel(); else closeNotifyPanel();
+});
+notifyPanel.addEventListener('click', (event) => event.stopPropagation());
+notifyClear.addEventListener('click', () => { notifications = []; renderNotifyList(); });
+document.addEventListener('click', closeNotifyPanel);
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeNotifyPanel(); });
 
 // nativeImage lives in the main process, so the overlay dot travels as a data URL.
 function attentionOverlayIcon() {
@@ -296,10 +418,14 @@ function attentionOverlayIcon() {
 function refreshAttentionChip() {
   const waiting = waitingPanes();
   const summary = window.terminalActions.attentionSummary({
-    items: waiting.map((e) => ({ label: e.attention, paneName: paneTabText(e) })),
+    items: waiting.map((e) => ({ label: e.attention, kind: e.attentionKind, paneName: paneTabText(e) })),
     waitingWord: t('attention.waiting'),
-    appName: 'WSL Workbench'
+    appName: 'WSL Workbench',
+    kindWords: attentionKindWords()
   });
+  notifyBell.classList.toggle('lit', waiting.length > 0);
+  notifyCount.classList.toggle('hidden', waiting.length === 0);
+  notifyCount.textContent = waiting.length ? String(waiting.length) : '';
   attentionChip.classList.toggle('hidden', !summary);
   attentionChip.textContent = summary ? summary.chip : '';
   attentionChip.title = summary ? t('attention.jumpHint') : '';
@@ -318,11 +444,7 @@ function writeUserInput(entry, data) {
 // moves on to the next waiting pane, so repeated clicks walk through all of them.
 attentionChip.addEventListener('click', () => {
   const entry = waitingPanes()[0];
-  if (!entry) return;
-  const group = termGroups.get(entry.groupId);
-  if (!group) return;
-  setActivePane(group, entry.id);
-  activateTerminal(group.id);
+  if (entry) jumpToPane(entry);
 });
 
 // Rebuild a tab's label: one clickable segment per pane, so split panes stay individually
@@ -550,7 +672,7 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   const id = nextTermId++;
   const host = document.createElement('div');
   host.className = 'term-pane';
-  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null, attention: null };
+  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null, attention: null, attentionKind: '' };
   if (group.paneIds.length > 0) {
     entry.divider = makeTermDivider(group);
     group.container.appendChild(entry.divider);
@@ -580,8 +702,8 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   // OSC 9 = "waiting for your input" from an AI CLI (Claude Code Stop hook, codex notify, ...):
   // light this pane's attention badge. Progress-style payloads return null and pass silently.
   term.parser.registerOscHandler(9, (payload) => {
-    const label = window.terminalActions.parseOsc9Attention(payload);
-    if (label !== null) setPaneAttention(entry, label);
+    const parsed = window.terminalActions.parseOsc9Attention(payload);
+    if (parsed) setPaneAttention(entry, parsed);
     return true;
   });
   // Per-pane close (shown only while split): kills this pane's shell and gives its space back.

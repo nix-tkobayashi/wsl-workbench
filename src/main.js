@@ -743,6 +743,10 @@ function samplePerf() {
     if (!win.isDestroyed()) win.webContents.send('perf:stats', lastPerfPayload);
   }
 }
+// Desktop toasts (renderer `new Notification`) on Windows need the app's AppUserModelID — the same
+// id electron-builder stamps on the installer's shortcuts — or they show as "electron.app.*".
+app.setAppUserModelId('com.wslworkbench.app');
+
 app.whenReady().then(() => {
   lastCpuTotals = cpuTotals(os.cpus()); // baseline, so the first pushed sample is a real delta
   setInterval(samplePerf, PERF_INTERVAL_MS);
@@ -1167,6 +1171,19 @@ ipcMain.on('window:attention', (event, { count = 0, icon = '' } = {}) => {
   if (icon) attentionIconDataUrl = String(icon);
   const win = state.winId != null ? BrowserWindow.fromId(state.winId) : null;
   if (win && !win.isDestroyed()) pushTabsState(win);
+});
+
+// A toast for this workspace was clicked: surface it — restore a minimized window, raise it, and
+// make the view the active tab. Windows only honors focus() from a process that already has it,
+// which the toast click grants us; setAlwaysOnTop is not used (it would steal focus permanently).
+ipcMain.on('window:focusWorkspace', (event) => {
+  const state = viewState.get(event.sender.id);
+  const win = state && state.winId != null ? BrowserWindow.fromId(state.winId) : null;
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  activateTab(win, event.sender.id);
+  win.show();
+  win.focus();
 });
 
 // Pop a top-level application menu's submenu at a screen position, so the in-app toolbar buttons
