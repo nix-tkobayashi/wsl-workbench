@@ -724,6 +724,29 @@ async function checkForUpdatesInBackground() {
   }
 }
 
+// --- CPU / memory meters (#69): the main process samples the Windows host every 2s and pushes
+// the numbers to every workspace view (the toolbar meters live there, like the update button).
+// One shared timer for the whole app — per-window sampling would just repeat the same os.cpus()
+// walk. The math is in perf-stats.js (unit-tested); the first tick has no CPU delta and reports 0.
+const PERF_INTERVAL_MS = 2000;
+const { cpuTotals, cpuPercent, memPercent } = require('./perf-stats');
+let lastCpuTotals = null;
+function samplePerf() {
+  const now = cpuTotals(os.cpus());
+  const cpu = cpuPercent(lastCpuTotals, now);
+  lastCpuTotals = now;
+  const memTotal = os.totalmem();
+  const memUsed = memTotal - os.freemem();
+  const payload = { cpu, memUsed, memTotal, memPct: memPercent(memUsed, memTotal) };
+  for (const state of viewState.values()) {
+    if (!state.view.webContents.isDestroyed()) state.view.webContents.send('perf:stats', payload);
+  }
+}
+app.whenReady().then(() => {
+  lastCpuTotals = cpuTotals(os.cpus()); // baseline, so the first pushed sample is a real delta
+  setInterval(samplePerf, PERF_INTERVAL_MS);
+});
+
 ipcMain.handle('update:install', (event) => {
   const latest = startupUpdate;
   if (!latest) return { ok: false };
