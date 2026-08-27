@@ -725,21 +725,22 @@ async function checkForUpdatesInBackground() {
 }
 
 // --- CPU / memory meters (#69): the main process samples the Windows host every 2s and pushes
-// the numbers to every workspace view (the toolbar meters live there, like the update button).
+// the numbers to every shell window (the meters live in the tab strip, next to the window controls).
 // One shared timer for the whole app — per-window sampling would just repeat the same os.cpus()
 // walk. The math is in perf-stats.js (unit-tested); the first tick has no CPU delta and reports 0.
 const PERF_INTERVAL_MS = 2000;
 const { cpuTotals, cpuPercent, memPercent } = require('./perf-stats');
 let lastCpuTotals = null;
+let lastPerfPayload = null; // replayed to a strip that becomes ready between ticks
 function samplePerf() {
   const now = cpuTotals(os.cpus());
   const cpu = cpuPercent(lastCpuTotals, now);
   lastCpuTotals = now;
   const memTotal = os.totalmem();
   const memUsed = memTotal - os.freemem();
-  const payload = { cpu, memUsed, memTotal, memPct: memPercent(memUsed, memTotal) };
-  for (const state of viewState.values()) {
-    if (!state.view.webContents.isDestroyed()) state.view.webContents.send('perf:stats', payload);
+  lastPerfPayload = { cpu, memUsed, memTotal, memPct: memPercent(memUsed, memTotal) };
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('perf:stats', lastPerfPayload);
   }
 }
 app.whenReady().then(() => {
@@ -1189,6 +1190,7 @@ ipcMain.on('tabs:ready', (event) => {
   if (!win) return;
   pushTabsState(win);
   sendMaximized(win);
+  if (lastPerfPayload) win.webContents.send('perf:stats', lastPerfPayload); // no 2s blank on a new window
 });
 ipcMain.on('tabs:activate', (event, { id } = {}) => {
   const win = BrowserWindow.fromWebContents(event.sender);

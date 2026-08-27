@@ -19,6 +19,7 @@
     lang = window.i18n.normalizeLang(state.lang);
     document.title = state.title || 'WSL Workbench';
     newTabBtn.title = t('menu.newTab');
+    refreshPerfTitle(); // the tooltip interpolates the latest sample in the (possibly new) language
     tabsEl.textContent = '';
     for (const tab of state.tabs) {
       const el = document.createElement('div');
@@ -96,6 +97,37 @@
     el.addEventListener('pointerup', onUp);
     el.addEventListener('pointercancel', onCancel);
   }
+
+  // CPU / memory meters (#69): main samples the host every 2s and pushes perf:stats to every
+  // shell. Hidden until the first sample lands; the tooltip carries the absolute memory numbers.
+  const perfStats = document.getElementById('perfStats');
+  const perfCpuFill = document.getElementById('perfCpuFill');
+  const perfCpuText = document.getElementById('perfCpuText');
+  const perfMemFill = document.getElementById('perfMemFill');
+  const perfMemText = document.getElementById('perfMemText');
+  const toGB = (bytes) => (bytes / (1024 * 1024 * 1024)).toFixed(1);
+  let lastPerf = null;
+  function setPerfMeter(fill, textEl, pct) {
+    fill.style.width = `${pct}%`;
+    fill.classList.toggle('warn', pct >= 70 && pct < 90);
+    fill.classList.toggle('crit', pct >= 90);
+    textEl.textContent = `${pct}%`;
+  }
+  function refreshPerfTitle() {
+    if (!lastPerf) return;
+    perfStats.title = t('perf.tooltip')
+      .replace('{cpu}', String(lastPerf.cpu))
+      .replace('{used}', toGB(lastPerf.memUsed))
+      .replace('{total}', toGB(lastPerf.memTotal));
+  }
+  window.api.onPerfStats((p) => {
+    if (!p || typeof p.cpu !== 'number') return;
+    lastPerf = p;
+    setPerfMeter(perfCpuFill, perfCpuText, p.cpu);
+    setPerfMeter(perfMemFill, perfMemText, p.memPct);
+    refreshPerfTitle();
+    perfStats.classList.remove('hidden');
+  });
 
   newTabBtn.addEventListener('click', () => window.api.tabsNew());
 

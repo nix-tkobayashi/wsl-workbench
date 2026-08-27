@@ -24,6 +24,19 @@ body { margin:0; overflow:hidden; background:var(--bg); color:var(--text); font-
 
 #dragSpace { flex:1; align-self:stretch; }
 
+/* CPU / memory meters between the drag space and the window controls (#69). Must opt out of the
+   drag region for the tooltip to show; never shrinks (the tab list scrolls/ellipsizes instead). */
+.perf-stats { -webkit-app-region: no-drag; display:flex; align-items:center; gap:10px; flex:none; margin-right:8px; color:var(--muted); font-size:11px; cursor:default; }
+.perf-stats.hidden { display:none; }
+.perf-seg { display:flex; align-items:center; gap:4px; }
+.perf-name { font-weight:600; letter-spacing:.02em; }
+.perf-track { width:56px; height:5px; border-radius:3px; background:#2e2e2e; overflow:hidden; }
+.perf-fill { display:block; height:100%; width:0; border-radius:3px; background:#5f8cff; transition:width .4s ease; }
+.perf-fill.warn { background:#e6b450; }
+.perf-fill.crit { background:#e05252; }
+/* Fixed-width numerals so the meters don't jitter as values change. */
+.perf-text { min-width:32px; text-align:right; font-variant-numeric:tabular-nums; }
+
 #winControls { display:flex; align-self:stretch; -webkit-app-region: no-drag; }
 .winctl { width:46px; height:34px; display:flex; align-items:center; justify-content:center; padding:0; background:transparent; border:0; border-radius:0; color:var(--text); font-family:"Segoe Fluent Icons","Segoe MDL2 Assets",sans-serif; font-size:10px; line-height:1; cursor:pointer; }
 .winctl:hover { background:#2d2d2d; }
