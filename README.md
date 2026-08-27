@@ -8,9 +8,12 @@ Lightweight Windows Electron app for working in WSL:
 - Landing screen on startup / New Window to pick a workspace
 - Terminal: right-click to copy (selection) / paste, drag a tree item in to insert its path,
   paste an image with `Ctrl+V` or right-click (Claude Code reads it as `[Image #N]`), and press any key to restart after `exit`
-- Waiting-for-input badge: when an AI CLI (Claude Code, codex, ...) finishes its turn it can notify
-  the app via OSC 9 — the pane's tab segment and a top-left chip light up until you type in that
-  pane, and the taskbar icon gets an overlay dot (see [Waiting-for-input badge](#waiting-for-input-badge-ai-clis))
+- Waiting-for-input badge: when an AI CLI (Claude Code, codex, ...) finishes its turn or asks for
+  permission it can notify the app via OSC 9 — the pane's tab segment and a top-left chip light up
+  until you type in that pane, the taskbar icon gets an overlay dot, and a Windows toast appears
+  when the window is behind others (see [Waiting-for-input badge](#waiting-for-input-badge-ai-clis))
+- Notification history: the bell next to the chip lists the recent "waiting for you" reports of
+  the workspace (tool, kind, pane, time); click an entry to jump to that pane
 - Tree auto-refreshes (files created in the terminal appear without a manual refresh)
 - CPU / memory meters at the right of the title bar show the host PC's live usage (updated every
   2 seconds; hover for absolute memory numbers)
@@ -37,25 +40,35 @@ Check **Help > About WSL Workbench** for your version and update notifications.
 ## Waiting-for-input badge (AI CLIs)
 
 A terminal pane can report "I finished — waiting for your input" by printing an OSC 9 escape
-sequence (`ESC ] 9 ; <name> BEL`). The badge is only lit by that explicit notification — a
+sequence (`ESC ] 9 ; <name> [; <kind>] BEL`). The badge is only lit by that explicit notification — a
 terminal that is merely quiet is never marked — and it clears on your next keystroke into that
 pane. While lit you get: a dot on the pane's tab segment, a clickable chip at the top-left of the
-window (jumps to the waiting pane), the window title prefixed with `●` (visible in Alt+Tab), and
-an overlay dot on the taskbar icon. Structured OSC 9 payloads such as progress reports (`4;1;50`)
-are ignored.
+window (jumps to the waiting pane), the window title prefixed with `●` (visible in Alt+Tab), an
+overlay dot on the taskbar icon, and — when the window is not focused or the tab is hidden — a
+Windows toast (click it to bring that pane to the front). Structured OSC 9 payloads such as
+progress reports (`4;1;50`) are ignored.
+
+The optional `<kind>` field says *why* the CLI waits, so the chip / toast / history read
+`claude · permission` (an approval prompt) or `claude · finished` (its turn ended) instead of just
+`claude`. `done` and `permission` are localized; any other word is shown as-is.
+
+Every report is also kept in the **notification history** — the bell next to the chip — with the
+tool, kind, pane and time (newest first, last 50 per workspace, cleared with the panel's Clear
+button). Clicking an entry jumps to that pane; entries whose pane has been closed stay listed but
+are greyed out.
 
 Configure your CLIs to send it. The pane's shell exports `WSL_WORKBENCH_TTY=/dev/pts/N`, and the
 commands below write there — Claude Code runs hooks in a new session without a controlling
 terminal, so a plain `> /dev/tty` silently fails (#66). Outside Workbench the commands fall back
 to `/dev/tty`, then to the CLI's own stdout, and never write to anything but a tty device.
 
-**Claude Code** — `~/.claude/settings.json` (fires when a turn ends or Claude asks for permission):
+**Claude Code** — `~/.claude/settings.json` (`Stop` fires when a turn ends, `Notification` when Claude asks for permission or is otherwise idle):
 
 ```json
 {
   "hooks": {
-    "Stop": [{ "hooks": [{ "type": "command", "command": "T=\"${WSL_WORKBENCH_TTY:-}\"; { [ -n \"$T\" ] && [ -w \"$T\" ]; } || { T=/dev/tty; ( : > /dev/tty ) 2>/dev/null || T=\"$(readlink /proc/$PPID/fd/1 2>/dev/null)\"; }; T=\"$(readlink -f -- \"$T\" 2>/dev/null)\"; case \"$T\" in /dev/pts/*|/dev/tty*) [ -c \"$T\" ] && printf '\\033]9;claude\\007' > \"$T\";; esac" }] }],
-    "Notification": [{ "hooks": [{ "type": "command", "command": "T=\"${WSL_WORKBENCH_TTY:-}\"; { [ -n \"$T\" ] && [ -w \"$T\" ]; } || { T=/dev/tty; ( : > /dev/tty ) 2>/dev/null || T=\"$(readlink /proc/$PPID/fd/1 2>/dev/null)\"; }; T=\"$(readlink -f -- \"$T\" 2>/dev/null)\"; case \"$T\" in /dev/pts/*|/dev/tty*) [ -c \"$T\" ] && printf '\\033]9;claude\\007' > \"$T\";; esac" }] }]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "T=\"${WSL_WORKBENCH_TTY:-}\"; { [ -n \"$T\" ] && [ -w \"$T\" ]; } || { T=/dev/tty; ( : > /dev/tty ) 2>/dev/null || T=\"$(readlink /proc/$PPID/fd/1 2>/dev/null)\"; }; T=\"$(readlink -f -- \"$T\" 2>/dev/null)\"; case \"$T\" in /dev/pts/*|/dev/tty*) [ -c \"$T\" ] && printf '\\033]9;claude;done\\007' > \"$T\";; esac" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "T=\"${WSL_WORKBENCH_TTY:-}\"; { [ -n \"$T\" ] && [ -w \"$T\" ]; } || { T=/dev/tty; ( : > /dev/tty ) 2>/dev/null || T=\"$(readlink /proc/$PPID/fd/1 2>/dev/null)\"; }; T=\"$(readlink -f -- \"$T\" 2>/dev/null)\"; case \"$T\" in /dev/pts/*|/dev/tty*) [ -c \"$T\" ] && printf '\\033]9;claude;permission\\007' > \"$T\";; esac" }] }]
   }
 }
 ```
@@ -67,7 +80,7 @@ notify = ["/bin/sh", "-c", "T=\"${WSL_WORKBENCH_TTY:-}\"; { [ -n \"$T\" ] && [ -
 ```
 
 Any other tool works the same way: `printf '\033]9;mytool\007' > "$WSL_WORKBENCH_TTY"` at the
-moment it starts waiting.
+moment it starts waiting (`printf '\033]9;mytool;permission\007'` to tag the kind).
 
 ## Run from source
 
