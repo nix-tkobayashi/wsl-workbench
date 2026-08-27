@@ -12,6 +12,8 @@ Lightweight Windows Electron app for working in WSL:
   the app via OSC 9 — the pane's tab segment and a top-left chip light up until you type in that
   pane, and the taskbar icon gets an overlay dot (see [Waiting-for-input badge](#waiting-for-input-badge-ai-clis))
 - Tree auto-refreshes (files created in the terminal appear without a manual refresh)
+- CPU / memory meters at the right of the title bar show the host PC's live usage (updated every
+  2 seconds; hover for absolute memory numbers)
 - English / Japanese UI (Language menu)
 - Drag & drop to move within the tree, or copy in from Windows Explorer
 - Workspace tabs: one window hosts multiple workspaces as tabs (`Ctrl+T` for a new tab). Drag a

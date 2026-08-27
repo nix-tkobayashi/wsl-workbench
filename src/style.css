@@ -22,6 +22,19 @@ body { margin:0; height:100vh; overflow:hidden; background:var(--bg); color:var(
 .attention-chip:hover { background:var(--hover); }
 .attention-chip::before { content:'●'; margin-right:5px; }
 .attention-chip.hidden { display:none; }
+/* CPU / memory meters at the right edge of the toolbar (#69), fed by perf:stats pushes from main.
+   Hidden until the first sample arrives. Part of the title bar, so it must opt out of the drag
+   region for its tooltip to show, and must never shrink (the .title ellipsizes instead). */
+.perf-stats { -webkit-app-region: no-drag; margin-left:auto; display:flex; align-items:center; gap:10px; flex:none; color:var(--muted); font-size:11px; cursor:default; }
+.perf-stats.hidden { display:none; }
+.perf-seg { display:flex; align-items:center; gap:4px; }
+.perf-name { font-weight:600; letter-spacing:.02em; }
+.perf-track { width:56px; height:5px; border-radius:3px; background:#2e2e2e; overflow:hidden; }
+.perf-fill { display:block; height:100%; width:0; border-radius:3px; background:var(--accent); transition:width .4s ease; }
+.perf-fill.warn { background:#e6b450; }
+.perf-fill.crit { background:#e05252; }
+/* Fixed-width numerals so the meters don't jitter as values change. */
+.perf-text { min-width:32px; text-align:right; font-variant-numeric:tabular-nums; }
 button { background:#2a2a2a; color:var(--text); border:1px solid #444; padding:5px 10px; border-radius:6px; cursor:pointer; }
 button:hover:not(:disabled) { background:#3a3a3a; }
 button:disabled { opacity:.45; cursor:not-allowed; }

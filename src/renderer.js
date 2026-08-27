@@ -127,6 +127,7 @@ function applyLanguage() {
   for (const group of termGroups.values()) renderTermTab(group);
   refreshAttentionChip(); // its text mixes pane names and the localized waiting word
   refreshUpdateBtn(); // its tooltip is built manually (has a {version} slot), not via data-i18n
+  refreshPerfTitle(); // same: the CPU/memory tooltip interpolates the latest sample
 }
 
 // Promise-based replacement for the unsupported window.prompt() in Electron.
@@ -2355,6 +2356,38 @@ updateBtn.addEventListener('click', () => {
   if (!updateVersion) return;
   if (!confirm(t('update.confirmInstall').replace('{version}', updateVersion))) return;
   window.api.installUpdate();
+});
+
+// CPU / memory meters (toolbar right): main samples the host every 2s and pushes perf:stats to
+// every workspace view. Hidden until the first sample lands; the tooltip carries the absolute
+// memory numbers the compact meters leave out.
+const perfStats = document.getElementById('perfStats');
+const perfCpuFill = document.getElementById('perfCpuFill');
+const perfCpuText = document.getElementById('perfCpuText');
+const perfMemFill = document.getElementById('perfMemFill');
+const perfMemText = document.getElementById('perfMemText');
+const toGB = (bytes) => (bytes / (1024 * 1024 * 1024)).toFixed(1);
+let lastPerf = null;
+function setPerfMeter(fill, textEl, pct) {
+  fill.style.width = `${pct}%`;
+  fill.classList.toggle('warn', pct >= 70 && pct < 90);
+  fill.classList.toggle('crit', pct >= 90);
+  textEl.textContent = `${pct}%`;
+}
+function refreshPerfTitle() {
+  if (!lastPerf) return;
+  perfStats.title = t('perf.tooltip')
+    .replace('{cpu}', String(lastPerf.cpu))
+    .replace('{used}', toGB(lastPerf.memUsed))
+    .replace('{total}', toGB(lastPerf.memTotal));
+}
+window.api.onPerfStats((p) => {
+  if (!p || typeof p.cpu !== 'number') return;
+  lastPerf = p;
+  setPerfMeter(perfCpuFill, perfCpuText, p.cpu);
+  setPerfMeter(perfMemFill, perfMemText, p.memPct);
+  refreshPerfTitle();
+  perfStats.classList.remove('hidden');
 });
 
 (async function init() {

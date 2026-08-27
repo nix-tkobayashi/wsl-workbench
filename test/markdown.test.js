@@ -50,6 +50,45 @@ test('lists group consecutive items', () => {
   assert.equal(render('1. a\n2. b'), '<ol><li>a</li><li>b</li></ol>');
 });
 
+test('indented items nest inside the parent item (#68)', () => {
+  assert.equal(render('- foo\n  - bar'), '<ul><li>foo<ul><li>bar</li></ul></li></ul>');
+  assert.equal(render('- a\n  - b\n- c'), '<ul><li>a<ul><li>b</li></ul></li><li>c</li></ul>');
+});
+
+test('deeper nesting unwinds level by level', () => {
+  assert.equal(
+    render('- a\n  - b\n    - c\n- d'),
+    '<ul><li>a<ul><li>b<ul><li>c</li></ul></li></ul></li><li>d</li></ul>'
+  );
+});
+
+test('dedent to an intermediate indent stays nested under the parent', () => {
+  assert.equal(
+    render('- a\n    - b\n  - c'),
+    '<ul><li>a<ul><li>b</li></ul><ul><li>c</li></ul></li></ul>'
+  );
+});
+
+test('ordered list nests inside an unordered item and vice versa', () => {
+  assert.equal(render('- a\n  1. b\n  2. c'), '<ul><li>a<ol><li>b</li><li>c</li></ol></li></ul>');
+  assert.equal(render('1. a\n   - b'), '<ol><li>a<ul><li>b</li></ul></li></ol>');
+});
+
+test('tab-indented items nest too', () => {
+  assert.equal(render('- foo\n\t- bar'), '<ul><li>foo<ul><li>bar</li></ul></li></ul>');
+});
+
+test('marker-type switch at the same level starts a new list', () => {
+  assert.equal(render('- a\n1. b'), '<ul><li>a</li></ul><ol><li>b</li></ol>');
+});
+
+test('inline markup still renders inside nested items', () => {
+  assert.equal(
+    render('- **a**\n  - `c`'),
+    '<ul><li><strong>a</strong><ul><li><code>c</code></li></ul></li></ul>'
+  );
+});
+
 test('blockquote and horizontal rule', () => {
   assert.ok(render('> quoted').includes('<blockquote>'));
   assert.equal(render('---'), '<hr>');
