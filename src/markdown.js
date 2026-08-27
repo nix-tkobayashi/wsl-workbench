@@ -52,6 +52,42 @@
 
   const LIST_ITEM = /^\s*([-*+]|\d+[.)])\s+/;
 
+  // Indentation width of a list line (tab = 4). Depth is relative: any strictly deeper indent than
+  // the current level opens a nested list, any shallower one unwinds back to the matching level.
+  function listIndent(line) {
+    const ws = line.match(/^[ \t]*/)[0];
+    let n = 0;
+    for (const c of ws) n += c === '\t' ? 4 : 1;
+    return n;
+  }
+
+  // Consecutive list lines -> (possibly nested) <ul>/<ol>. A marker-type switch at the same level
+  // (e.g. "- a" then "1. b") closes the list and starts a new one, per CommonMark.
+  function renderListBlock(items) {
+    const out = [];
+    const stack = []; // open lists, outermost first: { indent, tag }
+    for (const it of items) {
+      const tag = it.ordered ? 'ol' : 'ul';
+      if (!stack.length || it.indent > stack[stack.length - 1].indent) {
+        // First item, or deeper than the current level: nest inside the still-open <li>.
+        out.push(`<${tag}>`);
+        stack.push({ indent: it.indent, tag });
+      } else {
+        while (stack.length > 1 && it.indent < stack[stack.length - 1].indent) {
+          out.push(`</li></${stack.pop().tag}>`);
+        }
+        out.push('</li>');
+        if (stack[stack.length - 1].tag !== tag) {
+          out.push(`</${stack.pop().tag}>`, `<${tag}>`);
+          stack.push({ indent: it.indent, tag });
+        }
+      }
+      out.push(`<li>${inline(it.text)}`);
+    }
+    while (stack.length) out.push(`</li></${stack.pop().tag}>`);
+    return out.join('');
+  }
+
   // --- GFM pipe tables ---
   // Cells of one row: outer pipes stripped, escaped \| kept as a literal pipe (protected with a
   // NUL placeholder through the split — NUL can't survive in real text files).
@@ -124,11 +160,16 @@
       }
 
       if (LIST_ITEM.test(line)) {
-        const ordered = /^\s*\d+[.)]\s+/.test(line);
         const items = [];
-        while (i < lines.length && LIST_ITEM.test(lines[i])) { items.push(lines[i].replace(LIST_ITEM, '')); i++; }
-        const tag = ordered ? 'ol' : 'ul';
-        out.push(`<${tag}>${items.map((it) => `<li>${inline(it)}</li>`).join('')}</${tag}>`);
+        while (i < lines.length && LIST_ITEM.test(lines[i])) {
+          items.push({
+            indent: listIndent(lines[i]),
+            ordered: /^\s*\d+[.)]\s+/.test(lines[i]),
+            text: lines[i].replace(LIST_ITEM, '')
+          });
+          i++;
+        }
+        out.push(renderListBlock(items));
         continue;
       }
 
