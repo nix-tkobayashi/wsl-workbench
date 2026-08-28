@@ -46,6 +46,10 @@ contextBridge.exposeInMainWorld('api', {
   onLangChanged: (cb) => ipcRenderer.on('lang:changed', (_event, lang) => cb(lang)),
   onUpdateProgress: (cb) => ipcRenderer.on('update:progress', (_event, payload) => cb(payload)),
   onUpdateAvailable: (cb) => ipcRenderer.on('update:available', (_event, payload) => cb(payload)),
+  // Windows notification center (issue #73): OS toasts relayed by the main-process bridge.
+  systemNotificationState: () => ipcRenderer.invoke('notification:systemState'),
+  onSystemNotification: (cb) => ipcRenderer.on('notification:system', (_event, payload) => cb(payload)),
+  onSystemNotificationStatus: (cb) => ipcRenderer.on('notification:system-status', (_event, payload) => cb(payload)),
   onPerfStats: (cb) => ipcRenderer.on('perf:stats', (_event, payload) => cb(payload)),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   setAttention: (payload) => ipcRenderer.send('window:attention', payload),

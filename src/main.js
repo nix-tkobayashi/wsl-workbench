@@ -4,6 +4,9 @@ const fs = require('fs');
 const os = require('os');
 const pty = require('node-pty');
 const i18n = require('./i18n');
+const { spawn } = require('child_process');
+const { createSystemNotificationBridge } = require('./system-notification-bridge');
+const { normalizeSystemNotification, missingFromSnapshot } = require('./notification-center');
 const { imageMimeForPath } = require('./file-types');
 const { normalizeVersion, isNewer } = require('./version');
 
@@ -750,6 +753,86 @@ app.setAppUserModelId('com.wslworkbench.app');
 app.whenReady().then(() => {
   lastCpuTotals = cpuTotals(os.cpus()); // baseline, so the first pushed sample is a real delta
   setInterval(samplePerf, PERF_INTERVAL_MS);
+});
+
+// --- Windows notification center (issue #73). A PowerShell helper (native/notification-bridge)
+// relays the OS notification list (Slack, Outlook, Teams, ...) as NDJSON; main keeps the last few
+// so a view opened later still sees them, and mirrors each one to every workspace view. Optional
+// feature: any failure only flips the status to "unavailable" — never touches app startup.
+const SYSTEM_NOTIFICATION_BUFFER = 50;
+let systemBridge = null;
+let systemNotificationStatus = { status: 'disabled' };
+const systemNotifications = []; // newest first, normalized (design §10)
+
+function notificationBridgePath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'native', 'notification-bridge.ps1')
+    : path.join(__dirname, '..', 'native', 'notification-bridge', 'notification-bridge.ps1');
+}
+function systemNotificationsEnabled() {
+  const s = readSettings().systemNotifications;
+  return process.platform === 'win32' && !(s && s.enabled === false);
+}
+function broadcastToViews(channel, payload) {
+  for (const state of viewState.values()) {
+    if (!state.view.webContents.isDestroyed()) state.view.webContents.send(channel, payload);
+  }
+}
+function setSystemNotificationStatus(status) {
+  systemNotificationStatus = status;
+  broadcastToViews('notification:system-status', status);
+}
+let snapshotIds = new Set(); // ids in the bridge's current "existing" snapshot (reset per launch)
+function acceptSystemNotification(n) {
+  if (n.event === 'removed') {
+    const hit = systemNotifications.find((e) => e.windowsNotificationId === n.windowsNotificationId);
+    if (hit) hit.event = 'removed';
+  } else if (!systemNotifications.some((e) => e.windowsNotificationId === n.windowsNotificationId)) {
+    systemNotifications.unshift(n);
+    systemNotifications.length = Math.min(systemNotifications.length, SYSTEM_NOTIFICATION_BUFFER);
+  }
+  broadcastToViews('notification:system', n);
+}
+function startSystemNotificationBridge() {
+  if (!systemNotificationsEnabled() || systemBridge) return;
+  const script = notificationBridgePath();
+  if (!fs.existsSync(script)) { setSystemNotificationStatus({ status: 'unavailable' }); return; }
+  const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  systemBridge = createSystemNotificationBridge({
+    spawn,
+    command: powershell,
+    args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script,
+      '-ParentPid', String(process.pid), '-PollMs', '2000', '-IgnoreApp', 'WSL Workbench'],
+    onNotification: (msg) => {
+      const n = normalizeSystemNotification(msg);
+      if (!n) return;
+      if (n.event === 'existing') snapshotIds.add(n.windowsNotificationId);
+      acceptSystemNotification(n);
+    },
+    onStatus: (s) => {
+      if (s.status === 'starting' || s.status === 'restarting') snapshotIds = new Set();
+      // Snapshot complete: toasts we still hold as active but Windows no longer lists (dismissed
+      // while the bridge was down / restarting) are retired like a live "removed" event.
+      if (s.status === 'ready') {
+        for (const id of missingFromSnapshot(systemNotifications, snapshotIds)) {
+          acceptSystemNotification(normalizeSystemNotification({ type: 'notification', event: 'removed', id }));
+        }
+      }
+      setSystemNotificationStatus(s);
+    },
+    onError: (e) => console.error(`[notification-bridge] ${e.code}: ${e.message}`),
+    onDiagnostic: (text) => { if (text) console.warn(text); }
+  });
+  setSystemNotificationStatus({ status: 'starting' });
+  systemBridge.start();
+}
+app.whenReady().then(startSystemNotificationBridge);
+app.on('before-quit', () => { if (systemBridge) { systemBridge.stop(); systemBridge = null; } });
+// Renderer bootstrap: current status + the buffered notifications (the renderer dedupes). Only a
+// workspace view may ask — the tab strip and anything else get nothing.
+ipcMain.handle('notification:systemState', (event) => {
+  if (!viewState.has(event.sender.id)) return { status: { status: 'disabled' }, notifications: [] };
+  return { status: systemNotificationStatus, notifications: systemNotifications.slice() };
 });
 
 ipcMain.handle('update:install', (event) => {
