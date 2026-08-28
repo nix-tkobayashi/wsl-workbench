@@ -127,6 +127,7 @@ function applyLanguage() {
   for (const group of termGroups.values()) renderTermTab(group);
   refreshAttentionChip(); // its text mixes pane names and the localized waiting word
   if (!notifyPanel.classList.contains('hidden')) renderNotifyList(); // kind words + empty text
+  if (typeof renderSystemNotificationStatus === 'function') renderSystemNotificationStatus();
   refreshUpdateBtn(); // its tooltip is built manually (has a {version} slot), not via data-i18n
 }
 
@@ -312,7 +313,7 @@ let notifications = []; // [{ id, paneId, label, kind, paneName, time }] newest 
 
 function recordNotification(entry) {
   notifications = window.notificationLog.pushNotification(notifications, {
-    paneId: entry.id, label: entry.attention || '', kind: entry.attentionKind || '', paneName: paneTabText(entry), time: Date.now()
+    source: 'terminal', paneId: entry.id, label: entry.attention || '', kind: entry.attentionKind || '', paneName: paneTabText(entry), time: Date.now()
   });
   if (!notifyPanel.classList.contains('hidden')) renderNotifyList();
   maybeToast(entry);
@@ -350,6 +351,7 @@ function renderNotifyList() {
   notifyClear.disabled = false;
   const kindWords = attentionKindWords();
   for (const n of notifications) {
+    if (n.source === 'windows') { notifyList.appendChild(renderSystemNotifyItem(n)); continue; }
     const entry = terminals.get(n.paneId);
     const alive = !!entry;
     const waiting = alive && entry.attention != null;
@@ -383,7 +385,9 @@ function renderNotifyList() {
 }
 
 function openNotifyPanel() {
+  for (const n of notifications) if (n.source === 'windows') n.read = true;
   renderNotifyList();
+  refreshAttentionChip(); // unread count → bell badge
   notifyPanel.classList.remove('hidden');
   notifyBell.setAttribute('aria-expanded', 'true');
 }
@@ -396,9 +400,101 @@ notifyBell.addEventListener('click', (event) => {
   if (notifyPanel.classList.contains('hidden')) openNotifyPanel(); else closeNotifyPanel();
 });
 notifyPanel.addEventListener('click', (event) => event.stopPropagation());
-notifyClear.addEventListener('click', () => { notifications = []; renderNotifyList(); });
+notifyClear.addEventListener('click', () => { notifications = []; renderNotifyList(); refreshAttentionChip(); });
 document.addEventListener('click', closeNotifyPanel);
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeNotifyPanel(); });
+
+// --- Windows notification center (issue #73): OS toasts (Slack, Outlook, Teams, ...) relayed by the
+// main-process bridge land in the same bell list as the terminal reports. Each row offers "Ask":
+// the notification is pasted verbatim into the active terminal pane (bracketed paste, no Enter)
+// so the CLI there — Claude Code, codex, ... — gets it as a question the user can still edit.
+// Nothing is sent to an AI automatically; the user's click is the trigger.
+const notifyStatus = document.getElementById('notifyStatus');
+let systemNotificationStatus = { status: 'disabled' };
+
+function addSystemNotification(payload) {
+  const n = window.notificationCenter.normalizeSystemNotification({ type: 'notification', event: payload && payload.event,
+    id: payload && payload.windowsNotificationId, app: payload && payload.app && payload.app.name,
+    appId: payload && payload.app && payload.app.id, title: payload && payload.title, body: payload && payload.body,
+    timestamp: payload && payload.timestamp });
+  if (!n) return;
+  const known = window.notificationCenter.hasEntry(notifications, n);
+  if (n.event === 'removed' && known) {
+    // History is kept (design §25); the row just loses its "still in the notification center" mark.
+    for (const e of notifications) if (e.source === 'windows' && e.windows.notificationId === n.windowsNotificationId) e.windows.active = false;
+  } else if (!known && (n.event !== 'removed' || n.app.name || n.title || n.body)) {
+    // A bare "removed" for something we never showed is nothing; a buffered one (view opened after
+    // the dismissal) still carries its text and lands as an already-greyed, already-read row.
+    const entry = window.notificationCenter.toHistoryEntry(n);
+    if (n.event !== 'added') entry.read = true; // pre-existing / dismissed toasts were already seen in Windows
+    if (n.event === 'removed') entry.windows.active = false;
+    notifications = window.notificationLog.pushNotification(notifications, entry);
+    refreshAttentionChip();
+  }
+  if (!notifyPanel.classList.contains('hidden')) renderNotifyList();
+}
+
+function renderSystemNotifyItem(n) {
+  const item = document.createElement('div');
+  item.className = 'notify-item notify-system' + (n.windows && n.windows.active === false ? ' stale' : '');
+  const avatar = document.createElement('span');
+  avatar.className = `notify-avatar cat-${n.category || 'other'}`;
+  avatar.textContent = window.notificationCenter.appInitial(n.app);
+  const main = document.createElement('span');
+  main.className = 'notify-main notify-system-main';
+  const head = document.createElement('span');
+  head.className = 'notify-system-head';
+  head.textContent = n.title ? `${n.app} · ${n.title}` : n.app;
+  const body = document.createElement('span');
+  body.className = 'notify-system-body';
+  body.textContent = window.notificationCenter.bodyPreview(n.body);
+  body.title = String(n.body || '');
+  main.append(head, body);
+  const side = document.createElement('span');
+  side.className = 'notify-side';
+  const time = document.createElement('span');
+  time.className = 'notify-time';
+  time.textContent = window.notificationLog.formatClock(n.time);
+  const ask = document.createElement('button');
+  ask.className = 'notify-ask';
+  ask.textContent = t('notify.ask');
+  ask.title = t('notify.askHint');
+  ask.addEventListener('click', (event) => { event.stopPropagation(); closeNotifyPanel(); askInTerminal(n); });
+  side.append(time, ask);
+  item.append(avatar, main, side);
+  return item;
+}
+
+// Paste the notification into the active pane of the current terminal tab (or the first live pane).
+function askInTerminal(n) {
+  let entry = activeTerminal();
+  if (!entry) for (const e of terminals.values()) { entry = e; break; }
+  if (!entry) { alert(t('notify.askNoTerminal')); return; }
+  jumpToPane(entry);
+  if (entry.attention != null) clearPaneAttention(entry);
+  // Multi-line only when the app in the pane speaks bracketed paste (Claude Code, codex, ...);
+  // a plain shell would execute each line, so there the text is flattened to one line.
+  const multiline = !!(entry.term.modes && entry.term.modes.bracketedPasteMode);
+  entry.term.paste(window.notificationCenter.sanitizeForPaste(window.notificationCenter.askPrompt(n, { lead: t('notify.askLead') }), { multiline }));
+  entry.term.focus();
+}
+
+function renderSystemNotificationStatus() {
+  if (!notifyStatus) return;
+  const key = `notify.status.${systemNotificationStatus.status || 'disabled'}`;
+  const text = t(key);
+  notifyStatus.textContent = text === key ? '' : text;
+  notifyStatus.classList.toggle('hidden', !notifyStatus.textContent);
+}
+
+window.api.onSystemNotification(addSystemNotification);
+window.api.onSystemNotificationStatus((s) => { systemNotificationStatus = s || { status: 'disabled' }; renderSystemNotificationStatus(); });
+window.api.systemNotificationState().then((state) => {
+  if (!state) return;
+  systemNotificationStatus = state.status || { status: 'disabled' };
+  renderSystemNotificationStatus();
+  for (const n of (state.notifications || []).slice().reverse()) addSystemNotification(n);
+}).catch(() => {});
 
 // nativeImage lives in the main process, so the overlay dot travels as a data URL.
 function attentionOverlayIcon() {
@@ -423,9 +519,12 @@ function refreshAttentionChip() {
     appName: 'WSL Workbench',
     kindWords: attentionKindWords()
   });
-  notifyBell.classList.toggle('lit', waiting.length > 0);
-  notifyCount.classList.toggle('hidden', waiting.length === 0);
-  notifyCount.textContent = waiting.length ? String(waiting.length) : '';
+  // Bell badge = waiting panes + unread Windows notifications; the chip/title stay terminal-only.
+  const unread = notifications.filter((n) => n.source === 'windows' && !n.read).length;
+  const badge = waiting.length + unread;
+  notifyBell.classList.toggle('lit', badge > 0);
+  notifyCount.classList.toggle('hidden', badge === 0);
+  notifyCount.textContent = badge ? String(badge) : '';
   attentionChip.classList.toggle('hidden', !summary);
   attentionChip.textContent = summary ? summary.chip : '';
   attentionChip.title = summary ? t('attention.jumpHint') : '';

@@ -82,6 +82,27 @@ notify = ["/bin/sh", "-c", "T=\"${WSL_WORKBENCH_TTY:-}\"; { [ -n \"$T\" ] && [ -
 Any other tool works the same way: `printf '\033]9;mytool\007' > "$WSL_WORKBENCH_TTY"` at the
 moment it starts waiting (`printf '\033]9;mytool;permission\007'` to tag the kind).
 
+## Windows notification center (Slack, Outlook, Teams, ...)
+
+The bell also lists **Windows toast notifications** — anything that lands in the Windows 11
+notification center (Slack, Outlook, Teams, Windows Security, ...) — alongside the terminal reports,
+newest first. Each Windows row shows the app, title, a body preview and the time; unread ones count
+into the bell badge until you open the panel. Rows whose toast was dismissed in Windows stay listed
+but greyed out. Only the last 50 entries per workspace are kept, and nothing is stored on disk.
+
+**Ask** on a Windows row pastes the notification (app, title, full body) into the active terminal
+pane as a bracketed paste — without pressing Enter — so you can hand a Slack message straight to
+Claude Code / codex running there, edit the question, and submit it yourself. Notifications are
+never sent to an AI or anywhere else automatically.
+
+How it works: the main process runs `native/notification-bridge/notification-bridge.ps1`
+(Windows PowerShell, no extra install) which reads the notification list through the WinRT
+`UserNotificationListener` and streams it as NDJSON on stdout; it polls every 2 s (the change event
+only fires for packaged apps), skips the app's own toasts, and exits with the app. Windows asks for
+**notification access** the first time (Settings > Privacy & security > Notifications); if it is
+denied, or the helper cannot start, the panel's footer says so and everything else keeps working.
+Disable the feature with `"systemNotifications": { "enabled": false }` in `settings.json`.
+
 ## Run from source
 
 ```powershell
