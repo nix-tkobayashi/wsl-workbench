@@ -6,7 +6,8 @@ const pty = require('node-pty');
 const i18n = require('./i18n');
 const { spawn } = require('child_process');
 const { createSystemNotificationBridge } = require('./system-notification-bridge');
-const { normalizeSystemNotification, missingFromSnapshot, normalizeExclusions, normalizeExclusionRule, sameExclusionRule, isExcluded, MAX_EXCLUSIONS } = require('./notification-center');
+const { normalizeSystemNotification, missingFromSnapshot, normalizeExclusions, normalizeExclusionRule, sameExclusionRule, isExcluded, MAX_EXCLUSIONS,
+  normalizeRoute, normalizeRoutes, routeChannelKey, findRoute, autoAskAllowed, workspaceKey, MAX_ROUTES } = require('./notification-center');
 const { imageMimeForPath } = require('./file-types');
 const { normalizeVersion, isNewer } = require('./version');
 
@@ -779,6 +780,10 @@ function systemNotificationExclusions() {
   const s = readSettings().systemNotifications;
   return normalizeExclusions(s && s.exclusions);
 }
+function systemNotificationRoutes() {
+  const s = readSettings().systemNotifications;
+  return normalizeRoutes(s && s.routes);
+}
 function broadcastToViews(channel, payload) {
   for (const state of viewState.values()) {
     if (!state.view.webContents.isDestroyed()) state.view.webContents.send(channel, payload);
@@ -817,6 +822,7 @@ function startSystemNotificationBridge() {
       // still broadcasts, but a bare removal for an unknown id is a no-op in every view.
       if (n.event !== 'removed' && isExcluded({ app: n.app.name, workspace: n.workspace, title: n.title }, systemNotificationExclusions())) return;
       acceptSystemNotification(n);
+      if (n.event === 'added') dispatchAutoAsk(n);
     },
     onStatus: (s) => {
       if (s.status === 'starting' || s.status === 'restarting') snapshotIds = new Set();
@@ -878,6 +884,60 @@ ipcMain.handle('notification:addExclusion', (event, rule) => {
 ipcMain.handle('notification:removeExclusion', (event, rule) => {
   if (!viewState.has(event.sender.id)) return { ok: false };
   return applyExclusionChange(systemNotificationExclusions().filter((e) => !sameExclusionRule(e, rule)));
+});
+
+// --- Channel → terminal bindings (auto-ask, issue #77). Same authority model as the exclusions:
+// views send deltas, main persists and mirrors the resulting list to every view. Only live "added"
+// toasts dispatch (never the startup "existing" snapshot), throttled per channel.
+const autoAskLastFired = new Map(); // routeChannelKey → last dispatch (ms)
+
+function dispatchAutoAsk(n) {
+  if (!n.slack) return;
+  const route = findRoute(systemNotificationRoutes(), n.slack);
+  if (!route) return;
+  // Every view of the bound workspace gets the dispatch; only the (single) view owning the pane's
+  // globally unique bindId acts on it, so duplicate-name panes or a second window on the same
+  // workspace can never receive a mis-delivery. No view / pane gone → normal bell entry only.
+  const targets = [];
+  for (const state of viewState.values()) {
+    if (state.view.webContents.isDestroyed()) continue;
+    if (workspaceKey(state.workspace.distro, state.workspace.wslPath) === route.workspace) targets.push(state.view.webContents);
+  }
+  if (!targets.length) return; // target workspace not open: nothing consumed
+  const key = routeChannelKey(route);
+  if (!autoAskAllowed(autoAskLastFired.get(key), Date.now())) return;
+  autoAskLastFired.set(key, Date.now());
+  for (const wc of targets) wc.send('notification:autoAsk', { notification: n, paneId: route.paneId, autoSend: !!route.autoSend });
+}
+
+function applyRouteChange(next) {
+  const routes = normalizeRoutes(next);
+  if (!writeSettings({ systemNotifications: { ...(readSettings().systemNotifications || {}), routes } })) return { ok: false };
+  broadcastToViews('notification:routes', routes);
+  return { ok: true, routes };
+}
+ipcMain.handle('notification:getRoutes', (event) => {
+  if (!viewState.has(event.sender.id)) return [];
+  return systemNotificationRoutes();
+});
+ipcMain.handle('notification:addRoute', (event, rule) => {
+  if (!viewState.has(event.sender.id)) return { ok: false };
+  const r = normalizeRoute(rule);
+  if (!r) return { ok: false };
+  // Re-binding a channel replaces its existing route (one route per channel).
+  const rest = systemNotificationRoutes().filter((e) => routeChannelKey(e) !== routeChannelKey(r));
+  if (rest.length >= MAX_ROUTES) return { ok: false };
+  return applyRouteChange([...rest, r]);
+});
+ipcMain.handle('notification:removeRoute', (event, rule) => {
+  if (!viewState.has(event.sender.id)) return { ok: false };
+  const key = routeChannelKey(normalizeRoute(rule) || { teamId: String(rule && rule.teamId || ''), channelId: String(rule && rule.channelId || '') });
+  return applyRouteChange(systemNotificationRoutes().filter((e) => routeChannelKey(e) !== key));
+});
+ipcMain.handle('notification:setRouteAutoSend', (event, { teamId, channelId, autoSend } = {}) => {
+  if (!viewState.has(event.sender.id)) return { ok: false };
+  const key = `${String(teamId || '')}:${String(channelId || '')}`;
+  return applyRouteChange(systemNotificationRoutes().map((e) => routeChannelKey(e) === key ? { ...e, autoSend: autoSend === true } : e));
 });
 
 ipcMain.handle('update:install', (event) => {
@@ -1002,7 +1062,7 @@ function buildAppMenu() {
           click: () => sendToFocusedWindow('menu:restartTerminal')
         },
         {
-          label: tr('menu.notificationExclusions'),
+          label: tr('menu.notificationSettings'),
           click: () => sendToFocusedWindow('menu:notificationExclusions')
         },
         { type: 'separator' },

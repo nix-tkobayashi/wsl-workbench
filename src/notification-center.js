@@ -198,6 +198,64 @@
     return (Array.isArray(rules) ? rules : []).some((rule) => matchesExclusion(flat, rule));
   }
 
+  // --- Channel → terminal bindings (auto-ask, issue #77). A route ties one Slack channel
+  // (teamId + channelId, exact match) to one terminal pane of one app workspace: a new toast from
+  // that channel is automatically pasted into that pane as an "Ask" prompt, and — only when the
+  // rule opts in AND the pane runs a bracketed-paste CLI — submitted with Enter. One route per
+  // channel; routes are created from a live notification (the ids come from its launch URI).
+  const MAX_ROUTES = 100;
+  const AUTO_ASK_INTERVAL_MS = 60000;
+
+  function normalizeRoute(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const r = {
+      teamId: String(raw.teamId || '').trim(),
+      channelId: String(raw.channelId || '').trim(),
+      workspace: String(raw.workspace || '').trim(), // app workspace key: `${distro}:${wslPath}`
+      paneId: String(raw.paneId || '').trim(),       // the pane's bindId — the delivery identity
+      pane: String(raw.pane || '').trim(),           // pane display name at bind time (UI only)
+      autoSend: raw.autoSend === true,
+      workspaceName: String(raw.workspaceName || '').trim(), // Slack workspace, for display only
+      channelName: String(raw.channelName || '').trim()      // Slack channel, for display only
+    };
+    return r.teamId && r.channelId && r.workspace && r.paneId ? r : null;
+  }
+
+  function routeChannelKey(route) {
+    return route ? `${route.teamId}:${route.channelId}` : '';
+  }
+
+  // Settings value → clean route list: one route per channel (first wins), bounded.
+  function normalizeRoutes(list) {
+    const seen = new Set();
+    return (Array.isArray(list) ? list : [])
+      .map(normalizeRoute)
+      .filter((r) => {
+        if (!r) return false;
+        const key = routeChannelKey(r);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, MAX_ROUTES);
+  }
+
+  function findRoute(routes, slack) {
+    if (!slack || !slack.teamId || !slack.channelId) return null;
+    return (Array.isArray(routes) ? routes : []).find((r) => r && r.teamId === slack.teamId && r.channelId === slack.channelId) || null;
+  }
+
+  // Per-channel throttle so a busy channel can't flood a CLI: a route fires at most once per
+  // interval. `lastMs` is the previous firing (undefined for never).
+  function autoAskAllowed(lastMs, nowMs, intervalMs = AUTO_ASK_INTERVAL_MS) {
+    return !Number.isFinite(lastMs) || nowMs - lastMs >= intervalMs;
+  }
+
+  // The app-workspace identity used by routes and session restore alike.
+  function workspaceKey(distro, wslPath) {
+    return `${String(distro || '')}:${String(wslPath || '')}`;
+  }
+
   // After the bridge (re)starts it sends a fresh "existing" snapshot; anything we still hold as
   // active that is missing from it was dismissed while the bridge was down. Returns those ids.
   function missingFromSnapshot(buffer, snapshotIds) {
@@ -209,7 +267,8 @@
 
   const notificationCenter = {
     normalizeSystemNotification, detectCategory, dedupeKey, toHistoryEntry, hasEntry, bodyPreview, appInitial, askPrompt, sanitizeForPaste, missingFromSnapshot,
-    parseToastPayload, parseSlackLaunch, normalizeExclusionRule, normalizeExclusions, sameExclusionRule, matchesExclusion, isExcluded, MAX_EXCLUSIONS
+    parseToastPayload, parseSlackLaunch, normalizeExclusionRule, normalizeExclusions, sameExclusionRule, matchesExclusion, isExcluded, MAX_EXCLUSIONS,
+    normalizeRoute, normalizeRoutes, routeChannelKey, findRoute, autoAskAllowed, workspaceKey, MAX_ROUTES, AUTO_ASK_INTERVAL_MS
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = notificationCenter;
   if (typeof window !== 'undefined') window.notificationCenter = notificationCenter;

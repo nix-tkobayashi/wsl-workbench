@@ -79,6 +79,10 @@ body { margin:0; height:100vh; overflow:hidden; background:var(--bg); color:var(
 .notify-excl-text.excl-any { color:var(--muted); }
 .notify-excl-remove { flex:none; background:transparent; border:0; padding:0 6px; color:var(--muted); font-size:13px; cursor:pointer; border-radius:3px; }
 .notify-excl-remove:hover { background:var(--hover); color:#b23b3b; }
+.excl-section { margin:10px 0 6px; font-size:12px; font-weight:600; color:var(--muted); }
+.notify-excl-row.route-row { grid-template-columns:1fr auto auto; }
+.route-autosend { display:inline-flex; align-items:center; gap:4px; color:var(--muted); font-size:11px; cursor:pointer; white-space:nowrap; }
+.route-autosend input { accent-color:var(--accent); margin:0; }
 button { background:#2a2a2a; color:var(--text); border:1px solid #444; padding:5px 10px; border-radius:6px; cursor:pointer; }
 button:hover:not(:disabled) { background:#3a3a3a; }
 button:disabled { opacity:.45; cursor:not-allowed; }

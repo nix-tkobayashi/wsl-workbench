@@ -56,6 +56,13 @@ contextBridge.exposeInMainWorld('api', {
   addNotificationExclusion: (rule) => ipcRenderer.invoke('notification:addExclusion', rule),
   removeNotificationExclusion: (rule) => ipcRenderer.invoke('notification:removeExclusion', rule),
   onNotificationExclusions: (cb) => ipcRenderer.on('notification:exclusions', (_event, payload) => cb(payload)),
+  // Channel → terminal bindings (auto-ask, issue #77).
+  notificationRoutes: () => ipcRenderer.invoke('notification:getRoutes'),
+  addNotificationRoute: (rule) => ipcRenderer.invoke('notification:addRoute', rule),
+  removeNotificationRoute: (rule) => ipcRenderer.invoke('notification:removeRoute', rule),
+  setNotificationRouteAutoSend: (payload) => ipcRenderer.invoke('notification:setRouteAutoSend', payload),
+  onNotificationRoutes: (cb) => ipcRenderer.on('notification:routes', (_event, payload) => cb(payload)),
+  onNotificationAutoAsk: (cb) => ipcRenderer.on('notification:autoAsk', (_event, payload) => cb(payload)),
   onPerfStats: (cb) => ipcRenderer.on('perf:stats', (_event, payload) => cb(payload)),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   setAttention: (payload) => ipcRenderer.send('window:attention', payload),

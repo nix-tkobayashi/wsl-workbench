@@ -470,6 +470,15 @@ function renderSystemNotifyItem(n) {
   mute.title = t('notify.muteHint');
   mute.addEventListener('click', (event) => { event.stopPropagation(); openMuteMenu(mute, n); });
   side.append(time, ask, mute);
+  if (n.slack) {
+    // Slack only: the binding needs the channel ids from the toast's launch URI.
+    const bind = document.createElement('button');
+    bind.className = 'notify-ask notify-bind';
+    bind.textContent = t('notify.bind');
+    bind.title = t('notify.bindHint');
+    bind.addEventListener('click', (event) => { event.stopPropagation(); openBindMenu(bind, n); });
+    side.append(bind);
+  }
   item.append(avatar, main, side);
   return item;
 }
@@ -523,6 +532,40 @@ function openMuteMenu(anchor, n) {
   muteMenu = menu;
 }
 document.addEventListener('click', closeMuteMenu);
+
+// "Bind" menu: pick which pane of THIS workspace future toasts from the channel go to. Reuses the
+// mute-menu chrome (one floating menu at a time — closeMuteMenu clears both).
+function openBindMenu(anchor, n) {
+  closeMuteMenu();
+  if (!n.slack || !config) return;
+  const menu = document.createElement('div');
+  menu.className = 'notify-mute-menu';
+  for (const entry of terminals.values()) {
+    const paneName = paneTabText(entry);
+    const btn = document.createElement('button');
+    btn.className = 'notify-mute-option';
+    btn.textContent = t('notify.bindTo').replace('{v}', paneName);
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      closeMuteMenu();
+      addRoute({
+        teamId: n.slack.teamId, channelId: n.slack.channelId,
+        workspace: window.notificationCenter.workspaceKey(config.distro, config.wslPath),
+        paneId: entry.bindId, pane: paneName,
+        autoSend: false, workspaceName: n.workspace, channelName: n.title
+      });
+    });
+    menu.appendChild(btn);
+  }
+  if (!menu.childElementCount) { alert(t('notify.askNoTerminal')); return; }
+  menu.addEventListener('click', (event) => event.stopPropagation());
+  notifyPanel.appendChild(menu);
+  const panelBox = notifyPanel.getBoundingClientRect();
+  const anchorBox = anchor.getBoundingClientRect();
+  menu.style.top = `${Math.max(0, anchorBox.bottom - panelBox.top + 2)}px`;
+  menu.style.right = '6px';
+  muteMenu = menu;
+}
 
 // Mutations are deltas (add / remove one rule) resolved against main's authoritative list, so
 // concurrent edits — double-clicks here or another window saving at the same time — can't
@@ -590,6 +633,7 @@ function renderExclusionList() {
 
 function openExclusionSettings() {
   renderExclusionList();
+  renderRouteList();
   exclModal.classList.remove('hidden');
   exclAddApp.focus();
 }
@@ -626,6 +670,94 @@ window.api.onNotificationExclusions(applyExclusions);
 // Re-render after the initial fetch: the modal may already be open (menu click right after load)
 // and would otherwise sit on an empty list until the next exclusions event.
 window.api.notificationExclusions().then((list) => { notificationExclusions = Array.isArray(list) ? list : []; renderExclusionList(); }).catch(() => {});
+
+// --- Channel → terminal bindings (auto-ask, issue #77). Same delta/authority model as the
+// exclusions; the settings modal lists every binding with an auto-send toggle and removal.
+const routeModalList = document.getElementById('routeModalList');
+let notificationRoutes = [];
+let routeSaving = false;
+
+async function mutateRoutes(call) {
+  if (routeSaving) return false;
+  routeSaving = true;
+  try {
+    const res = await call();
+    if (res && res.ok) { applyRoutes(res.routes); return true; }
+  } catch {} finally { routeSaving = false; }
+  return false;
+}
+function addRoute(rule) { return mutateRoutes(() => window.api.addNotificationRoute(rule)); }
+function removeRoute(route) { return mutateRoutes(() => window.api.removeNotificationRoute(route)); }
+function setRouteAutoSend(route, autoSend) {
+  return mutateRoutes(() => window.api.setNotificationRouteAutoSend({ teamId: route.teamId, channelId: route.channelId, autoSend }));
+}
+
+function applyRoutes(list) {
+  notificationRoutes = Array.isArray(list) ? list : [];
+  renderRouteList();
+}
+
+function renderRouteList() {
+  routeModalList.textContent = '';
+  if (!notificationRoutes.length) {
+    const empty = document.createElement('div');
+    empty.className = 'notify-excl-empty';
+    empty.textContent = t('notify.routesEmpty');
+    routeModalList.appendChild(empty);
+    return;
+  }
+  for (const route of notificationRoutes) {
+    const row = document.createElement('div');
+    row.className = 'notify-excl-row route-row';
+    const text = document.createElement('span');
+    text.className = 'notify-excl-text';
+    text.textContent = `${route.channelName || route.channelId}（${route.workspaceName || route.teamId}）→ ${route.pane}`;
+    text.title = `${text.textContent} — ${route.workspace}`;
+    const toggle = document.createElement('label');
+    toggle.className = 'route-autosend';
+    toggle.title = t('notify.routeAutoSendHint');
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.checked = !!route.autoSend;
+    check.addEventListener('change', () => { setRouteAutoSend(route, check.checked); });
+    toggle.append(check, document.createTextNode(t('notify.routeAutoSend')));
+    const remove = document.createElement('button');
+    remove.className = 'notify-excl-remove';
+    remove.textContent = '×';
+    remove.title = t('notify.routeRemove');
+    remove.addEventListener('click', (event) => { event.stopPropagation(); removeRoute(route); });
+    row.append(text, toggle, remove);
+    routeModalList.appendChild(row);
+  }
+}
+
+// A routed toast lands in the bound pane as a ready-to-send question. Focus is never stolen: the
+// paste happens where it belongs and the pane's own UI (CLI echo) makes it visible. Enter is sent
+// only when the rule opted in AND the pane speaks bracketed paste (a CLI is running) — a plain
+// shell never gets an auto-executed line.
+window.api.onNotificationAutoAsk((payload) => {
+  if (!payload || !payload.notification) return;
+  const n = payload.notification;
+  let target = null;
+  for (const e of terminals.values()) if (e.bindId === payload.paneId) { target = e; break; }
+  if (!target) return; // pane closed (or bound in another view): the toast stays a normal bell entry
+  const multiline = !!(target.term.modes && target.term.modes.bracketedPasteMode);
+  // Auto-Enter fires only into an AI CLI that is *right now* waiting for input: bracketed paste
+  // alone is not proof of a CLI (bash 5.1+ speaks it too, and Enter there would EXECUTE the
+  // notification text as commands). cliReported = an OSC 9 report arrived and no shell prompt
+  // (OSC 7) or pty exit followed; attention lit = that report is the pane's latest event and no
+  // keystroke touched the pane since — and leaving a CLI always takes keystrokes (/exit, Ctrl+C),
+  // which clear it. Decided BEFORE pasting, because the paste itself clears the attention badge.
+  const autoEnter = payload.autoSend === true && multiline && target.cliReported === true && target.attention != null;
+  const text = window.notificationCenter.sanitizeForPaste(window.notificationCenter.askPrompt(
+    { app: n.app && n.app.name, workspace: n.workspace, title: n.title, link: n.link, body: n.body },
+    { lead: t('notify.autoAskLead') }), { multiline });
+  target.term.paste(text);
+  if (autoEnter) writeUserInput(target, '\r');
+});
+
+window.api.onNotificationRoutes(applyRoutes);
+window.api.notificationRoutes().then((list) => { notificationRoutes = Array.isArray(list) ? list : []; renderRouteList(); }).catch(() => {});
 
 // Paste the notification into the active pane of the current terminal tab (or the first live pane).
 function askInTerminal(n) {
@@ -933,7 +1065,10 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   const id = nextTermId++;
   const host = document.createElement('div');
   host.className = 'term-pane';
-  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null, attention: null, attentionKind: '' };
+  // bindId: globally unique, stable for the pane's lifetime — the identity notification routes
+  // target (display names are neither unique nor language-stable). Panes don't survive an app
+  // restart, so neither do bindings to them; a stale route simply stops firing until re-bound.
+  const entry = { id, groupId: group.id, bindId: crypto.randomUUID(), term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null, attention: null, attentionKind: '' };
   if (group.paneIds.length > 0) {
     entry.divider = makeTermDivider(group);
     group.container.appendChild(entry.divider);
@@ -957,14 +1092,25 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   // Split Terminal / New Terminal read it so a new shell starts where the user actually is.
   term.parser.registerOscHandler(7, (payload) => {
     const parsed = window.terminalActions.parseOsc7Cwd(payload);
-    if (parsed) entry.cwd = parsed;
+    if (parsed) {
+      entry.cwd = parsed;
+      // OSC 7 comes from the shell's PROMPT_COMMAND, i.e. only when a shell prompt is drawn — so
+      // its arrival means the AI CLI gave the terminal back to the shell. Auto-send must not fire
+      // into that shell, however recently a CLI reported from here.
+      entry.cliReported = false;
+    }
     return true;
   });
   // OSC 9 = "waiting for your input" from an AI CLI (Claude Code Stop hook, codex notify, ...):
   // light this pane's attention badge. Progress-style payloads return null and pass silently.
   term.parser.registerOscHandler(9, (payload) => {
     const parsed = window.terminalActions.parseOsc9Attention(payload);
-    if (parsed) setPaneAttention(entry, parsed);
+    if (parsed) {
+      setPaneAttention(entry, parsed);
+      // Evidence an AI CLI runs in this pane — the auto-send gate requires it (bracketed paste
+      // alone is not proof: bash 5.1+ enables it too). Cleared when the shell exits/restarts.
+      entry.cliReported = true;
+    }
     return true;
   });
   // Per-pane close (shown only while split): kills this pane's shell and gives its space back.
@@ -1108,6 +1254,7 @@ window.api.onTerminalExit((id) => {
   const entry = terminals.get(id);
   if (!entry) return;
   entry.exited = true;
+  entry.cliReported = false; // whatever CLI reported from here is gone with the shell
   entry.term.write(`\r\n\x1b[90m${t('terminal.restartHint')}\x1b[0m\r\n`);
 });
 
