@@ -476,10 +476,14 @@ function renderSystemNotifyItem(n) {
 
 // --- 通知除外設定 (issue #75). "Mute" on a row offers rules scoped from the row itself: the whole
 // app, this workspace (Slack: the toast header), or this title (Slack: the channel). Rules are
-// managed in main (settings.json) and mirrored to every view; the "Excluded" section in the panel
-// head lists them with per-rule removal.
-const notifyExclusions = document.getElementById('notifyExclusions');
+// managed in main (settings.json) and mirrored to every view; the settings modal (bell panel's
+// "Excluded" button, or the Workspace menu) lists every rule with per-rule removal and manual add.
 const notifyExclToggle = document.getElementById('notifyExclToggle');
+const exclModal = document.getElementById('exclModal');
+const exclModalList = document.getElementById('exclModalList');
+const exclAddApp = document.getElementById('exclAddApp');
+const exclAddWorkspace = document.getElementById('exclAddWorkspace');
+const exclAddTitle = document.getElementById('exclAddTitle');
 let notificationExclusions = [];
 let muteMenu = null;
 
@@ -520,19 +524,29 @@ function openMuteMenu(anchor, n) {
 }
 document.addEventListener('click', closeMuteMenu);
 
-async function addExclusionRule(rule) {
+// Mutations are deltas (add / remove one rule) resolved against main's authoritative list, so
+// concurrent edits — double-clicks here or another window saving at the same time — can't
+// overwrite each other. The exclSaving flag just keeps this view from stacking its own requests.
+let exclSaving = false;
+
+async function mutateExclusions(call) {
+  if (exclSaving) return false;
+  exclSaving = true;
   try {
-    const res = await window.api.setNotificationExclusions([...notificationExclusions, rule]);
-    if (res && res.ok) applyExclusions(res.exclusions);
-  } catch {}
+    const res = await call();
+    if (res && res.ok) { applyExclusions(res.exclusions); return true; }
+  } catch {} finally { exclSaving = false; }
+  return false;
 }
 
-async function removeExclusionRule(index) {
-  const next = notificationExclusions.filter((_, i) => i !== index);
-  try {
-    const res = await window.api.setNotificationExclusions(next);
-    if (res && res.ok) applyExclusions(res.exclusions);
-  } catch {}
+function addExclusionRule(rule) {
+  return mutateExclusions(() => window.api.addNotificationExclusion(rule));
+}
+
+function removeExclusionRule(index) {
+  const rule = notificationExclusions[index];
+  if (!rule) return Promise.resolve(false);
+  return mutateExclusions(() => window.api.removeNotificationExclusion(rule));
 }
 
 // New rules also retire what is already on screen; the terminal-report entries are untouched.
@@ -545,46 +559,72 @@ function applyExclusions(list) {
   refreshAttentionChip();
 }
 
-function exclusionRuleText(rule) {
-  return [rule.app, rule.workspace, rule.title].filter(Boolean).join(' · ');
-}
-
 function renderExclusionList() {
-  if (!notifyExclusions) return;
-  notifyExclusions.textContent = '';
+  exclModalList.textContent = '';
   if (!notificationExclusions.length) {
     const empty = document.createElement('div');
     empty.className = 'notify-excl-empty';
     empty.textContent = t('notify.exclusionsEmpty');
-    notifyExclusions.appendChild(empty);
+    exclModalList.appendChild(empty);
     return;
   }
   notificationExclusions.forEach((rule, index) => {
     const row = document.createElement('div');
     row.className = 'notify-excl-row';
-    const text = document.createElement('span');
-    text.className = 'notify-excl-text';
-    text.textContent = exclusionRuleText(rule);
-    text.title = text.textContent;
+    for (const field of ['app', 'workspace', 'title']) {
+      const cell = document.createElement('span');
+      cell.className = 'notify-excl-text' + (rule[field] ? '' : ' excl-any');
+      cell.textContent = rule[field] || t('notify.exclAny');
+      cell.title = cell.textContent;
+      row.appendChild(cell);
+    }
     const remove = document.createElement('button');
     remove.className = 'notify-excl-remove';
     remove.textContent = '×';
     remove.title = t('notify.exclusionRemove');
     remove.addEventListener('click', (event) => { event.stopPropagation(); removeExclusionRule(index); });
-    row.append(text, remove);
-    notifyExclusions.appendChild(row);
+    row.appendChild(remove);
+    exclModalList.appendChild(row);
   });
+}
+
+function openExclusionSettings() {
+  renderExclusionList();
+  exclModal.classList.remove('hidden');
+  exclAddApp.focus();
+}
+function closeExclusionSettings() {
+  exclModal.classList.add('hidden');
+}
+
+async function addExclusionFromForm() {
+  const rule = { app: exclAddApp.value.trim(), workspace: exclAddWorkspace.value.trim(), title: exclAddTitle.value.trim() };
+  if (!rule.app && !rule.workspace && !rule.title) return;
+  // The form only clears on a confirmed save — a failed write keeps the input for a retry.
+  if (await addExclusionRule(rule)) {
+    exclAddApp.value = ''; exclAddWorkspace.value = ''; exclAddTitle.value = '';
+  }
+  exclAddApp.focus();
 }
 
 if (notifyExclToggle) {
   notifyExclToggle.addEventListener('click', (event) => {
     event.stopPropagation();
-    closeMuteMenu();
-    notifyExclusions.classList.toggle('hidden');
-    if (!notifyExclusions.classList.contains('hidden')) renderExclusionList();
+    closeNotifyPanel();
+    openExclusionSettings();
   });
 }
+document.getElementById('exclAdd').addEventListener('click', addExclusionFromForm);
+for (const input of [exclAddApp, exclAddWorkspace, exclAddTitle]) {
+  input.addEventListener('keydown', (event) => { if (event.key === 'Enter') addExclusionFromForm(); });
+}
+document.getElementById('exclClose').addEventListener('click', closeExclusionSettings);
+exclModal.addEventListener('mousedown', (event) => { if (event.target === exclModal) closeExclusionSettings(); });
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeExclusionSettings(); });
+window.api.onMenuNotificationExclusions(openExclusionSettings);
 window.api.onNotificationExclusions(applyExclusions);
+// Re-render after the initial fetch: the modal may already be open (menu click right after load)
+// and would otherwise sit on an empty list until the next exclusions event.
 window.api.notificationExclusions().then((list) => { notificationExclusions = Array.isArray(list) ? list : []; renderExclusionList(); }).catch(() => {});
 
 // Paste the notification into the active pane of the current terminal tab (or the first live pane).
@@ -2610,7 +2650,8 @@ let renderGeneration = 0;
 function treeInteractionBusy() {
   return currentTreeDragPath !== null
     || !document.getElementById('contextMenu').classList.contains('hidden')
-    || !promptModal.classList.contains('hidden');
+    || !promptModal.classList.contains('hidden')
+    || !exclModal.classList.contains('hidden');
 }
 
 async function pollTreeChanges() {

@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld('api', {
   onWorkspaceChanged: (cb) => ipcRenderer.on('workspace:changed', (_event, data) => cb(data)),
   onMenuRefreshTree: (cb) => ipcRenderer.on('menu:refreshTree', () => cb()),
   onMenuRestartTerminal: (cb) => ipcRenderer.on('menu:restartTerminal', () => cb()),
+  onMenuNotificationExclusions: (cb) => ipcRenderer.on('menu:notificationExclusions', () => cb()),
   onLangChanged: (cb) => ipcRenderer.on('lang:changed', (_event, lang) => cb(lang)),
   onUpdateProgress: (cb) => ipcRenderer.on('update:progress', (_event, payload) => cb(payload)),
   onUpdateAvailable: (cb) => ipcRenderer.on('update:available', (_event, payload) => cb(payload)),
@@ -52,7 +53,8 @@ contextBridge.exposeInMainWorld('api', {
   onSystemNotificationStatus: (cb) => ipcRenderer.on('notification:system-status', (_event, payload) => cb(payload)),
   // 通知除外設定 (issue #75): user-managed rules for toasts that should never enter the bell list.
   notificationExclusions: () => ipcRenderer.invoke('notification:getExclusions'),
-  setNotificationExclusions: (list) => ipcRenderer.invoke('notification:setExclusions', list),
+  addNotificationExclusion: (rule) => ipcRenderer.invoke('notification:addExclusion', rule),
+  removeNotificationExclusion: (rule) => ipcRenderer.invoke('notification:removeExclusion', rule),
   onNotificationExclusions: (cb) => ipcRenderer.on('notification:exclusions', (_event, payload) => cb(payload)),
   onPerfStats: (cb) => ipcRenderer.on('perf:stats', (_event, payload) => cb(payload)),
   installUpdate: () => ipcRenderer.invoke('update:install'),

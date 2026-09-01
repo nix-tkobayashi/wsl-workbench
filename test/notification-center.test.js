@@ -129,6 +129,14 @@ test('exclusions: normalize, dedupe, bound', () => {
   assert.deepEqual(nc.normalizeExclusions('nope'), []);
 });
 
+test('sameExclusionRule: three-field case-insensitive identity; invalid rules equal nothing', () => {
+  assert.equal(nc.sameExclusionRule({ app: 'Slack', title: '#Dev' }, { app: ' slack ', workspace: '', title: '#dev' }), true);
+  assert.equal(nc.sameExclusionRule({ app: 'Slack' }, { app: 'Slack', title: '#dev' }), false);
+  assert.equal(nc.sameExclusionRule({ app: 'Slack' }, { app: 'Slac' }), false); // identity, not substring
+  assert.equal(nc.sameExclusionRule({}, {}), false);
+  assert.equal(nc.sameExclusionRule({ app: 'Slack' }, null), false);
+});
+
 test('exclusions: every non-empty rule field must match, case-insensitive substring', () => {
   const flat = { app: 'Slack', workspace: 'Ubiregi & Co.', title: '#to-team-dev' };
   assert.equal(nc.matchesExclusion(flat, { app: 'slack' }), true);
