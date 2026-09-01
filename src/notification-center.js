@@ -2,14 +2,62 @@
 // notification bridge and terminal OSC 9 reports share one bell list. No DOM / Electron here so
 // everything is unit-testable; renderer.js owns the elements, main.js owns the bridge process.
 (function () {
+  // XML entity decoding for toast payload attributes (launch URIs arrive with &amp;). Unknown
+  // entities are left alone rather than guessed.
+  function decodeXmlEntities(s) {
+    return String(s || '').replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (m, code) => {
+      if (code[0] === '#') {
+        const n = code[1] === 'x' || code[1] === 'X' ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
+        return Number.isFinite(n) && n >= 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
+      }
+      return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[code] || m;
+    });
+  }
+
+  // One attribute out of one tag. The payload is machine-written ToastGeneric XML from
+  // wpndatabase.db, so attribute regexes are enough (and the main process has no DOMParser).
+  function tagAttr(xml, tag, attr) {
+    const m = String(xml || '').match(new RegExp(`<${tag}\\b[^>]*?\\s${attr}="([^"]*)"`, 'i'));
+    return m ? decodeXmlEntities(m[1]) : '';
+  }
+
+  // Raw toast XML → the parts the listener API drops: the activation deep link (launch="...") and
+  // the toast header (Slack fills it with the workspace id + name). Empty strings when absent.
+  function parseToastPayload(xml) {
+    return { launch: tagAttr(xml, 'toast', 'launch'), headerId: tagAttr(xml, 'header', 'id'), headerTitle: tagAttr(xml, 'header', 'title') };
+  }
+
+  // Slack's activation URI → structured ids, or null for any other app's link. Shape:
+  // slack://channel?id=C013RL7GN8H&message=1788256300.509419&team=T02J67MRB&thread_ts=...
+  function parseSlackLaunch(launch) {
+    const uri = String(launch || '');
+    if (!/^slack:\/\//i.test(uri)) return null;
+    const q = uri.indexOf('?');
+    const params = {};
+    if (q >= 0) {
+      for (const pair of uri.slice(q + 1).split('&')) {
+        const eq = pair.indexOf('=');
+        if (eq <= 0) continue;
+        try { params[decodeURIComponent(pair.slice(0, eq))] = decodeURIComponent(pair.slice(eq + 1)); } catch { /* keep other params */ }
+      }
+    }
+    if (!params.team && !params.id) return null;
+    return { teamId: String(params.team || ''), channelId: String(params.id || ''), messageTs: String(params.message || ''), threadTs: String(params.thread_ts || '') };
+  }
+
   // A bridge line → SystemNotification (design §10), or null when the line is not a notification
-  // we can show. Unknown/extra fields are dropped so the renderer only ever sees this shape.
+  // we can show. Unknown/extra fields are dropped so the renderer only ever sees this shape. The
+  // renderer re-normalizes main's already-normalized broadcast, so the enriched fields (link /
+  // workspace / slack) are accepted directly as well as derived from a raw `payload`.
   function normalizeSystemNotification(msg) {
     if (!msg || typeof msg !== 'object' || msg.type !== 'notification') return null;
     const event = ['existing', 'added', 'removed'].includes(msg.event) ? msg.event : null;
     const id = Number(msg.id);
     if (!event || !Number.isFinite(id)) return null;
     const timestamp = Number(msg.timestamp);
+    const payload = parseToastPayload(msg.payload);
+    const link = String(msg.link || payload.launch || '');
+    const rawSlack = msg.slack && typeof msg.slack === 'object' ? msg.slack : parseSlackLaunch(link);
     return {
       source: 'windows',
       event,
@@ -17,7 +65,10 @@
       app: { name: String(msg.app || ''), id: String(msg.appId || '') },
       title: String(msg.title || ''),
       body: String(msg.body || ''),
-      timestamp: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now()
+      timestamp: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now(),
+      link,
+      workspace: String(msg.workspace || payload.headerTitle || ''),
+      slack: rawSlack ? { teamId: String(rawSlack.teamId || ''), channelId: String(rawSlack.channelId || ''), messageTs: String(rawSlack.messageTs || ''), threadTs: String(rawSlack.threadTs || '') } : null
     };
   }
 
@@ -48,6 +99,9 @@
       body: notification.body,
       time: notification.timestamp,
       read: false,
+      link: notification.link || '',
+      workspace: notification.workspace || '',
+      slack: notification.slack || null,
       windows: { notificationId: notification.windowsNotificationId, event: notification.event, active: true }
     };
   }
@@ -76,7 +130,9 @@
   // user can still edit it before pressing Enter. Nothing is sent anywhere automatically.
   function askPrompt(entry, { lead = 'Here is a notification I just received. Please read it and help me with it.' } = {}) {
     const lines = [lead, '', `App: ${entry.app || ''}`];
+    if (entry.workspace) lines.push(`Workspace: ${entry.workspace}`);
     if (entry.title) lines.push(`Title: ${entry.title}`);
+    if (entry.link) lines.push(`Link: ${entry.link}`);
     if (entry.body) lines.push('', String(entry.body).trim());
     return lines.join('\n');
   }
@@ -92,6 +148,45 @@
     return out.trim();
   }
 
+  // --- Exclusion rules (通知除外設定, issue #75). A rule is up to three fields; every non-empty
+  // field must be a case-insensitive substring of the notification's same field for the rule to
+  // match, and a notification matching ANY rule never enters the bell list. `title` doubles as the
+  // channel filter for Slack, whose toast title is the channel name; `workspace` is the toast
+  // header (the Slack workspace name).
+  const MAX_EXCLUSIONS = 200;
+
+  function normalizeExclusionRule(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const rule = { app: String(raw.app || '').trim(), workspace: String(raw.workspace || '').trim(), title: String(raw.title || '').trim() };
+    return rule.app || rule.workspace || rule.title ? rule : null;
+  }
+
+  // Settings value → clean, deduped rule list (bounded, so settings.json can't grow unboundedly).
+  function normalizeExclusions(list) {
+    const seen = new Set();
+    return (Array.isArray(list) ? list : [])
+      .map(normalizeExclusionRule)
+      .filter((r) => {
+        if (!r) return false;
+        const key = JSON.stringify([r.app.toLowerCase(), r.workspace.toLowerCase(), r.title.toLowerCase()]);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, MAX_EXCLUSIONS);
+  }
+
+  function matchesExclusion({ app = '', workspace = '', title = '' } = {}, rule) {
+    const r = normalizeExclusionRule(rule);
+    if (!r) return false;
+    const has = (hay, needle) => !needle || String(hay || '').toLowerCase().includes(needle.toLowerCase());
+    return has(app, r.app) && has(workspace, r.workspace) && has(title, r.title);
+  }
+
+  function isExcluded(flat, rules) {
+    return (Array.isArray(rules) ? rules : []).some((rule) => matchesExclusion(flat, rule));
+  }
+
   // After the bridge (re)starts it sends a fresh "existing" snapshot; anything we still hold as
   // active that is missing from it was dismissed while the bridge was down. Returns those ids.
   function missingFromSnapshot(buffer, snapshotIds) {
@@ -102,7 +197,8 @@
   }
 
   const notificationCenter = {
-    normalizeSystemNotification, detectCategory, dedupeKey, toHistoryEntry, hasEntry, bodyPreview, appInitial, askPrompt, sanitizeForPaste, missingFromSnapshot
+    normalizeSystemNotification, detectCategory, dedupeKey, toHistoryEntry, hasEntry, bodyPreview, appInitial, askPrompt, sanitizeForPaste, missingFromSnapshot,
+    parseToastPayload, parseSlackLaunch, normalizeExclusionRule, normalizeExclusions, matchesExclusion, isExcluded, MAX_EXCLUSIONS
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = notificationCenter;
   if (typeof window !== 'undefined') window.notificationCenter = notificationCenter;

@@ -50,6 +50,10 @@ contextBridge.exposeInMainWorld('api', {
   systemNotificationState: () => ipcRenderer.invoke('notification:systemState'),
   onSystemNotification: (cb) => ipcRenderer.on('notification:system', (_event, payload) => cb(payload)),
   onSystemNotificationStatus: (cb) => ipcRenderer.on('notification:system-status', (_event, payload) => cb(payload)),
+  // 通知除外設定 (issue #75): user-managed rules for toasts that should never enter the bell list.
+  notificationExclusions: () => ipcRenderer.invoke('notification:getExclusions'),
+  setNotificationExclusions: (list) => ipcRenderer.invoke('notification:setExclusions', list),
+  onNotificationExclusions: (cb) => ipcRenderer.on('notification:exclusions', (_event, payload) => cb(payload)),
   onPerfStats: (cb) => ipcRenderer.on('perf:stats', (_event, payload) => cb(payload)),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   setAttention: (payload) => ipcRenderer.send('window:attention', payload),

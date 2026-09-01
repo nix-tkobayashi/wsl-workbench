@@ -392,6 +392,7 @@ function openNotifyPanel() {
   notifyBell.setAttribute('aria-expanded', 'true');
 }
 function closeNotifyPanel() {
+  closeMuteMenu();
   notifyPanel.classList.add('hidden');
   notifyBell.setAttribute('aria-expanded', 'false');
 }
@@ -416,7 +417,8 @@ function addSystemNotification(payload) {
   const n = window.notificationCenter.normalizeSystemNotification({ type: 'notification', event: payload && payload.event,
     id: payload && payload.windowsNotificationId, app: payload && payload.app && payload.app.name,
     appId: payload && payload.app && payload.app.id, title: payload && payload.title, body: payload && payload.body,
-    timestamp: payload && payload.timestamp });
+    timestamp: payload && payload.timestamp, link: payload && payload.link, workspace: payload && payload.workspace,
+    slack: payload && payload.slack });
   if (!n) return;
   const known = window.notificationCenter.hasEntry(notifications, n);
   if (n.event === 'removed' && known) {
@@ -444,7 +446,9 @@ function renderSystemNotifyItem(n) {
   main.className = 'notify-main notify-system-main';
   const head = document.createElement('span');
   head.className = 'notify-system-head';
-  head.textContent = n.title ? `${n.app} · ${n.title}` : n.app;
+  // Slack (via the toast payload): "Slack · Ubiregi · #to-team-dev"; others fall back to app · title.
+  head.textContent = [n.app, n.workspace, n.title].filter(Boolean).join(' · ');
+  head.title = head.textContent;
   const body = document.createElement('span');
   body.className = 'notify-system-body';
   body.textContent = window.notificationCenter.bodyPreview(n.body);
@@ -460,10 +464,128 @@ function renderSystemNotifyItem(n) {
   ask.textContent = t('notify.ask');
   ask.title = t('notify.askHint');
   ask.addEventListener('click', (event) => { event.stopPropagation(); closeNotifyPanel(); askInTerminal(n); });
-  side.append(time, ask);
+  const mute = document.createElement('button');
+  mute.className = 'notify-ask notify-mute';
+  mute.textContent = t('notify.mute');
+  mute.title = t('notify.muteHint');
+  mute.addEventListener('click', (event) => { event.stopPropagation(); openMuteMenu(mute, n); });
+  side.append(time, ask, mute);
   item.append(avatar, main, side);
   return item;
 }
+
+// --- 通知除外設定 (issue #75). "Mute" on a row offers rules scoped from the row itself: the whole
+// app, this workspace (Slack: the toast header), or this title (Slack: the channel). Rules are
+// managed in main (settings.json) and mirrored to every view; the "Excluded" section in the panel
+// head lists them with per-rule removal.
+const notifyExclusions = document.getElementById('notifyExclusions');
+const notifyExclToggle = document.getElementById('notifyExclToggle');
+let notificationExclusions = [];
+let muteMenu = null;
+
+function closeMuteMenu() {
+  if (muteMenu) { muteMenu.remove(); muteMenu = null; }
+}
+
+function openMuteMenu(anchor, n) {
+  closeMuteMenu();
+  const menu = document.createElement('div');
+  menu.className = 'notify-mute-menu';
+  const scopes = [
+    { key: 'notify.muteApp', value: n.app, rule: { app: n.app } },
+    { key: 'notify.muteWorkspace', value: n.workspace, rule: { app: n.app, workspace: n.workspace } },
+    { key: n.slack ? 'notify.muteChannel' : 'notify.muteTitle', value: n.title, rule: { app: n.app, workspace: n.workspace, title: n.title } }
+  ];
+  for (const scope of scopes) {
+    if (!scope.value) continue;
+    const btn = document.createElement('button');
+    btn.className = 'notify-mute-option';
+    btn.textContent = t(scope.key).replace('{v}', scope.value);
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      closeMuteMenu();
+      addExclusionRule(scope.rule);
+    });
+    menu.appendChild(btn);
+  }
+  if (!menu.childElementCount) return;
+  menu.addEventListener('click', (event) => event.stopPropagation());
+  notifyPanel.appendChild(menu);
+  // Under the button, right-aligned to the panel edge, clamped so it never overflows the panel.
+  const panelBox = notifyPanel.getBoundingClientRect();
+  const anchorBox = anchor.getBoundingClientRect();
+  menu.style.top = `${Math.max(0, anchorBox.bottom - panelBox.top + 2)}px`;
+  menu.style.right = '6px';
+  muteMenu = menu;
+}
+document.addEventListener('click', closeMuteMenu);
+
+async function addExclusionRule(rule) {
+  try {
+    const res = await window.api.setNotificationExclusions([...notificationExclusions, rule]);
+    if (res && res.ok) applyExclusions(res.exclusions);
+  } catch {}
+}
+
+async function removeExclusionRule(index) {
+  const next = notificationExclusions.filter((_, i) => i !== index);
+  try {
+    const res = await window.api.setNotificationExclusions(next);
+    if (res && res.ok) applyExclusions(res.exclusions);
+  } catch {}
+}
+
+// New rules also retire what is already on screen; the terminal-report entries are untouched.
+function applyExclusions(list) {
+  notificationExclusions = Array.isArray(list) ? list : [];
+  notifications = notifications.filter((e) => e.source !== 'windows'
+    || !window.notificationCenter.isExcluded({ app: e.app, workspace: e.workspace, title: e.title }, notificationExclusions));
+  renderExclusionList();
+  if (!notifyPanel.classList.contains('hidden')) renderNotifyList();
+  refreshAttentionChip();
+}
+
+function exclusionRuleText(rule) {
+  return [rule.app, rule.workspace, rule.title].filter(Boolean).join(' · ');
+}
+
+function renderExclusionList() {
+  if (!notifyExclusions) return;
+  notifyExclusions.textContent = '';
+  if (!notificationExclusions.length) {
+    const empty = document.createElement('div');
+    empty.className = 'notify-excl-empty';
+    empty.textContent = t('notify.exclusionsEmpty');
+    notifyExclusions.appendChild(empty);
+    return;
+  }
+  notificationExclusions.forEach((rule, index) => {
+    const row = document.createElement('div');
+    row.className = 'notify-excl-row';
+    const text = document.createElement('span');
+    text.className = 'notify-excl-text';
+    text.textContent = exclusionRuleText(rule);
+    text.title = text.textContent;
+    const remove = document.createElement('button');
+    remove.className = 'notify-excl-remove';
+    remove.textContent = '×';
+    remove.title = t('notify.exclusionRemove');
+    remove.addEventListener('click', (event) => { event.stopPropagation(); removeExclusionRule(index); });
+    row.append(text, remove);
+    notifyExclusions.appendChild(row);
+  });
+}
+
+if (notifyExclToggle) {
+  notifyExclToggle.addEventListener('click', (event) => {
+    event.stopPropagation();
+    closeMuteMenu();
+    notifyExclusions.classList.toggle('hidden');
+    if (!notifyExclusions.classList.contains('hidden')) renderExclusionList();
+  });
+}
+window.api.onNotificationExclusions(applyExclusions);
+window.api.notificationExclusions().then((list) => { notificationExclusions = Array.isArray(list) ? list : []; renderExclusionList(); }).catch(() => {});
 
 // Paste the notification into the active pane of the current terminal tab (or the first live pane).
 function askInTerminal(n) {

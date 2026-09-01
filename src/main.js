@@ -6,7 +6,7 @@ const pty = require('node-pty');
 const i18n = require('./i18n');
 const { spawn } = require('child_process');
 const { createSystemNotificationBridge } = require('./system-notification-bridge');
-const { normalizeSystemNotification, missingFromSnapshot } = require('./notification-center');
+const { normalizeSystemNotification, missingFromSnapshot, normalizeExclusions, isExcluded } = require('./notification-center');
 const { imageMimeForPath } = require('./file-types');
 const { normalizeVersion, isNewer } = require('./version');
 
@@ -71,8 +71,10 @@ function writeSettings(patch) {
     const tmp = `${target}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8');
     fs.renameSync(tmp, target);
+    return true;
   } catch (error) {
     console.error('Failed to write settings:', error);
+    return false;
   }
 }
 function initLanguage() {
@@ -773,6 +775,10 @@ function systemNotificationsEnabled() {
   const s = readSettings().systemNotifications;
   return process.platform === 'win32' && !(s && s.enabled === false);
 }
+function systemNotificationExclusions() {
+  const s = readSettings().systemNotifications;
+  return normalizeExclusions(s && s.exclusions);
+}
 function broadcastToViews(channel, payload) {
   for (const state of viewState.values()) {
     if (!state.view.webContents.isDestroyed()) state.view.webContents.send(channel, payload);
@@ -807,6 +813,9 @@ function startSystemNotificationBridge() {
       const n = normalizeSystemNotification(msg);
       if (!n) return;
       if (n.event === 'existing') snapshotIds.add(n.windowsNotificationId);
+      // 通知除外設定: an excluded toast never enters the buffer or reaches a view. Its "removed"
+      // still broadcasts, but a bare removal for an unknown id is a no-op in every view.
+      if (n.event !== 'removed' && isExcluded({ app: n.app.name, workspace: n.workspace, title: n.title }, systemNotificationExclusions())) return;
       acceptSystemNotification(n);
     },
     onStatus: (s) => {
@@ -833,6 +842,27 @@ app.on('before-quit', () => { if (systemBridge) { systemBridge.stop(); systemBri
 ipcMain.handle('notification:systemState', (event) => {
   if (!viewState.has(event.sender.id)) return { status: { status: 'disabled' }, notifications: [] };
   return { status: systemNotificationStatus, notifications: systemNotifications.slice() };
+});
+
+// 通知除外設定 (issue #75): the rules live in settings.json under systemNotifications.exclusions.
+// A save prunes the buffer and mirrors the new list to every view, so a freshly excluded channel
+// disappears everywhere at once.
+ipcMain.handle('notification:getExclusions', (event) => {
+  if (!viewState.has(event.sender.id)) return [];
+  return systemNotificationExclusions();
+});
+ipcMain.handle('notification:setExclusions', (event, list) => {
+  if (!viewState.has(event.sender.id)) return { ok: false };
+  const exclusions = normalizeExclusions(list);
+  // Persistence first: if settings.json can't be written the rules would silently vanish on the
+  // next launch, so nothing is pruned or broadcast and the UI keeps the old list.
+  if (!writeSettings({ systemNotifications: { ...(readSettings().systemNotifications || {}), exclusions } })) return { ok: false };
+  for (let i = systemNotifications.length - 1; i >= 0; i--) {
+    const n = systemNotifications[i];
+    if (isExcluded({ app: n.app.name, workspace: n.workspace, title: n.title }, exclusions)) systemNotifications.splice(i, 1);
+  }
+  broadcastToViews('notification:exclusions', exclusions);
+  return { ok: true, exclusions };
 });
 
 ipcMain.handle('update:install', (event) => {
