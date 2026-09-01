@@ -16,7 +16,6 @@
       </button>
       <div id="notifyPanel" class="notify-panel hidden" role="menu">
         <div class="notify-head"><span data-i18n="attention.history">Notifications</span><span class="notify-head-actions"><button id="notifyExclToggle" class="notify-clear" data-i18n="notify.exclusions" data-i18n-title="notify.exclusionsHint" title="Excluded notifications">Excluded</button><button id="notifyClear" class="notify-clear" data-i18n="attention.clearHistory">Clear</button></span></div>
-        <div id="notifyExclusions" class="notify-exclusions hidden"></div>
         <div id="notifyList" class="notify-list"></div>
         <div id="notifyStatus" class="notify-status hidden"></div>
       </div>
@@ -122,6 +121,21 @@
       <div class="modal-actions">
         <button id="promptCancel" data-i18n="prompt.cancel">Cancel</button>
         <button id="promptOk" class="primary" data-i18n="prompt.ok">OK</button>
+      </div>
+    </div>
+  </div>
+  <div id="exclModal" class="modal hidden">
+    <div class="modal-box excl-box">
+      <div class="modal-message" data-i18n="notify.exclusionsTitle">Notification exclusion rules</div>
+      <div class="excl-add">
+        <input type="text" id="exclAddApp" spellcheck="false" autocomplete="off" data-i18n-placeholder="notify.exclApp" placeholder="App (e.g. Slack)" />
+        <input type="text" id="exclAddWorkspace" spellcheck="false" autocomplete="off" data-i18n-placeholder="notify.exclWorkspace" placeholder="Workspace" />
+        <input type="text" id="exclAddTitle" spellcheck="false" autocomplete="off" data-i18n-placeholder="notify.exclTitle" placeholder="Title / channel" />
+        <button id="exclAdd" data-i18n="notify.exclAdd">Add</button>
+      </div>
+      <div id="exclModalList" class="excl-list"></div>
+      <div class="modal-actions">
+        <button id="exclClose" class="primary" data-i18n="notify.exclClose">Close</button>
       </div>
     </div>
   </div>

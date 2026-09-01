@@ -176,6 +176,17 @@
       .slice(0, MAX_EXCLUSIONS);
   }
 
+  // Rule identity (for delta updates: remove-by-value, not by index): same three fields,
+  // case-insensitive. Invalid rules are equal to nothing.
+  function sameExclusionRule(a, b) {
+    const x = normalizeExclusionRule(a);
+    const y = normalizeExclusionRule(b);
+    return !!x && !!y
+      && x.app.toLowerCase() === y.app.toLowerCase()
+      && x.workspace.toLowerCase() === y.workspace.toLowerCase()
+      && x.title.toLowerCase() === y.title.toLowerCase();
+  }
+
   function matchesExclusion({ app = '', workspace = '', title = '' } = {}, rule) {
     const r = normalizeExclusionRule(rule);
     if (!r) return false;
@@ -198,7 +209,7 @@
 
   const notificationCenter = {
     normalizeSystemNotification, detectCategory, dedupeKey, toHistoryEntry, hasEntry, bodyPreview, appInitial, askPrompt, sanitizeForPaste, missingFromSnapshot,
-    parseToastPayload, parseSlackLaunch, normalizeExclusionRule, normalizeExclusions, matchesExclusion, isExcluded, MAX_EXCLUSIONS
+    parseToastPayload, parseSlackLaunch, normalizeExclusionRule, normalizeExclusions, sameExclusionRule, matchesExclusion, isExcluded, MAX_EXCLUSIONS
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = notificationCenter;
   if (typeof window !== 'undefined') window.notificationCenter = notificationCenter;

@@ -6,7 +6,7 @@ const pty = require('node-pty');
 const i18n = require('./i18n');
 const { spawn } = require('child_process');
 const { createSystemNotificationBridge } = require('./system-notification-bridge');
-const { normalizeSystemNotification, missingFromSnapshot, normalizeExclusions, isExcluded } = require('./notification-center');
+const { normalizeSystemNotification, missingFromSnapshot, normalizeExclusions, normalizeExclusionRule, sameExclusionRule, isExcluded, MAX_EXCLUSIONS } = require('./notification-center');
 const { imageMimeForPath } = require('./file-types');
 const { normalizeVersion, isNewer } = require('./version');
 
@@ -845,15 +845,15 @@ ipcMain.handle('notification:systemState', (event) => {
 });
 
 // 通知除外設定 (issue #75): the rules live in settings.json under systemNotifications.exclusions.
-// A save prunes the buffer and mirrors the new list to every view, so a freshly excluded channel
-// disappears everywhere at once.
+// Main is the single authority — views send deltas (add / remove one rule), never a full list, so
+// two windows editing at once can't overwrite each other's change. A save prunes the buffer and
+// mirrors the new list to every view, so a freshly excluded channel disappears everywhere at once.
 ipcMain.handle('notification:getExclusions', (event) => {
   if (!viewState.has(event.sender.id)) return [];
   return systemNotificationExclusions();
 });
-ipcMain.handle('notification:setExclusions', (event, list) => {
-  if (!viewState.has(event.sender.id)) return { ok: false };
-  const exclusions = normalizeExclusions(list);
+function applyExclusionChange(next) {
+  const exclusions = normalizeExclusions(next);
   // Persistence first: if settings.json can't be written the rules would silently vanish on the
   // next launch, so nothing is pruned or broadcast and the UI keeps the old list.
   if (!writeSettings({ systemNotifications: { ...(readSettings().systemNotifications || {}), exclusions } })) return { ok: false };
@@ -863,6 +863,21 @@ ipcMain.handle('notification:setExclusions', (event, list) => {
   }
   broadcastToViews('notification:exclusions', exclusions);
   return { ok: true, exclusions };
+}
+ipcMain.handle('notification:addExclusion', (event, rule) => {
+  if (!viewState.has(event.sender.id)) return { ok: false };
+  const r = normalizeExclusionRule(rule);
+  if (!r) return { ok: false };
+  const current = systemNotificationExclusions();
+  if (current.some((e) => sameExclusionRule(e, r))) return { ok: true, exclusions: current }; // already there: idempotent
+  // At the cap the rule would be silently truncated by normalizeExclusions — report the failure
+  // instead so the form keeps the input.
+  if (current.length >= MAX_EXCLUSIONS) return { ok: false };
+  return applyExclusionChange([...current, r]);
+});
+ipcMain.handle('notification:removeExclusion', (event, rule) => {
+  if (!viewState.has(event.sender.id)) return { ok: false };
+  return applyExclusionChange(systemNotificationExclusions().filter((e) => !sameExclusionRule(e, rule)));
 });
 
 ipcMain.handle('update:install', (event) => {
@@ -985,6 +1000,10 @@ function buildAppMenu() {
         {
           label: tr('menu.restartTerminal'),
           click: () => sendToFocusedWindow('menu:restartTerminal')
+        },
+        {
+          label: tr('menu.notificationExclusions'),
+          click: () => sendToFocusedWindow('menu:notificationExclusions')
         },
         { type: 'separator' },
         {
