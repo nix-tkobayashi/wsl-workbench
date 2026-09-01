@@ -15,7 +15,7 @@
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M8 1.5a.75.75 0 0 1 .75.75v.53A4.5 4.5 0 0 1 12.5 7.25v2.6l1.2 1.8a.75.75 0 0 1-.62 1.17H2.92a.75.75 0 0 1-.62-1.17l1.2-1.8v-2.6a4.5 4.5 0 0 1 3.75-4.47v-.53A.75.75 0 0 1 8 1.5Zm-1.9 12.1h3.8a1.9 1.9 0 0 1-3.8 0Z"/></svg><span id="notifyCount" class="notify-count hidden"></span>
       </button>
       <div id="notifyPanel" class="notify-panel hidden" role="menu">
-        <div class="notify-head"><span data-i18n="attention.history">Notifications</span><span class="notify-head-actions"><button id="notifyExclToggle" class="notify-clear" data-i18n="notify.exclusions" data-i18n-title="notify.exclusionsHint" title="Excluded notifications">Excluded</button><button id="notifyClear" class="notify-clear" data-i18n="attention.clearHistory">Clear</button></span></div>
+        <div class="notify-head"><span data-i18n="attention.history">Notifications</span><span class="notify-head-actions"><button id="notifyExclToggle" class="notify-clear" data-i18n="notify.settings" data-i18n-title="notify.settingsHint" title="Notification settings">Settings</button><button id="notifyClear" class="notify-clear" data-i18n="attention.clearHistory">Clear</button></span></div>
         <div id="notifyList" class="notify-list"></div>
         <div id="notifyStatus" class="notify-status hidden"></div>
       </div>
@@ -126,7 +126,8 @@
   </div>
   <div id="exclModal" class="modal hidden">
     <div class="modal-box excl-box">
-      <div class="modal-message" data-i18n="notify.exclusionsTitle">Notification exclusion rules</div>
+      <div class="modal-message" data-i18n="notify.settingsTitle">Notification settings</div>
+      <div class="excl-section" data-i18n="notify.exclusionsSection">Exclusion rules</div>
       <div class="excl-add">
         <input type="text" id="exclAddApp" spellcheck="false" autocomplete="off" data-i18n-placeholder="notify.exclApp" placeholder="App (e.g. Slack)" />
         <input type="text" id="exclAddWorkspace" spellcheck="false" autocomplete="off" data-i18n-placeholder="notify.exclWorkspace" placeholder="Workspace" />
@@ -134,6 +135,8 @@
         <button id="exclAdd" data-i18n="notify.exclAdd">Add</button>
       </div>
       <div id="exclModalList" class="excl-list"></div>
+      <div class="excl-section" data-i18n="notify.routesSection">Channel bindings (auto-ask)</div>
+      <div id="routeModalList" class="excl-list"></div>
       <div class="modal-actions">
         <button id="exclClose" class="primary" data-i18n="notify.exclClose">Close</button>
       </div>

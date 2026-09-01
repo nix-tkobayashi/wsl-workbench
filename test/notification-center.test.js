@@ -151,6 +151,33 @@ test('exclusions: every non-empty rule field must match, case-insensitive substr
   assert.equal(nc.isExcluded(flat, null), false);
 });
 
+test('routes: normalize requires ids + workspace + paneId; one route per channel; bounded', () => {
+  const full = { teamId: 'T1', channelId: 'C1', workspace: 'Ubuntu:/home/x', paneId: 'uuid-1', pane: 'oncall', autoSend: true, workspaceName: 'Acme', channelName: '#alerts' };
+  assert.deepEqual(nc.normalizeRoute({ ...full, junk: 1 }), full);
+  assert.equal(nc.normalizeRoute({ ...full, paneId: ' ' }), null);
+  assert.equal(nc.normalizeRoute({ ...full, channelId: '' }), null);
+  assert.equal(nc.normalizeRoute(null), null);
+  assert.equal(nc.normalizeRoute({ ...full, pane: '' }).pane, ''); // display label is optional
+  assert.equal(nc.normalizeRoute({ ...full, autoSend: 'yes' }).autoSend, false); // strict boolean opt-in
+  const dup = nc.normalizeRoutes([full, { ...full, paneId: 'uuid-2' }, { ...full, channelId: 'C2' }]);
+  assert.equal(dup.length, 2);
+  assert.equal(dup[0].paneId, 'uuid-1'); // first route for a channel wins
+  assert.equal(nc.normalizeRoutes(Array.from({ length: 300 }, (_, i) => ({ ...full, channelId: `C${i}` }))).length, nc.MAX_ROUTES);
+  assert.equal(nc.routeChannelKey(full), 'T1:C1');
+});
+
+test('routes: findRoute matches exact team+channel; autoAskAllowed throttles per interval', () => {
+  const routes = nc.normalizeRoutes([{ teamId: 'T1', channelId: 'C1', workspace: 'w', paneId: 'p' }]);
+  assert.equal(nc.findRoute(routes, { teamId: 'T1', channelId: 'C1' }), routes[0]);
+  assert.equal(nc.findRoute(routes, { teamId: 'T1', channelId: 'C2' }), null);
+  assert.equal(nc.findRoute(routes, { teamId: '', channelId: 'C1' }), null);
+  assert.equal(nc.findRoute(routes, null), null);
+  assert.equal(nc.autoAskAllowed(undefined, 1000), true);
+  assert.equal(nc.autoAskAllowed(1000, 1000 + nc.AUTO_ASK_INTERVAL_MS - 1), false);
+  assert.equal(nc.autoAskAllowed(1000, 1000 + nc.AUTO_ASK_INTERVAL_MS), true);
+  assert.equal(nc.workspaceKey('Ubuntu', '/home/x'), 'Ubuntu:/home/x');
+});
+
 test('sanitizeForPaste: strips control chars; newlines only under bracketed paste', () => {
   const raw = 'a\x1b]9;x\x07b\r\nc\td\u0085e';
   assert.equal(nc.sanitizeForPaste(raw, { multiline: true }), 'a]9;xb\nc\tde');
