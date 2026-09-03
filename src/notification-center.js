@@ -1,6 +1,7 @@
-// Pure rules behind the unified notification center (issue #73): Windows toasts relayed by the
-// notification bridge and terminal OSC 9 reports share one bell list. No DOM / Electron here so
-// everything is unit-testable; renderer.js owns the elements, main.js owns the bridge process.
+// Pure rules behind the notification center (issue #73): Windows toasts relayed by the
+// notification bridge, listed under the bell. Terminal OSC 9 reports stay out of it (issue #78) —
+// they only drive the pane badge / chip / desktop toast. No DOM / Electron here so everything is
+// unit-testable; renderer.js owns the elements, main.js owns the bridge process.
 (function () {
   // XML entity decoding for toast payload attributes (launch URIs arrive with &amp;). Unknown
   // entities are left alone rather than guessed.
@@ -88,8 +89,7 @@
     return '';
   }
 
-  // Bell-list entry for a Windows notification, in the generalized model (design §16). Terminal
-  // entries keep their historical flat fields (paneId/label/kind/paneName) and gain source:'terminal'.
+  // Bell-list entry for a Windows notification, in the generalized model (design §16).
   function toHistoryEntry(notification) {
     return {
       source: 'windows',
@@ -104,6 +104,13 @@
       slack: notification.slack || null,
       windows: { notificationId: notification.windowsNotificationId, event: notification.event, active: true }
     };
+  }
+
+  // Bell badge count: unread Windows notifications only. The bell is the Windows notification
+  // center (issue #78) — terminal OSC 9 reports never enter it (they keep the pane badge / chip /
+  // toast), so any other source is ignored even if one slips into the list.
+  function unreadCount(list) {
+    return (Array.isArray(list) ? list : []).filter((e) => e && e.source === 'windows' && !e.read).length;
   }
 
   // Whether an entry from the bell list is already present (by dedupe key).
@@ -266,7 +273,7 @@
   }
 
   const notificationCenter = {
-    normalizeSystemNotification, detectCategory, dedupeKey, toHistoryEntry, hasEntry, bodyPreview, appInitial, askPrompt, sanitizeForPaste, missingFromSnapshot,
+    normalizeSystemNotification, detectCategory, dedupeKey, toHistoryEntry, hasEntry, unreadCount, bodyPreview, appInitial, askPrompt, sanitizeForPaste, missingFromSnapshot,
     parseToastPayload, parseSlackLaunch, normalizeExclusionRule, normalizeExclusions, sameExclusionRule, matchesExclusion, isExcluded, MAX_EXCLUSIONS,
     normalizeRoute, normalizeRoutes, routeChannelKey, findRoute, autoAskAllowed, workspaceKey, MAX_ROUTES, AUTO_ASK_INTERVAL_MS
   };

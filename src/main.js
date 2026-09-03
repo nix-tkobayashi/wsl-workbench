@@ -8,7 +8,7 @@ const { spawn } = require('child_process');
 const { createSystemNotificationBridge } = require('./system-notification-bridge');
 const { normalizeSystemNotification, missingFromSnapshot, normalizeExclusions, normalizeExclusionRule, sameExclusionRule, isExcluded, MAX_EXCLUSIONS,
   normalizeRoute, normalizeRoutes, routeChannelKey, findRoute, autoAskAllowed, workspaceKey, MAX_ROUTES } = require('./notification-center');
-const { imageMimeForPath } = require('./file-types');
+const { imageMimeForPath, looksBinary } = require('./file-types');
 const { normalizeVersion, isNewer } = require('./version');
 
 const RELEASES_API = 'https://api.github.com/repos/nix-tkobayashi/wsl-workbench/releases/latest';
@@ -1481,12 +1481,19 @@ ipcMain.handle('tree:signature', async (_event, { distro = DEFAULT_DISTRO, paths
   return parts.join('\n');
 });
 
-ipcMain.handle('file:read', (_event, { distro = DEFAULT_DISTRO, wslPath }) => {
+// Text for the editor: { text, unsupported, tooLarge }. A file that does not look like text
+// (binary, or not UTF-8 — see looksBinary) comes back as `unsupported` with no text, so the
+// renderer shows its guidance view instead of mojibake (issue #79); `force` (the user's "Open
+// Anyway") skips the sniff and decodes the raw bytes as UTF-8 regardless. Files over 1MB are not
+// read at all: `tooLarge` carries a placeholder the renderer shows read-only (never saveable).
+ipcMain.handle('file:read', (_event, { distro = DEFAULT_DISTRO, wslPath, force = false }) => {
   const fullPath = wslPathToWindowsFsPath(distro, wslPath);
   const stat = safeStat(fullPath);
-  if (!stat || !stat.isFile()) return '';
-  if (stat.size > 1024 * 1024) return '[File is larger than 1MB. Editor skipped.]';
-  return fs.readFileSync(fullPath, 'utf8');
+  if (!stat || !stat.isFile()) return { text: '', unsupported: false, tooLarge: false };
+  if (stat.size > 1024 * 1024) return { text: '[File is larger than 1MB. Editor skipped.]', unsupported: false, tooLarge: true };
+  const bytes = fs.readFileSync(fullPath);
+  if (force !== true && looksBinary(bytes)) return { text: '', unsupported: true, tooLarge: false };
+  return { text: bytes.toString('utf8'), unsupported: false, tooLarge: false };
 });
 
 // Modification fingerprint of a file (mtime + size), used by the renderer to notice when an open
