@@ -128,6 +128,8 @@ function applyLanguage() {
   refreshAttentionChip(); // its text mixes pane names and the localized waiting word
   if (!notifyPanel.classList.contains('hidden')) renderNotifyList(); // kind words + empty text
   if (typeof renderSystemNotificationStatus === 'function') renderSystemNotificationStatus();
+  renderUnsupportedText();
+  refreshEditorTabs(); // the read-only tooltip on force-opened tabs is localized
   refreshUpdateBtn(); // its tooltip is built manually (has a {version} slot), not via data-i18n
 }
 
@@ -271,7 +273,7 @@ function setPaneAttention(entry, { label = '', kind = '' } = {}) {
   entry.attentionKind = kind; // 'done' / 'permission' / '' (or a custom word from another tool)
   const group = termGroups.get(entry.groupId);
   if (group) refreshTabAttention(group);
-  recordNotification(entry);
+  maybeToast(entry);
   refreshAttentionChip();
 }
 
@@ -300,24 +302,16 @@ function jumpToPane(entry) {
   activateTerminal(group.id);
 }
 
-// --- Notification history (bell dropdown) + desktop toast. Every OSC 9 report lands in a bounded
-// newest-first list for this workspace, so "which tab finished while I was away?" has an answer
-// after the badges have cleared. A toast is raised only when the user isn't looking at this
-// workspace (window unfocused / minimized or tab hidden) — a visible pane already shows its badge.
+// --- Desktop toast for an OSC 9 report + the bell dropdown (notification center). The bell lists
+// Windows notifications only (see addSystemNotification); terminal reports do NOT enter it
+// (issue #78) — they show as the pane badge / chip, and as a toast when the user isn't looking at
+// this workspace (window unfocused / minimized or tab hidden) — a visible pane already shows its badge.
 const notifyBell = document.getElementById('notifyBell');
 const notifyCount = document.getElementById('notifyCount');
 const notifyPanel = document.getElementById('notifyPanel');
 const notifyList = document.getElementById('notifyList');
 const notifyClear = document.getElementById('notifyClear');
-let notifications = []; // [{ id, paneId, label, kind, paneName, time }] newest first
-
-function recordNotification(entry) {
-  notifications = window.notificationLog.pushNotification(notifications, {
-    source: 'terminal', paneId: entry.id, label: entry.attention || '', kind: entry.attentionKind || '', paneName: paneTabText(entry), time: Date.now()
-  });
-  if (!notifyPanel.classList.contains('hidden')) renderNotifyList();
-  maybeToast(entry);
-}
+let notifications = []; // Windows notification entries (notificationCenter.toHistoryEntry), newest first
 
 function maybeToast(entry) {
   const focused = document.hasFocus();
@@ -349,38 +343,8 @@ function renderNotifyList() {
     return;
   }
   notifyClear.disabled = false;
-  const kindWords = attentionKindWords();
   for (const n of notifications) {
-    if (n.source === 'windows') { notifyList.appendChild(renderSystemNotifyItem(n)); continue; }
-    const entry = terminals.get(n.paneId);
-    const alive = !!entry;
-    const waiting = alive && entry.attention != null;
-    const item = document.createElement('button');
-    item.className = 'notify-item' + (waiting ? ' waiting' : '') + (alive ? '' : ' stale');
-    item.disabled = !alive; // pane closed: keep the record, nothing to jump to
-    const dot = document.createElement('span');
-    dot.className = 'notify-dot';
-    dot.textContent = '●';
-    const main = document.createElement('span');
-    main.className = 'notify-main';
-    const title = window.terminalActions.attentionTitle({ label: n.label, kind: n.kind, kindWords });
-    main.textContent = title || n.paneName;
-    if (title) {
-      const pane = document.createElement('span');
-      pane.className = 'notify-pane';
-      pane.textContent = ` — ${alive ? paneTabText(entry) : n.paneName}`;
-      main.appendChild(pane);
-    }
-    main.title = waiting ? t('attention.historyWaiting') : '';
-    const time = document.createElement('span');
-    time.className = 'notify-time';
-    time.textContent = window.notificationLog.formatClock(n.time);
-    item.append(dot, main, time);
-    item.addEventListener('click', () => {
-      closeNotifyPanel();
-      if (entry && terminals.get(n.paneId) === entry) jumpToPane(entry);
-    });
-    notifyList.appendChild(item);
+    if (n.source === 'windows') notifyList.appendChild(renderSystemNotifyItem(n));
   }
 }
 
@@ -813,9 +777,8 @@ function refreshAttentionChip() {
     appName: 'WSL Workbench',
     kindWords: attentionKindWords()
   });
-  // Bell badge = waiting panes + unread Windows notifications; the chip/title stay terminal-only.
-  const unread = notifications.filter((n) => n.source === 'windows' && !n.read).length;
-  const badge = waiting.length + unread;
+  // Bell badge = unread Windows notifications only; waiting panes show on the chip / title / tabs.
+  const badge = window.notificationCenter.unreadCount(notifications);
   notifyBell.classList.toggle('lit', badge > 0);
   notifyCount.classList.toggle('hidden', badge === 0);
   notifyCount.textContent = badge ? String(badge) : '';
@@ -1296,16 +1259,27 @@ editorTabList.addEventListener('wheel', (event) => {
   editorTabList.scrollLeft += event.deltaY;
 }, { passive: false });
 
-function showImagePreview(on) {
-  imagePreview.style.display = on ? 'block' : 'none';
-  if (!on && pdfPreview.style.display === 'block') return; // the PDF pane owns the hidden editor
-  editorScroll.style.display = on ? 'none' : '';
+// The editor area shows exactly one of: the text editor (kind null), the image pane, the PDF pane,
+// or the "unsupported file" guidance (issue #79).
+const unsupportedView = document.getElementById('unsupportedView');
+const unsupportedMessage = document.getElementById('unsupportedMessage');
+const unsupportedOpen = document.getElementById('unsupportedOpen');
+function showEditorPane(kind) {
+  imagePreview.style.display = kind === 'image' ? 'block' : 'none';
+  pdfPreview.style.display = kind === 'pdf' ? 'block' : 'none';
+  unsupportedView.style.display = kind === 'unsupported' ? 'flex' : 'none';
+  editorScroll.style.display = kind ? 'none' : '';
 }
 
-function showPdfPreview(on) {
-  pdfPreview.style.display = on ? 'block' : 'none';
-  if (!on && imagePreview.style.display === 'block') return; // the image pane owns the hidden editor
-  editorScroll.style.display = on ? 'none' : '';
+// The guidance text comes from the localized dictionary (one paragraph per line) — never a
+// hard-coded language, per issue #79.
+function renderUnsupportedText() {
+  unsupportedMessage.textContent = '';
+  for (const line of t('unsupportedFile.message').split('\n')) {
+    const p = document.createElement('p');
+    p.textContent = line;
+    unsupportedMessage.appendChild(p);
+  }
 }
 
 function anyEditorDirty() {
@@ -1320,7 +1294,7 @@ function updateEditorTabEl(tab) {
   tab.el.querySelector('.editor-tab-dirty').textContent = tab.externallyChanged ? '⚠' : (tab.dirty ? '●' : '');
   tab.el.classList.toggle('active', tab.path === selectedPath);
   tab.el.classList.toggle('changed', !!tab.externallyChanged);
-  tab.el.title = tab.externallyChanged ? t('editor.externallyChanged') : tab.path;
+  tab.el.title = tab.externallyChanged ? t('editor.externallyChanged') : (tab.raw ? `${tab.path} — ${t('unsupportedFile.readOnly')}` : tab.path);
 }
 function refreshEditorTabs() { for (const tab of editorTabs.values()) updateEditorTabEl(tab); }
 
@@ -1349,10 +1323,11 @@ function persistActiveEditor() {
 }
 
 // The preview kind of the active tab: 'md' (rendered Markdown), 'html' (sandboxed iframe), or
-// null (not previewable). Only live, editable text tabs can be previewed.
+// null (not previewable). Only live, editable text tabs can be previewed — a raw "Open Anyway"
+// view or the >1MB placeholder always shows as the read-only textarea.
 function activeTabPreviewKind() {
   const tab = editorTabs.get(selectedPath);
-  if (!tab || tab.isImage || tab.isPdf || tab.disabled) return null;
+  if (!tab || tab.isImage || tab.isPdf || tab.unsupported || tab.disabled || tabIsReadOnly(tab)) return null;
   if (window.fileTypes.isMarkdownPath(tab.path)) return 'md';
   if (window.fileTypes.isHtmlPath(tab.path)) return 'html';
   return null;
@@ -1426,13 +1401,13 @@ async function renderMermaidBlocks() {
 function renderActiveEditor() {
   const tab = editorTabs.get(selectedPath);
   if (!tab) {
-    showImagePreview(false);
+    showEditorPane(null);
     imagePreview.removeAttribute('src');
-    showPdfPreview(false);
     pdfPreview.removeAttribute('src');
     editor.value = '';
     editorRenderedFor = null;
     editor.disabled = false;
+    editor.readOnly = false;
     showPreviewPane(null);
     previewToggle.classList.add('hidden');
     wrapToggle.classList.add('hidden');
@@ -1441,28 +1416,18 @@ function renderActiveEditor() {
     syncFindToActiveEditor();
     return;
   }
-  if (tab.isImage) {
-    showImagePreview(true);
-    if (tab.imageSrc) imagePreview.src = tab.imageSrc; else imagePreview.removeAttribute('src');
-    showPdfPreview(false);
-    pdfPreview.removeAttribute('src');
+  if (tab.isImage || tab.isPdf || tab.unsupported) {
+    showEditorPane(tab.isImage ? 'image' : (tab.isPdf ? 'pdf' : 'unsupported'));
+    if (tab.isImage && tab.imageSrc) imagePreview.src = tab.imageSrc; else imagePreview.removeAttribute('src');
+    if (tab.isPdf && tab.pdfSrc) pdfPreview.src = tab.pdfSrc; else pdfPreview.removeAttribute('src');
     editor.disabled = false;
-    showPreviewPane(null);
-    previewToggle.classList.add('hidden');
-    wrapToggle.classList.add('hidden');
-  } else if (tab.isPdf) {
-    showPdfPreview(true);
-    if (tab.pdfSrc) pdfPreview.src = tab.pdfSrc; else pdfPreview.removeAttribute('src');
-    showImagePreview(false);
-    imagePreview.removeAttribute('src');
-    editor.disabled = false;
+    editor.readOnly = false;
     showPreviewPane(null);
     previewToggle.classList.add('hidden');
     wrapToggle.classList.add('hidden');
   } else {
-    showImagePreview(false);
+    showEditorPane(null);
     imagePreview.removeAttribute('src');
-    showPdfPreview(false);
     pdfPreview.removeAttribute('src');
     // Rewrite the textarea only when it holds a different tab or stale content: assigning .value
     // clears the browser's undo stack, so a same-tab re-render (preview toggle, tab strip updates)
@@ -1473,6 +1438,7 @@ function renderActiveEditor() {
       editorRenderedFor = tab.path;
     }
     editor.disabled = !!tab.disabled;
+    editor.readOnly = tabIsReadOnly(tab);
     wrapToggle.classList.toggle('hidden', !!tab.disabled);
     wrapToggle.classList.toggle('active', wrapMode);
     const kind = activeTabPreviewKind();
@@ -1582,7 +1548,7 @@ async function openFileInEditor(node) {
   persistActiveEditor(); // save the previously active tab before switching
   // Register and activate synchronously (read-only while loading) so a second open of the same
   // file activates this tab instead of creating a duplicate, and edits can't be lost mid-load.
-  const tab = { path: node.path, name: basenameFor(node.path), value: '', dirty: false, isImage: false, imageSrc: null, isPdf: false, pdfSrc: null, disabled: true, el: null, mtimeMs: null, size: null, externallyChanged: false };
+  const tab = { path: node.path, name: basenameFor(node.path), value: '', dirty: false, isImage: false, imageSrc: null, isPdf: false, pdfSrc: null, unsupported: false, raw: false, tooLarge: false, disabled: true, el: null, mtimeMs: null, size: null, externallyChanged: false };
   tab.el = makeEditorTabEl(tab);
   editorTabs.set(node.path, tab);
   selectedPath = node.path;
@@ -1601,18 +1567,62 @@ async function openFileInEditor(node) {
     try { tab.pdfSrc = await window.api.readPdf({ distro: cfg.distro, wslPath: node.path }); tab.isPdf = true; }
     catch (error) { tab.value = String(error.message || error); disabled = true; }
   } else {
+    // No dedicated viewer: text if the file reads as text, else the guidance view (issue #79).
     try {
       // Fingerprint BEFORE reading: if the file changes during the read, the baseline stays older
       // than disk so the next poll re-detects and reloads (never records new mtime with stale text).
       const st = await window.api.statFile({ distro: cfg.distro, wslPath: node.path });
-      tab.value = await window.api.readFile({ distro: cfg.distro, wslPath: node.path });
-      if (st) { tab.mtimeMs = st.mtimeMs; tab.size = st.size; }
+      const res = await window.api.readFile({ distro: cfg.distro, wslPath: node.path });
+      if (res && res.unsupported) { tab.unsupported = true; disabled = true; }
+      else {
+        // tooLarge = a placeholder, not the file: shown read-only (never saveable) and still polled,
+        // so the tab recovers by itself once the file shrinks back under the limit.
+        tab.tooLarge = !!(res && res.tooLarge);
+        tab.value = String((res && res.text) || '');
+        if (st) { tab.mtimeMs = st.mtimeMs; tab.size = st.size; }
+      }
     } catch (error) { tab.value = String(error.message || error); disabled = true; }
   }
-  tab.disabled = disabled; // editable once loaded (unless the read failed)
+  tab.disabled = disabled; // editable once loaded (unless the read failed / needs "Open Anyway")
   if (editorTabs.get(node.path) === tab && selectedPath === node.path) renderActiveEditor();
   scheduleSessionSave();
 }
+
+// A text tab whose buffer must never be written back: a raw "Open Anyway" view (the decode is
+// lossy) or the >1MB placeholder (not the file's content at all).
+function tabIsReadOnly(tab) {
+  return !!(tab && (tab.raw || tab.tooLarge));
+}
+
+// "Open Anyway" on the guidance view: read the raw bytes as UTF-8 into the text editor, no format
+// conversion (a .xlsx shows its zip members, undecodable bytes show as U+FFFD). Read-only: the
+// decoded text is lossy, so saving it back would silently corrupt the file.
+async function openTabAnyway(tab) {
+  if (!config || !tab || !tab.unsupported || tab.loadingAnyway) return;
+  const cfg = config;
+  tab.loadingAnyway = true;
+  try {
+    const st = await window.api.statFile({ distro: cfg.distro, wslPath: tab.path });
+    const res = await window.api.readFile({ distro: cfg.distro, wslPath: tab.path, force: true });
+    if (config !== cfg || editorTabs.get(tab.path) !== tab) return; // workspace switched / tab closed
+    tab.value = String((res && res.text) || '');
+    if (st) { tab.mtimeMs = st.mtimeMs; tab.size = st.size; }
+    tab.raw = true;
+    tab.tooLarge = !!(res && res.tooLarge); // grew past the limit meanwhile: placeholder until it shrinks
+    tab.unsupported = false;
+    tab.disabled = false;
+  } catch (error) {
+    if (config !== cfg || editorTabs.get(tab.path) !== tab) return;
+    tab.value = String(error.message || error);
+    tab.unsupported = false;
+    tab.disabled = true;
+  } finally {
+    tab.loadingAnyway = false;
+  }
+  updateEditorTabEl(tab);
+  if (selectedPath === tab.path) renderActiveEditor();
+}
+unsupportedOpen.addEventListener('click', () => openTabAnyway(editorTabs.get(selectedPath)));
 
 function closeEditorTab(path) {
   const tab = editorTabs.get(path);
@@ -1704,8 +1714,9 @@ window.addEventListener('keydown', (event) => {
 
 async function saveCurrentFile() {
   const tab = editorTabs.get(selectedPath);
-  // Skip when there's no editable text buffer: no tab, an image, or an error/read-failure view.
-  if (!tab || !config || tab.isImage || tab.disabled) return;
+  // Skip when there's no editable text buffer: no tab, an image / PDF, an error/read-failure view,
+  // the unsupported-file guidance, or a read-only buffer (raw view / >1MB placeholder).
+  if (!tab || !config || tab.isImage || tab.isPdf || tab.disabled || tabIsReadOnly(tab)) return;
   try {
     const res = await window.api.writeFile({ distro: config.distro, wslPath: tab.path, content: editor.value });
     tab.value = editor.value;
@@ -1745,12 +1756,28 @@ async function reloadTabFromDisk(tab, { force = false } = {}) {
   const cfgAtStart = config;
   try {
     const st = await window.api.statFile({ distro: cfgAtStart.distro, wslPath: tab.path });
-    const content = await window.api.readFile({ distro: cfgAtStart.distro, wslPath: tab.path });
+    // A raw ("Open Anyway") view stays raw across reloads; a text tab whose file turned binary on
+    // disk flips to the guidance view instead of showing mojibake.
+    const res = await window.api.readFile({ distro: cfgAtStart.distro, wslPath: tab.path, force: !!tab.raw });
     if (config !== cfgAtStart || !editorTabs.has(tab.path)) return; // workspace switched / tab closed
     // The user may have started typing during the async read; don't silently clobber that (a forced
     // reload from the explicit confirm is allowed to). Leave it flagged so they can reload on click.
     if (!force && tab.dirty) { tab.externallyChanged = true; updateEditorTabEl(tab); return; }
+    if (res && res.unsupported) {
+      tab.value = '';
+      tab.unsupported = true;
+      tab.disabled = true;
+      tab.mtimeMs = null; tab.size = null;
+      tab.dirty = false;
+      tab.externallyChanged = false;
+      if (editorRenderedFor === tab.path) editorRenderedFor = null; // the textarea must be refilled on "Open Anyway"
+      if (tab.path === selectedPath) renderActiveEditor();
+      updateEditorTabEl(tab);
+      return;
+    }
+    const content = String((res && res.text) || '');
     tab.value = content;
+    tab.tooLarge = !!(res && res.tooLarge); // crossed the 1MB limit either way: placeholder ⇄ real text
     if (st) { tab.mtimeMs = st.mtimeMs; tab.size = st.size; }
     // Active tab: swap the buffer as one undoable edit BEFORE renderActiveEditor — it then sees
     // editor.value === tab.value and leaves the textarea (and its undo stack) alone. The insertText
@@ -1821,10 +1848,14 @@ let findCaseSensitive = false;
 let findMarkEls = [];      // the rendered <mark> elements, one per match (rebuilt only when matches change)
 let findCurrentEl = null;  // the <mark> currently marked .current
 
-// An editable text tab must be active (not an image, not a read-only/error view).
+// A text tab must be active (not an image / PDF / guidance view, not an error view) for find to
+// work; replace additionally needs it writable (a raw "Open Anyway" view is read-only).
 function editorIsTextEditable() {
   const tab = editorTabs.get(selectedPath);
-  return !!(tab && !tab.isImage && !tab.disabled);
+  return !!(tab && !tab.isImage && !tab.isPdf && !tab.unsupported && !tab.disabled);
+}
+function editorIsTextWritable() {
+  return editorIsTextEditable() && !tabIsReadOnly(editorTabs.get(selectedPath));
 }
 // Open find via Ctrl+F/H only when the editor (or its already-open find widget) holds focus — not the
 // terminal (which uses ^F/^H) or the tree. The user clicks into the file to search it.
@@ -1888,7 +1919,7 @@ function updateFindCount() {
   if (!findInput.value) findCount.textContent = '';
   else if (!findMatches.length) findCount.textContent = t('find.noResults');
   else findCount.textContent = `${findIndex + 1}/${findMatches.length}`;
-  const canReplace = editorIsTextEditable() && findMatches.length > 0;
+  const canReplace = editorIsTextWritable() && findMatches.length > 0;
   replaceOneBtn.disabled = !canReplace;
   replaceAllBtn.disabled = !canReplace;
 }
@@ -1980,7 +2011,7 @@ function replaceEditorRangePreservingUndo(start, end, text) {
 }
 
 function replaceCurrentMatch() {
-  if (!editorIsTextEditable() || !findMatches.length) return;
+  if (!editorIsTextWritable() || !findMatches.length) return;
   const m = findMatches[findIndex] || findMatches[0];
   const rep = replaceInput.value;
   replaceEditorRangePreservingUndo(m.start, m.end, rep);
@@ -1995,7 +2026,7 @@ function replaceCurrentMatch() {
 }
 
 function replaceAllMatches() {
-  if (!editorIsTextEditable()) return;
+  if (!editorIsTextWritable()) return;
   computeFindMatches();
   if (!findMatches.length) return;
   const rep = replaceInput.value;

@@ -197,3 +197,19 @@ test('missingFromSnapshot: active buffered ids absent from a fresh snapshot', ()
   assert.deepEqual(nc.missingFromSnapshot(buf, [1, 3]), []);
   assert.deepEqual(nc.missingFromSnapshot(null, new Set()), []);
 });
+
+// Issue #78: the bell counts unread Windows notifications only — a terminal report never counts,
+// even if such an entry were in the list.
+test('unreadCount: unread Windows entries only; terminal / read / junk entries are ignored', () => {
+  assert.equal(nc.unreadCount([]), 0);
+  assert.equal(nc.unreadCount(null), 0);
+  const list = [
+    { source: 'windows', read: false },
+    { source: 'windows', read: true },
+    { source: 'windows' },
+    { source: 'terminal', paneId: 1, label: 'claude', read: false },
+    null,
+    { read: false }
+  ];
+  assert.equal(nc.unreadCount(list), 2);
+});

@@ -57,3 +57,15 @@ test('i18n.js sets window.i18n when a non-configurable global `api` is present',
   assert.ok(sandbox.window.i18n, 'window.i18n should be defined');
   assert.equal(sandbox.window.i18n.t('ja', 'ctx.rename'), '名前を変更');
 });
+
+// Issue #79: the unsupported-file guidance is localized (never hard-coded in the view), and the
+// message is two lines so the view can render one paragraph per line.
+test('unsupportedFile strings exist in both languages and are two-line messages', () => {
+  for (const lang of ['en', 'ja']) {
+    const msg = i18n.t(lang, 'unsupportedFile.message');
+    assert.equal(msg.split('\n').length, 2, `${lang} message should be two lines`);
+    assert.notEqual(i18n.t(lang, 'unsupportedFile.openAnyway'), 'unsupportedFile.openAnyway');
+  }
+  assert.equal(i18n.t('en', 'unsupportedFile.openAnyway'), 'Open Anyway');
+  assert.equal(i18n.t('ja', 'unsupportedFile.openAnyway'), 'とにかく開いてみる');
+});

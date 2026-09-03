@@ -12,8 +12,10 @@ Lightweight Windows Electron app for working in WSL:
   permission it can notify the app via OSC 9 — the pane's tab segment and a top-left chip light up
   until you type in that pane, the taskbar icon gets an overlay dot, and a Windows toast appears
   when the window is behind others (see [Waiting-for-input badge](#waiting-for-input-badge-ai-clis))
-- Notification history: the bell next to the chip lists the recent "waiting for you" reports of
-  the workspace (tool, kind, pane, time); click an entry to jump to that pane
+- Notification center: the bell next to the chip lists recent Windows toast notifications (Slack,
+  Outlook, Teams, ...) with Ask / Mute / Bind actions (terminal reports are not listed there)
+- Files the text editor can't show (binary, or not UTF-8 — `.xlsx`, `.zip`, ...) open as a
+  guidance tab with an **Open Anyway** button that shows the raw bytes read-only
 - Tree auto-refreshes (files created in the terminal appear without a manual refresh)
 - CPU / memory meters at the right of the title bar show the host PC's live usage (updated every
   2 seconds; hover for absolute memory numbers)
@@ -48,14 +50,12 @@ overlay dot on the taskbar icon, and — when the window is not focused or the t
 Windows toast (click it to bring that pane to the front). Structured OSC 9 payloads such as
 progress reports (`4;1;50`) are ignored.
 
-The optional `<kind>` field says *why* the CLI waits, so the chip / toast / history read
+The optional `<kind>` field says *why* the CLI waits, so the chip / toast read
 `claude · permission` (an approval prompt) or `claude · finished` (its turn ended) instead of just
 `claude`. `done` and `permission` are localized; any other word is shown as-is.
 
-Every report is also kept in the **notification history** — the bell next to the chip — with the
-tool, kind, pane and time (newest first, last 50 per workspace, cleared with the panel's Clear
-button). Clicking an entry jumps to that pane; entries whose pane has been closed stay listed but
-are greyed out.
+Terminal reports are not listed in the bell's notification center — that panel is for Windows
+notifications only (see below); the badge, chip, title and toast are the whole story for a pane.
 
 Configure your CLIs to send it. The pane's shell exports `WSL_WORKBENCH_TTY=/dev/pts/N`, and the
 commands below write there — Claude Code runs hooks in a new session without a controlling
@@ -84,9 +84,9 @@ moment it starts waiting (`printf '\033]9;mytool;permission\007'` to tag the kin
 
 ## Windows notification center (Slack, Outlook, Teams, ...)
 
-The bell also lists **Windows toast notifications** — anything that lands in the Windows 11
-notification center (Slack, Outlook, Teams, Windows Security, ...) — alongside the terminal reports,
-newest first. Each Windows row shows the app, title, a body preview and the time; unread ones count
+The bell lists **Windows toast notifications** — anything that lands in the Windows 11
+notification center (Slack, Outlook, Teams, Windows Security, ...) — newest first. Each row shows
+the app, title, a body preview and the time; unread ones count
 into the bell badge until you open the panel. Rows whose toast was dismissed in Windows stay listed
 but greyed out. Only the last 50 entries per workspace are kept, and nothing is stored on disk.
 
