@@ -128,7 +128,18 @@
       'T="$(readlink -f -- "$T" 2>/dev/null)"; case "$T" in /dev/pts/*|/dev/tty*) [ -c "$T" ] && printf \'\\033]9;' + label + '\\007\' > "$T";; esac';
   }
 
-  const terminalActions = { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionTitle, attentionSummary, TTY_EXPORT, osc9HookCommand };
+  // Whether the active tab can take one more split pane (issue #84). Every pane is its own pty, so
+  // the only limits are a sanity cap and the room the group actually has: each pane needs at
+  // least `paneMinWidth` (.term-pane min-width) plus one `dividerWidth` (.term-divider) per split,
+  // and the group clips overflow, so a pane that doesn't fit would simply be cut off.
+  // Returns 'ok', 'limit' (cap reached) or 'room' (not enough width).
+  function splitAvailability({ count, width, max = 8, paneMinWidth = 120, dividerWidth = 3 }) {
+    if (count >= max) return 'limit';
+    const next = count + 1;
+    return next * paneMinWidth + (next - 1) * dividerWidth <= width ? 'ok' : 'room';
+  }
+
+  const terminalActions = { splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionTitle, attentionSummary, TTY_EXPORT, osc9HookCommand };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = terminalActions;
   }

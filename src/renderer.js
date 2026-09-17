@@ -19,6 +19,7 @@ const editorPreview = document.getElementById('editorPreview');
 const htmlPreview = document.getElementById('htmlPreview');
 const previewToggle = document.getElementById('previewToggle');
 const wrapToggle = document.getElementById('wrapToggle');
+const copyImageBtn = document.getElementById('copyImageBtn');
 let gutterLineCount = -1;
 let previewMode = false; // preview on/off (applies only while a Markdown or HTML file is active)
 let wrapMode = localStorage.getItem('editorWrap') === '1'; // soft-wrap long lines in the viewer
@@ -42,6 +43,7 @@ function renderWrappedGutter() {
   editorGutter.style.display = '';
   editorGutter.style.width = width + 'px';
   editor.style.paddingLeft = pad;
+  editor.style.scrollPaddingLeft = pad; // keep Home / caret reveals clear of the gutter (#83)
   editorBackdrop.style.paddingLeft = pad;
   editorMeasure.style.width = editor.clientWidth + 'px';
   editorMeasure.style.paddingLeft = pad;
@@ -93,6 +95,7 @@ function renderGutter() {
     editorGutter.style.width = width + 'px';
     const pad = (width + 6) + 'px';
     editor.style.paddingLeft = pad;
+    editor.style.scrollPaddingLeft = pad; // keep Home / caret reveals clear of the gutter (#83)
     editorBackdrop.style.paddingLeft = pad;
   }
   syncEditorOverlays();
@@ -123,6 +126,7 @@ function applyLanguage() {
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.dataset.i18nPlaceholder); });
   document.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle); });
+  updateSplitButton(); // its tooltip switches with the pane count, not only the language
   // Re-label open terminal tabs in the new language (custom pane names, if set, are kept).
   for (const group of termGroups.values()) renderTermTab(group);
   refreshAttentionChip(); // its text mixes pane names and the localized waiting word
@@ -170,7 +174,22 @@ const termGroups = new Map(); // group id -> { id, name, tab, container, paneIds
 let activeGroupId = null;
 let nextTermId = 1;
 let nextGroupId = 1;
-const MAX_PANES = 3;
+// Per-tab pane cap (issue #84). Nothing technical forces it — every pane is its own pty — so the
+// real limit is room: a split is only offered while one more pane still fits at .term-pane's
+// min-width (PANE_MIN_WIDTH) plus a .term-divider (DIVIDER_WIDTH) per split; the split button
+// greys out (tooltip says why) instead of silently doing nothing or clipping the last pane.
+const MAX_PANES = 8;
+const PANE_MIN_WIDTH = 120; // keep in step with .term-pane { min-width } in style.css
+const DIVIDER_WIDTH = 3;    // keep in step with .term-divider { flex-basis } in style.css
+const splitTerminalBtn = document.getElementById('splitTerminalBtn');
+
+function splitAvailabilityFor(group) {
+  if (!group) return 'limit';
+  return window.terminalActions.splitAvailability({
+    count: group.paneIds.length, width: group.container.clientWidth,
+    max: MAX_PANES, paneMinWidth: PANE_MIN_WIDTH, dividerWidth: DIVIDER_WIDTH
+  });
+}
 const terminalHost = document.getElementById('terminalHost');
 const terminalTabList = document.getElementById('terminalTabList');
 
@@ -190,7 +209,7 @@ function fitPane(entry) {
   window.api.terminalResize({ id: entry.id, cols: entry.term.cols, rows: entry.term.rows });
 }
 function fitGroupPanes(group) { if (group) for (const pid of group.paneIds) fitPane(terminals.get(pid)); }
-function fitActiveTerminal() { fitGroupPanes(activeGroup()); }
+function fitActiveTerminal() { fitGroupPanes(activeGroup()); updateSplitButton(); } // width changed: re-check room
 window.addEventListener('resize', fitActiveTerminal);
 
 function activateTerminal(groupId) {
@@ -202,6 +221,7 @@ function activateTerminal(groupId) {
     g.container.style.display = on ? 'flex' : 'none';
     g.tab.classList.toggle('active', on);
   }
+  updateSplitButton();
   setTimeout(() => {
     fitGroupPanes(group);
     const focus = terminals.get(group.activePaneId);
@@ -219,6 +239,15 @@ function refreshPaneChrome(group) {
     const btn = e.host.querySelector('.term-pane-close');
     if (btn) btn.style.display = multi ? '' : 'none';
   }
+  updateSplitButton();
+}
+
+// Grey out "Split Terminal" when the active tab can't take another pane, saying why in the tooltip.
+function updateSplitButton() {
+  const why = splitAvailabilityFor(activeGroup());
+  splitTerminalBtn.disabled = why !== 'ok';
+  splitTerminalBtn.title = why === 'limit' ? t('terminal.splitLimit').replace('{max}', String(MAX_PANES))
+    : why === 'room' ? t('terminal.splitNoRoom') : t('terminal.split');
 }
 
 // Move the focused mark between existing segments IN PLACE: a focus change must not rebuild the
@@ -1116,7 +1145,7 @@ function createTerminal({ command = '', cwd = '' } = {}) {
 // prompt has reported a cwd).
 function splitActiveTerminal() {
   const group = activeGroup();
-  if (!group || !config || group.paneIds.length >= MAX_PANES) return null;
+  if (!group || !config || splitAvailabilityFor(group) !== 'ok') return null;
   const source = terminals.get(group.activePaneId);
   for (const pid of group.paneIds) {
     const e = terminals.get(pid);
@@ -1347,6 +1376,7 @@ function showPreviewPane(kind) {
   if (md) {
     editorPreview.innerHTML = window.markdown.render(editor.value);
     editorPreview.scrollTop = 0;
+    resolvePreviewImages(selectedPath);
     renderMermaidBlocks();
   }
   // The empty sandbox (no allow-scripts / allow-same-origin) renders the document statically:
@@ -1355,6 +1385,29 @@ function showPreviewPane(kind) {
     if (htmlPreview.srcdoc !== editor.value) htmlPreview.srcdoc = editor.value;
   } else if (htmlPreview.srcdoc) {
     htmlPreview.srcdoc = ''; // drop the rendered document when leaving the preview
+  }
+}
+
+// Local image references in the Markdown preview (issue #85): markdown.js emits them src-less
+// (data-md-src) because the preview has no file origin to load from. Each is resolved against the
+// document's own directory and read over IPC as a data: URL — only image extensions are fetched,
+// and anything unresolvable/unreadable degrades to the alt text (as it did before). A generation
+// counter drops loads that finish after the preview was re-rendered.
+let previewImageGeneration = 0;
+function resolvePreviewImages(docPath) {
+  const gen = ++previewImageGeneration;
+  const cfg = config;
+  for (const img of editorPreview.querySelectorAll('img[data-md-src]')) {
+    const ref = img.dataset.mdSrc;
+    const wslPath = window.markdown.resolveLocalImagePath(docPath, ref);
+    // Fallback text is searchable, so an open find widget must re-index once it appears.
+    const showAlt = () => { img.replaceWith(document.createTextNode(img.alt || '')); syncFindToActiveEditor(); };
+    if (!cfg || !docPath || !wslPath || !window.fileTypes.isImagePath(wslPath)) { showAlt(); continue; }
+    img.title = ref;
+    img.addEventListener('error', showAlt, { once: true });
+    window.api.readImage({ distro: cfg.distro, wslPath })
+      .then((src) => { if (gen === previewImageGeneration) img.src = src; })
+      .catch(() => { if (gen === previewImageGeneration) showAlt(); });
   }
 }
 
@@ -1395,6 +1448,7 @@ async function renderMermaidBlocks() {
       code.parentElement.before(note);
     }
   }
+  syncFindToActiveEditor(); // the swapped-in diagrams changed the preview's text nodes (#82)
 }
 
 // Load the active tab into the shared editor/image view (or blank when no tab is open).
@@ -1411,6 +1465,7 @@ function renderActiveEditor() {
     showPreviewPane(null);
     previewToggle.classList.add('hidden');
     wrapToggle.classList.add('hidden');
+    copyImageBtn.classList.add('hidden');
     refreshEditorTabs();
     renderGutter();
     syncFindToActiveEditor();
@@ -1425,6 +1480,7 @@ function renderActiveEditor() {
     showPreviewPane(null);
     previewToggle.classList.add('hidden');
     wrapToggle.classList.add('hidden');
+    copyImageBtn.classList.toggle('hidden', !tab.isImage);
   } else {
     showEditorPane(null);
     imagePreview.removeAttribute('src');
@@ -1441,6 +1497,7 @@ function renderActiveEditor() {
     editor.readOnly = tabIsReadOnly(tab);
     wrapToggle.classList.toggle('hidden', !!tab.disabled);
     wrapToggle.classList.toggle('active', wrapMode);
+    copyImageBtn.classList.add('hidden');
     const kind = activeTabPreviewKind();
     previewToggle.classList.toggle('hidden', !kind);
     const showPreview = previewMode && !!kind;
@@ -1848,6 +1905,23 @@ let findCaseSensitive = false;
 let findMarkEls = [];      // the rendered <mark> elements, one per match (rebuilt only when matches change)
 let findCurrentEl = null;  // the <mark> currently marked .current
 
+// Find runs against whichever the editor area currently shows (issue #82): the textarea (matches
+// are [start, end) offsets into editor.value, painted via the backdrop) or the rendered Markdown
+// preview (matches are DOM Ranges painted with the CSS Custom Highlight API; replace is
+// unavailable there — the preview is not the file).
+function previewFindActive() { return !editorPreview.classList.contains('hidden'); }
+const previewHighlightsSupported = typeof Highlight !== 'undefined' && typeof CSS !== 'undefined' && !!CSS.highlights;
+// Block-level containers of the preview: text in different blocks is never joined for matching.
+const PREVIEW_BLOCKS = 'p,li,h1,h2,h3,h4,h5,h6,td,th,pre,blockquote,div,table';
+// Stable per-element key for the current preview DOM (a WeakMap, so replaced nodes just drop out).
+const previewBlockKeys = new WeakMap();
+let previewBlockSeq = 0;
+function blockKey(el) {
+  let k = previewBlockKeys.get(el);
+  if (k == null) { k = ++previewBlockSeq; previewBlockKeys.set(el, k); }
+  return k;
+}
+
 // A text tab must be active (not an image / PDF / guidance view, not an error view) for find to
 // work; replace additionally needs it writable (a raw "Open Anyway" view is read-only).
 function editorIsTextEditable() {
@@ -1862,7 +1936,7 @@ function editorIsTextWritable() {
 function editorHasFocusForFind() {
   if (!editorIsTextEditable()) return false;
   const active = document.activeElement;
-  return active === editor || findWidget.contains(active);
+  return active === editor || findWidget.contains(active) || (previewFindActive() && editorPreview.contains(active));
 }
 
 function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
@@ -1873,6 +1947,11 @@ function computeFindMatches() {
   findMatches = [];
   const q = findInput.value;
   if (!q || !editorIsTextEditable()) { findIndex = -1; return; }
+  if (previewFindActive()) {
+    findMatches = computePreviewMatches(q);
+    if (findIndex >= findMatches.length) findIndex = findMatches.length - 1;
+    return;
+  }
   const re = new RegExp(escapeRegExp(q), findCaseSensitive ? 'g' : 'gi');
   const text = editor.value;
   let m;
@@ -1885,11 +1964,51 @@ function computeFindMatches() {
 
 function escapeHtml(s) { return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
 
-// Rebuild the backdrop's highlight spans from the current match set. This O(text) work runs only when
-// the match set changes (query/content edit) — not on plain next/previous navigation.
+// Matches over the preview's text nodes as live DOM Ranges (offset mapping lives in preview-find.js).
+// Subtrees whose text is never painted (Mermaid's inline <style>, SVG <title>/<desc> tooltips):
+// matching there would count invisible hits and navigate to nothing.
+const PREVIEW_UNRENDERED = new Set(['STYLE', 'SCRIPT', 'TITLE', 'DESC']);
+function computePreviewMatches(q) {
+  const walker = document.createTreeWalker(editorPreview, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+    acceptNode: (n) => (n.nodeType === Node.ELEMENT_NODE && PREVIEW_UNRENDERED.has(n.tagName.toUpperCase())
+      ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT)
+  });
+  const textNodes = [];
+  const descs = [];
+  let breaks = 0; // a <br> is a visual line break: text on either side must not be joined
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (n.nodeType === Node.ELEMENT_NODE) { if (n.tagName === 'BR') breaks++; continue; }
+    textNodes.push(n);
+    const block = (n.parentElement && n.parentElement.closest(PREVIEW_BLOCKS)) || editorPreview;
+    descs.push({ data: n.data, block: `${breaks}:${blockKey(block)}` });
+  }
+  return window.previewFind.findInNodes(descs, q, findCaseSensitive).map((m) => {
+    const range = document.createRange();
+    range.setStart(textNodes[m.start.index], m.start.offset);
+    range.setEnd(textNodes[m.end.index], m.end.offset);
+    return { range };
+  });
+}
+
+function clearPreviewHighlights() {
+  if (!previewHighlightsSupported) return;
+  CSS.highlights.delete('preview-find');
+  CSS.highlights.delete('preview-find-current');
+}
+
+// Rebuild the highlights from the current match set. This O(text) work runs only when the match set
+// changes (query/content edit) — not on plain next/previous navigation.
 function renderFindHighlights() {
   findCurrentEl = null;
   findMarkEls = [];
+  if (previewFindActive()) {
+    editorBackdrop.textContent = '';
+    if (findWidget.classList.contains('hidden') || !findMatches.length || !previewHighlightsSupported) { clearPreviewHighlights(); return; }
+    CSS.highlights.set('preview-find', new Highlight(...findMatches.map((m) => m.range)));
+    setCurrentMark();
+    return;
+  }
+  clearPreviewHighlights();
   if (findWidget.classList.contains('hidden') || !findMatches.length) { editorBackdrop.textContent = ''; return; }
   const text = editor.value;
   let html = '';
@@ -1910,6 +2029,13 @@ function renderFindHighlights() {
 
 // Move the `.current` emphasis to findMarkEls[findIndex] — O(1), used for next/previous navigation.
 function setCurrentMark() {
+  if (previewFindActive()) {
+    if (!previewHighlightsSupported) return;
+    const m = findIndex >= 0 ? findMatches[findIndex] : null;
+    if (m) CSS.highlights.set('preview-find-current', new Highlight(m.range));
+    else CSS.highlights.delete('preview-find-current');
+    return;
+  }
   if (findCurrentEl) findCurrentEl.classList.remove('current');
   findCurrentEl = (findIndex >= 0 && findMarkEls[findIndex]) || null;
   if (findCurrentEl) findCurrentEl.classList.add('current');
@@ -1919,13 +2045,38 @@ function updateFindCount() {
   if (!findInput.value) findCount.textContent = '';
   else if (!findMatches.length) findCount.textContent = t('find.noResults');
   else findCount.textContent = `${findIndex + 1}/${findMatches.length}`;
-  const canReplace = editorIsTextWritable() && findMatches.length > 0;
+  const preview = previewFindActive();
+  const canReplace = editorIsTextWritable() && !preview && findMatches.length > 0;
   replaceOneBtn.disabled = !canReplace;
   replaceAllBtn.disabled = !canReplace;
+  replaceInput.disabled = preview;
 }
 
 // Scroll the textarea so the current match is in view (both axes), using the rendered mark's geometry.
 function scrollEditorToCurrentMark() {
+  if (previewFindActive()) {
+    const m = findIndex >= 0 ? findMatches[findIndex] : null;
+    if (!m) return;
+    // Every scrollable ancestor up to the preview itself gets a say: a code block (<pre>) or a
+    // wide table scrolls horizontally on its own, so a match past its right edge must first be
+    // revealed inside that box, then the box inside the preview. Rects are re-read after each
+    // scroll since the earlier ones move the range.
+    const sc = m.range.startContainer;
+    let el = sc.nodeType === Node.ELEMENT_NODE ? sc : sc.parentElement;
+    while (el) {
+      const canX = el.scrollWidth > el.clientWidth;
+      const canY = el.scrollHeight > el.clientHeight;
+      if (canX || canY) {
+        const r = m.range.getBoundingClientRect();
+        const box = el.getBoundingClientRect();
+        if (canX && (r.left < box.left || r.right > box.right)) el.scrollLeft += r.left - box.left - el.clientWidth / 2;
+        if (canY && (r.top < box.top || r.bottom > box.bottom)) el.scrollTop += r.top - box.top - el.clientHeight / 2;
+      }
+      if (el === editorPreview) break;
+      el = el.parentElement;
+    }
+    return;
+  }
   const el = findCurrentEl;
   if (!el) return;
   const h = el.offsetHeight || 18;
@@ -1956,7 +2107,14 @@ function refreshFind(jump) {
   renderFindHighlights();
   if (!findMatches.length) { findIndex = -1; updateFindCount(); return; }
   if (jump) {
-    const idx = findMatches.findIndex((m) => m.start >= caret);
+    let idx;
+    if (previewFindActive()) {
+      // No caret in the preview: start from the first match at/below the visible top.
+      const top = editorPreview.getBoundingClientRect().top;
+      idx = findMatches.findIndex((m) => m.range.getBoundingClientRect().bottom >= top);
+    } else {
+      idx = findMatches.findIndex((m) => m.start >= caret);
+    }
     selectFindMatch(idx === -1 ? 0 : idx);
   } else {
     if (findIndex < 0) findIndex = 0;
@@ -1980,7 +2138,13 @@ function openFind(withReplace) {
   if (!editorIsTextEditable()) return;
   findWidget.classList.remove('hidden');
   setReplaceVisible(!!withReplace);
-  const sel = editor.value.substring(editor.selectionStart, editor.selectionEnd);
+  let sel = '';
+  if (previewFindActive()) {
+    const s = window.getSelection();
+    if (s && s.rangeCount && editorPreview.contains(s.anchorNode)) sel = s.toString();
+  } else {
+    sel = editor.value.substring(editor.selectionStart, editor.selectionEnd);
+  }
   if (sel && !sel.includes('\n')) findInput.value = sel;
   findInput.focus();
   findInput.select();
@@ -1990,9 +2154,10 @@ function openFind(withReplace) {
 function closeFind() {
   findWidget.classList.add('hidden');
   editorBackdrop.textContent = ''; // remove highlights
+  clearPreviewHighlights();
   findMarkEls = [];
   findCurrentEl = null;
-  if (editorIsTextEditable()) editor.focus();
+  if (editorIsTextEditable()) (previewFindActive() ? editorPreview : editor).focus();
 }
 
 // Replace [start,end) in the textarea as an undoable edit (selection + insertText/delete); falls
@@ -2011,7 +2176,7 @@ function replaceEditorRangePreservingUndo(start, end, text) {
 }
 
 function replaceCurrentMatch() {
-  if (!editorIsTextWritable() || !findMatches.length) return;
+  if (!editorIsTextWritable() || previewFindActive() || !findMatches.length) return;
   const m = findMatches[findIndex] || findMatches[0];
   const rep = replaceInput.value;
   replaceEditorRangePreservingUndo(m.start, m.end, rep);
@@ -2026,7 +2191,7 @@ function replaceCurrentMatch() {
 }
 
 function replaceAllMatches() {
-  if (!editorIsTextWritable()) return;
+  if (!editorIsTextWritable() || previewFindActive()) return;
   computeFindMatches();
   if (!findMatches.length) return;
   const rep = replaceInput.value;
@@ -2573,6 +2738,31 @@ function initMenubar() {
   });
 }
 
+// Copy the image viewer's picture to the clipboard as a bitmap (issue #81). The <img> is drawn to a
+// canvas so any format Chromium decodes (GIF/WebP/BMP/SVG…) reaches the OS clipboard as PNG.
+let copiedLabelTimer = null;
+async function copyActiveImage() {
+  const tab = editorTabs.get(selectedPath);
+  if (!tab || !tab.isImage || !imagePreview.src) return;
+  let ok = false;
+  try {
+    const w = imagePreview.naturalWidth;
+    const h = imagePreview.naturalHeight;
+    if (w && h) {
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext('2d').drawImage(imagePreview, 0, 0);
+      const res = await window.api.clipboardWriteImage(canvas.toDataURL('image/png'));
+      ok = !!(res && res.ok);
+    }
+  } catch { ok = false; }
+  if (!ok) { alert(t('editor.copyImageFailed')); return; }
+  copyImageBtn.textContent = t('editor.copied');
+  clearTimeout(copiedLabelTimer);
+  copiedLabelTimer = setTimeout(() => { copyImageBtn.textContent = t('editor.copyImage'); }, 1200);
+}
+
 // Markdown preview: the toolbar toggle flips edit/preview for the active Markdown file, and links in
 // the rendered preview open in the default browser (never navigate the app window).
 function initEditorPreview() {
@@ -2580,6 +2770,9 @@ function initEditorPreview() {
     persistActiveEditor(); // keep unsaved edits: copy the live textarea into the tab before re-rendering
     previewMode = !previewMode;
     renderActiveEditor();
+    // Hand focus to what is now shown so keyboard scrolling and Ctrl+F (find in preview, #82) work
+    // right away instead of leaving it on the toggle button.
+    if (previewFindActive()) editorPreview.focus(); else if (!editor.disabled) editor.focus();
   });
   // Word-wrap toggle: purely visual (soft wrap), persisted across sessions.
   wrapToggle.addEventListener('click', () => {
@@ -2587,6 +2780,11 @@ function initEditorPreview() {
     localStorage.setItem('editorWrap', wrapMode ? '1' : '0');
     wrapToggle.classList.toggle('active', wrapMode);
     renderGutter();
+  });
+  copyImageBtn.addEventListener('click', copyActiveImage);
+  // Ctrl+C on the (focusable) image viewer copies too.
+  imagePreview.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'c') { event.preventDefault(); copyActiveImage(); }
   });
   editorPreview.addEventListener('click', (event) => {
     const anchor = event.target.closest('a');

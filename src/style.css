@@ -145,7 +145,11 @@ button:disabled { opacity:.45; cursor:not-allowed; }
    textarea sits on top with a transparent background so the backdrop's match highlights show through. */
 #editorScroll { position:relative; flex:1; min-height:0; background:#181818; overflow:hidden; }
 #editor, #editorBackdrop { position:absolute; inset:0; margin:0; padding:10px 10px 10px 52px; font-family: Consolas, "Cascadia Mono", monospace; font-size:13px; line-height:1.45; white-space:pre; tab-size:2; border:0; }
-#editor { width:100%; height:100%; resize:none; outline:0; background:transparent; color:var(--text); overflow:auto; }
+/* scroll-padding-left keeps the caret clear of the line-number gutter that overlays the textarea's
+   left edge: Chromium reveals a moved caret only up to the scrollport edge, so without it Home (or
+   arrowing left) leaves the line start hidden behind the gutter (issue #83). renderGutter() keeps the
+   value in step with the gutter width. */
+#editor { width:100%; height:100%; resize:none; outline:0; background:transparent; color:var(--text); overflow:auto; scroll-padding-left:52px; }
 /* The UI is always dark, so force dark native scrollbars on every scrollable pane (otherwise they
    render light when the Windows "app mode" is Light, showing white bars on the dark UI). Scoped to
    the scroll containers so form-control rendering elsewhere is untouched. */
@@ -170,6 +174,11 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 /* Markdown preview: overlays the editor area (same #editorScroll box) when toggled on. */
 #editorPreview { position:absolute; inset:0; margin:0; padding:12px 18px; overflow:auto; color:var(--text); background:#181818; font-family:"Segoe UI",sans-serif; font-size:14px; line-height:1.6; }
 #editorPreview.hidden { display:none; }
+#editorPreview:focus { outline:none; }
+/* Find in the Markdown preview (issue #82): matches are painted with the CSS Custom Highlight API,
+   so the rendered DOM is never rewritten. Same colours as the textarea's backdrop marks. */
+::highlight(preview-find) { background:rgba(95,140,255,.35); }
+::highlight(preview-find-current) { background:rgba(255,180,84,.55); }
 #editorPreview h1, #editorPreview h2, #editorPreview h3, #editorPreview h4 { line-height:1.3; margin:1em 0 .5em; }
 #editorPreview h1 { font-size:1.7em; border-bottom:1px solid var(--border); padding-bottom:.3em; }
 #editorPreview h2 { font-size:1.4em; border-bottom:1px solid var(--border); padding-bottom:.3em; }
@@ -182,6 +191,9 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 #editorPreview blockquote { margin:.6em 0; padding:.2em 1em; border-left:3px solid #3a3a3a; color:var(--muted); }
 #editorPreview ul, #editorPreview ol { margin:.5em 0; padding-left:1.6em; }
 #editorPreview img { max-width:100%; }
+/* A local reference stays src-less until the renderer has loaded it over IPC (issue #85); hide it
+   meanwhile so no broken-image glyph flashes (unloadable ones are swapped for their alt text). */
+#editorPreview img:not([src]) { display:none; }
 #editorPreview hr { border:0; border-top:1px solid var(--border); margin:1em 0; }
 #editorPreview table { border-collapse:collapse; margin:.6em 0; }
 #editorPreview th, #editorPreview td { border:1px solid var(--border); padding:4px 10px; }
@@ -203,6 +215,7 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 #editorBackdrop mark { background:rgba(95,140,255,.35); color:transparent; border-radius:2px; }
 #editorBackdrop mark.current { background:rgba(255,180,84,.55); }
 #imagePreview { display:none; flex:1; min-height:0; width:100%; object-fit:contain; background:#181818; padding:10px; }
+#imagePreview:focus { outline:none; }
 
 /* HTML preview: a sandboxed iframe overlaying the editor area (same #editorScroll box as the
    Markdown preview). White background because most standalone HTML assumes a light page. */
@@ -239,6 +252,8 @@ body.resizing iframe { pointer-events:none; }
 .term-tab .term-tab-close:hover { background:#555; color:#fff; }
 #newTerminalBtn, #splitTerminalBtn { background:transparent; border:0; color:var(--muted); font-size:16px; line-height:1; padding:2px 8px; border-radius:4px; cursor:pointer; }
 #newTerminalBtn:hover, #splitTerminalBtn:hover { background:var(--hover); color:var(--text); }
+#splitTerminalBtn:disabled { opacity:.4; cursor:default; }
+#splitTerminalBtn:disabled:hover { background:transparent; color:var(--muted); }
 #splitTerminalBtn { font-size:13px; }
 #terminalHost { position:relative; flex:1; min-height:0; }
 /* Each tab is a GROUP of 1..N side-by-side panes in a flex row. Inset rather than padding: the

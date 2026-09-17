@@ -42,6 +42,7 @@
           <div id="editorTabList"></div>
           <button id="wrapToggle" class="editor-toolbtn hidden" data-i18n="editor.wrap">Wrap</button>
           <button id="previewToggle" class="editor-toolbtn hidden" data-i18n="editor.preview">Preview</button>
+          <button id="copyImageBtn" class="editor-toolbtn hidden" data-i18n="editor.copyImage">Copy Image</button>
         </div>
         <div id="findWidget" class="hidden">
           <div class="find-row">
@@ -64,10 +65,10 @@
           <div id="editorMeasure" aria-hidden="true"></div>
           <div id="editorBackdrop" aria-hidden="true"></div>
           <textarea id="editor" spellcheck="false" data-i18n-placeholder="editor.placeholder" placeholder="Select a text file from the left tree."></textarea>
-          <div id="editorPreview" class="hidden"></div>
+          <div id="editorPreview" class="hidden" tabindex="-1"></div>
           <iframe id="htmlPreview" class="hidden" sandbox=""></iframe>
         </div>
-        <img id="imagePreview" alt="" />
+        <img id="imagePreview" alt="" tabindex="-1" />
         <iframe id="pdfPreview"></iframe>
         <div id="unsupportedView">
           <div id="unsupportedMessage"></div>
@@ -149,6 +150,7 @@
   <script src="./i18n.js"></script>
   <script src="./file-types.js"></script>
   <script src="./markdown.js"></script>
+  <script src="./preview-find.js"></script>
   <script src="./terminal-actions.js"></script>
   <script src="./notification-log.js"></script>
   <script src="./notification-center.js"></script>

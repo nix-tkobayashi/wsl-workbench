@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionTitle, attentionSummary, TTY_EXPORT, osc9HookCommand } = require('../src/terminal-actions');
+const { splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionTitle, attentionSummary, TTY_EXPORT, osc9HookCommand } = require('../src/terminal-actions');
 const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
@@ -311,4 +311,17 @@ test('osc9HookCommand reaches the pane pty from a hook with no controlling termi
   };
   assert.equal(run(TTY_EXPORT), true, 'via WSL_WORKBENCH_TTY');
   assert.equal(run('unset WSL_WORKBENCH_TTY'), true, 'via parent stdout fallback');
+});
+
+test('splitAvailability: pane cap and available width both gate splitting (#84)', () => {
+  assert.equal(splitAvailability({ count: 1, width: 1000 }), 'ok');
+  assert.equal(splitAvailability({ count: 8, width: 5000 }), 'limit');
+  assert.equal(splitAvailability({ count: 3, width: 1000, max: 3 }), 'limit');
+  // 8 panes need 8*120 + 7*3 = 981px; 7 need 852px.
+  assert.equal(splitAvailability({ count: 7, width: 981 }), 'ok');
+  assert.equal(splitAvailability({ count: 7, width: 980 }), 'room');
+  assert.equal(splitAvailability({ count: 6, width: 900 }), 'ok');
+  // Custom metrics are honoured.
+  assert.equal(splitAvailability({ count: 1, width: 250, paneMinWidth: 100, dividerWidth: 50 }), 'ok');
+  assert.equal(splitAvailability({ count: 1, width: 249, paneMinWidth: 100, dividerWidth: 50 }), 'room');
 });

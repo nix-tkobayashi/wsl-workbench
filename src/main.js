@@ -1313,6 +1313,16 @@ ipcMain.on('clipboard:readText', (event) => {
 ipcMain.on('clipboard:hasImage', (event) => {
   event.returnValue = !clipboard.readImage().isEmpty();
 });
+// Put a bitmap on the clipboard from a data: URL (PNG/JPEG). The renderer rasterizes whatever the
+// image viewer shows (any format Chromium decodes, SVG included) to PNG first, so one code path
+// covers every viewable image (issue #81). Rejects anything nativeImage cannot decode.
+ipcMain.handle('clipboard:writeImage', (_event, dataUrl) => {
+  if (typeof dataUrl !== 'string' || !/^data:image\/(png|jpeg);base64,/i.test(dataUrl)) return { ok: false };
+  const image = nativeImage.createFromDataURL(dataUrl);
+  if (image.isEmpty()) return { ok: false };
+  clipboard.writeImage(image);
+  return { ok: true };
+});
 
 // Bridge the clipboard image into the WSL distro's own clipboard as PNG. Claude Code reads the OS
 // clipboard on Ctrl+V (via wl-copy/xclip) and shows it as [Image #N]; a Windows-side clipboard image

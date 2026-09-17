@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('api', {
   clipboardWriteText: (text) => ipcRenderer.sendSync('clipboard:writeText', String(text ?? '')),
   clipboardReadText: () => ipcRenderer.sendSync('clipboard:readText'),
   clipboardHasImage: () => ipcRenderer.sendSync('clipboard:hasImage'),
+  // Copy a PNG data: URL (the image viewer's rasterized picture, issue #81) to the OS clipboard.
+  clipboardWriteImage: (dataUrl) => ipcRenderer.invoke('clipboard:writeImage', String(dataUrl ?? '')),
   saveClipboardImage: (args) => ipcRenderer.invoke('fs:saveClipboardImage', args),
   pushImageToWsl: (args) => ipcRenderer.invoke('clipboard:pushImageToWsl', args),
   getConfig: () => ipcRenderer.invoke('config:get'),
