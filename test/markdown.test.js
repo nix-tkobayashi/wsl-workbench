@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { render } = require('../src/markdown');
+const { render, resolveLocalImagePath } = require('../src/markdown');
 
 test('renders headings and inline emphasis/code', () => {
   assert.equal(render('# Title'), '<h1>Title</h1>');
@@ -40,9 +40,71 @@ test('links: safe URLs become anchors, javascript: is neutralized', () => {
   assert.equal(js, '<p>x</p>');
 });
 
-test('images: only http/data:image render, local paths fall back to alt', () => {
+test('images: http/data:image render with a src; other schemes fall back to alt', () => {
   assert.ok(render('![a](https://a.com/x.png)').includes('<img src="https://a.com/x.png"'));
-  assert.equal(render('![alt](./local.png)'), '<p>alt</p>');
+  assert.equal(render('![alt](javascript:alert)'), '<p>alt</p>');
+  assert.equal(render('![alt](file:///etc/passwd)'), '<p>alt</p>');
+  assert.equal(render('![alt](//evil.example/x.png)'), '<p>alt</p>');
+});
+
+test('images: local references are emitted src-less for the renderer to resolve (#85)', () => {
+  assert.equal(render('![alt](./local.png)'), '<p><img data-md-src="./local.png" alt="alt"></p>');
+  assert.equal(render('![図](../img/a.png)'), '<p><img data-md-src="../img/a.png" alt="図"></p>');
+  // Attribute text is HTML-escaped so a crafted reference cannot break out of the attribute.
+  const out = render('![x](a"onerror="evil)');
+  assert.ok(!out.includes('onerror="'), out);
+  assert.ok(out.includes('data-md-src="a&quot;onerror=&quot;evil"'), out);
+});
+
+test('underscores / asterisks inside image and link URLs are not turned into emphasis', () => {
+  assert.equal(render('![plot](./my_plot_final.png)'), '<p><img data-md-src="./my_plot_final.png" alt="plot"></p>');
+  assert.ok(render('![a](https://a.com/my_img_v2.png)').includes('src="https://a.com/my_img_v2.png"'));
+  assert.ok(render('[doc](https://a.com/a_b_c)').includes('href="https://a.com/a_b_c"'));
+  // Link text still gets inline emphasis, and a code span inside a link stays verbatim.
+  assert.ok(render('[**bold** link](https://a.com)').includes('<a href="https://a.com" target="_blank" rel="noopener noreferrer"><strong>bold</strong> link</a>'));
+  assert.equal(render('use `a_b` here'), '<p>use <code>a_b</code> here</p>');
+});
+
+test('nested inline fragments (code span / image inside a link) are all restored', () => {
+  assert.equal(render('[`foo`](https://example.com)'),
+    '<p><a href="https://example.com" target="_blank" rel="noopener noreferrer"><code>foo</code></a></p>');
+  assert.equal(render('[![alt](./a.png)](https://example.com)'),
+    '<p><a href="https://example.com" target="_blank" rel="noopener noreferrer"><img data-md-src="./a.png" alt="alt"></a></p>');
+  assert.ok(!/[\uE000\uE001]/.test(render('[`a`](x) `b` [![c](https://h/c.png)](https://h)')), 'no sentinel may leak');
+});
+
+test('sentinel codepoints in the source cannot forge or loop placeholder references', () => {
+  assert.equal(render('a\uE0000\uE001b'), '<p>a0b</p>');
+  assert.equal(render('`\uE0000\uE001`'), '<p><code>0</code></p>');
+  assert.equal(render('[x](https://a.com)\uE0000\uE001'), '<p><a href="https://a.com" target="_blank" rel="noopener noreferrer">x</a>0</p>');
+});
+
+test('held fragments never restore inside an attribute (URL or alt)', () => {
+  // An image matched inside a link URL must not smuggle markup into href.
+  const link = render('[hover](https://a/![x](onmouseover=document.body.textContent=123//))');
+  assert.ok(!link.includes('<a '), link);
+  assert.ok(!link.includes('onmouseover="'), link);
+  // A code span inside an image URL: the reference is refused (alt text shown).
+  assert.equal(render('![x](a`b`c)'), '<p>x</p>');
+  // Nested image / code span in alt text reduce to plain text (the regex takes the first "](" pair,
+  // so the inner reference wins; what matters is that no markup reaches the attribute).
+  assert.equal(render('![![y](z)](w)'), '<p><img data-md-src="z" alt="![y">](w)</p>');
+  assert.equal(render('![`x`](./a.png)'), '<p><img data-md-src="./a.png" alt="x"></p>');
+  assert.equal(render('![`<b>`](./a.png)'), '<p><img data-md-src="./a.png" alt="&lt;b&gt;"></p>');
+});
+
+test('resolveLocalImagePath resolves against the document directory', () => {
+  const doc = '/home/u/notes/doc.md';
+  assert.equal(resolveLocalImagePath(doc, './pasted-image-20260916-160459.png'), '/home/u/notes/pasted-image-20260916-160459.png');
+  assert.equal(resolveLocalImagePath(doc, 'x.png'), '/home/u/notes/x.png');
+  assert.equal(resolveLocalImagePath(doc, '../img/x.png'), '/home/u/img/x.png');
+  assert.equal(resolveLocalImagePath(doc, '/abs/x.png'), '/abs/x.png');
+  assert.equal(resolveLocalImagePath(doc, 'my%20img.png?v=1#frag'), '/home/u/notes/my img.png');
+  assert.equal(resolveLocalImagePath(doc, '../../../../x.png'), '/x.png');
+  assert.equal(resolveLocalImagePath(doc, 'https://a.com/x.png'), null);
+  assert.equal(resolveLocalImagePath(doc, 'data:image/png;base64,AAAA'), null);
+  assert.equal(resolveLocalImagePath(doc, '//host/x.png'), null);
+  assert.equal(resolveLocalImagePath(doc, ''), null);
 });
 
 test('lists group consecutive items', () => {

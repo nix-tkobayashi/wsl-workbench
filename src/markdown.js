@@ -8,6 +8,8 @@
   // content never contains them, so restoring later can't collide with ordinary text (e.g. " 5 ").
   const CS_OPEN = String.fromCharCode(0xE000);
   const CS_CLOSE = String.fromCharCode(0xE001);
+  const PLACEHOLDER = new RegExp(CS_OPEN + '(\\d+)' + CS_CLOSE, 'g');
+  const HAS_SENTINEL = /[\uE000\uE001]/;
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => (
@@ -18,9 +20,11 @@
   // Only http(s) links become real anchors. Anything else (relative, mailto, javascript:, data:, …)
   // renders as plain text — so there's no <a> a middle-click/window-open could follow to bypass the
   // renderer's click handler, which only routes http(s) to the OS browser. URLs here are HTML-escaped.
+  // A URL that carries a placeholder (an image/code span matched inside it) is refused outright:
+  // placeholders restore to markup, and markup must never land inside an attribute.
   function safeLinkUrl(url) {
     const u = url.trim();
-    return /^https?:\/\//i.test(u) ? u : null;
+    return /^https?:\/\//i.test(u) && !HAS_SENTINEL.test(u) ? u : null;
   }
 
   function linkTag(text, url) {
@@ -30,24 +34,72 @@
 
   function imgTag(alt, url) {
     const u = url.trim();
-    // Only remote or data:image sources render; anything else (e.g. a local WSL path a <img> can't
-    // load) falls back to the alt text.
-    return /^(https?:|data:image\/)/i.test(u) ? `<img src="${u}" alt="${alt}">` : alt;
+    if (HAS_SENTINEL.test(u)) return alt; // see safeLinkUrl
+    // Remote and data:image sources render directly. A local reference (./x.png, ../img/x.png,
+    // /abs/x.png — issue #85) can't be an <img> src (the preview has no file origin), so it is
+    // emitted WITHOUT a src and the renderer resolves it against the document's directory via
+    // resolveLocalImagePath and loads the bytes over IPC. Any other scheme falls back to alt text.
+    if (/^(https?:|data:image\/)/i.test(u)) return `<img src="${u}" alt="${alt}">`;
+    return isLocalRef(u) ? `<img data-md-src="${u}" alt="${alt}">` : alt;
+  }
+
+  // A reference with no scheme and no host: relative or absolute path within the same filesystem.
+  // Anything with a scheme (http:, data:, file:, javascript:, …) or protocol-relative (//host/…)
+  // is not local. Windows drive letters never occur in WSL-side Markdown references.
+  function isLocalRef(ref) {
+    const u = String(ref || '').trim();
+    return !!u && !/^[a-z][a-z0-9+.-]*:/i.test(u) && !u.startsWith('//');
+  }
+
+  // Resolve a local image reference against the Markdown file's own directory to an absolute WSL
+  // path (POSIX; `docPath` is an absolute /… path). Query strings / fragments are dropped and
+  // percent-encoding decoded ("my%20img.png"). `..` never climbs above the root. Returns null for
+  // non-local references.
+  function resolveLocalImagePath(docPath, ref) {
+    if (!isLocalRef(ref)) return null;
+    let u = String(ref).trim().replace(/[?#].*$/, '');
+    try { u = decodeURIComponent(u); } catch { /* keep the raw text */ }
+    if (!u) return null;
+    const dir = String(docPath || '').replace(/[^/]*$/, ''); // "/a/b/c.md" -> "/a/b/"
+    const joined = u.startsWith('/') ? u : dir + u;
+    const out = [];
+    for (const part of joined.split('/')) {
+      if (!part || part === '.') continue;
+      if (part === '..') out.pop();
+      else out.push(part);
+    }
+    return '/' + out.join('/');
+  }
+
+  function emphasis(s) {
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>').replace(/_([^_]+)_/g, '<em>$1</em>');
+    return s.replace(/~~([^~]+)~~/g, '<del>$1</del>');
   }
 
   // Inline spans within a single block of text. Code spans are pulled out before escaping so their
-  // contents are shown verbatim and never re-interpreted as markup, then restored last.
+  // contents are shown verbatim and never re-interpreted as markup. Finished image / link tags are
+  // parked the same way so the emphasis pass can't rewrite a URL (`./my_plot_final.png` would
+  // otherwise become `./my<em>plot</em>final.png`); link text still gets emphasis. All parked
+  // fragments are restored last.
   function inline(text) {
-    const codes = [];
-    let s = String(text).replace(/`([^`]+)`/g, (_m, c) => { codes.push(c); return CS_OPEN + (codes.length - 1) + CS_CLOSE; });
+    const held = [];
+    const hold = (html) => { held.push(html); return CS_OPEN + (held.length - 1) + CS_CLOSE; };
+    // Held fragments nest (a code span inside link text, an image inside a link), so each restored
+    // fragment is itself restored; a fragment can only reference earlier ones, so this terminates.
+    const restore = (html) => html.replace(PLACEHOLDER, (_m, i) => restore(held[+i]));
+    // Attribute values (alt) must never receive restored markup: restore, then strip our own tags,
+    // which leaves only already-escaped text (e.g. the code span's contents).
+    const attrText = (v) => restore(v).replace(/<[^>]*>/g, '');
+    // The sentinels are private-use codepoints a file could technically contain; drop them from
+    // the source so a document can never forge (or loop) a placeholder reference.
+    let s = String(text).replace(/[\uE000\uE001]/g, '');
+    s = s.replace(/`([^`]+)`/g, (_m, c) => hold(`<code>${escapeHtml(c)}</code>`));
     s = escapeHtml(s);
-    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt, url) => imgTag(alt, url));
-    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, txt, url) => linkTag(txt, url));
-    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_]+)__/g, '<strong>$1</strong>');
-    s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>').replace(/_([^_]+)_/g, '<em>$1</em>');
-    s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>');
-    s = s.replace(new RegExp(CS_OPEN + '(\\d+)' + CS_CLOSE, 'g'), (_m, i) => `<code>${escapeHtml(codes[+i])}</code>`);
-    return s;
+    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt, url) => hold(imgTag(attrText(alt), url)));
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, txt, url) => hold(linkTag(emphasis(txt), url)));
+    s = emphasis(s);
+    return restore(s);
   }
 
   const LIST_ITEM = /^\s*([-*+]|\d+[.)])\s+/;
@@ -209,7 +261,7 @@
     return out.join('\n');
   }
 
-  const markdown = { render };
+  const markdown = { render, resolveLocalImagePath };
   if (typeof module !== 'undefined' && module.exports) module.exports = markdown;
   if (typeof window !== 'undefined') window.markdown = markdown;
 })();

@@ -3,8 +3,11 @@
 Lightweight Windows Electron app for working in WSL:
 
 - Left: WSL file explorer tree (shows the workspace contents directly)
-- Upper right: minimal text editor (`Ctrl+S` to save) with inline image preview
-- Lower right: WSL terminal for Claude Code
+- Upper right: minimal text editor (`Ctrl+S` to save, `Ctrl+F` / `Ctrl+H` find & replace) with
+  inline image preview (**Copy Image** button / `Ctrl+C` puts the picture on the clipboard)
+- Markdown preview (Preview / Edit toggle): GFM tables, Mermaid diagrams, images referenced by a
+  relative path (`![](./shot.png)`) next to the file, and `Ctrl+F` search inside the preview
+- Lower right: WSL terminal for Claude Code (◫ splits a tab into up to 8 side-by-side panes)
 - Landing screen on startup / New Window to pick a workspace
 - Terminal: right-click to copy (selection) / paste, drag a tree item in to insert its path,
   paste an image with `Ctrl+V` or right-click (Claude Code reads it as `[Image #N]`), and press any key to restart after `exit`
