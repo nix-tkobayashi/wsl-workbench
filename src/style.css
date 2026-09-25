@@ -22,65 +22,6 @@ body { margin:0; height:100vh; overflow:hidden; background:var(--bg); color:var(
 .attention-chip:hover { background:var(--hover); }
 .attention-chip::before { content:'●'; margin-right:5px; }
 .attention-chip.hidden { display:none; }
-/* Bell next to the chip: opens the notification history (this workspace's recent OSC 9 reports).
-   The count badge shows how many panes are waiting right now. */
-#notifyWrap { position:relative; flex:none; -webkit-app-region: no-drag; }
-.notify-bell { position:relative; display:flex; align-items:center; background:transparent; border:0; padding:5px 7px; border-radius:4px; color:var(--muted); cursor:pointer; }
-.notify-bell:hover, .notify-bell[aria-expanded="true"] { background:var(--hover); color:var(--text); }
-.notify-bell.lit { color:#e8a33d; }
-.notify-count { position:absolute; top:0; right:0; min-width:14px; height:14px; padding:0 3px; border-radius:7px; background:#e8a33d; color:#111; font-size:10px; font-weight:700; line-height:14px; text-align:center; }
-.notify-count.hidden { display:none; }
-.notify-panel { position:absolute; top:calc(100% + 4px); left:0; width:340px; max-height:60vh; display:flex; flex-direction:column; background:var(--panel); border:1px solid #444; border-radius:6px; box-shadow:0 6px 20px rgba(0,0,0,.5); z-index:50; font-size:12px; }
-.notify-panel.hidden { display:none; }
-.notify-head { display:flex; align-items:center; justify-content:space-between; padding:6px 10px; border-bottom:1px solid var(--border); font-weight:600; }
-.notify-clear { background:transparent; border:0; padding:2px 6px; color:var(--muted); font-size:11px; cursor:pointer; }
-.notify-clear:hover:not(:disabled) { background:var(--hover); color:var(--text); }
-.notify-list { overflow:auto; min-height:0; }
-.notify-empty { padding:14px 10px; color:var(--muted); text-align:center; }
-.notify-item { display:grid; grid-template-columns:auto 1fr auto; gap:8px; align-items:center; width:100%; padding:6px 10px; background:transparent; border:0; border-bottom:1px solid var(--border); border-radius:0; color:var(--text); text-align:left; cursor:pointer; }
-.notify-item:last-child { border-bottom:0; }
-.notify-item:hover:not(:disabled) { background:var(--hover); }
-.notify-item:disabled { cursor:default; }
-.notify-item.stale { color:var(--muted); }
-.notify-item .notify-dot { color:#e8a33d; visibility:hidden; }
-.notify-item.waiting .notify-dot { visibility:visible; }
-.notify-item .notify-main { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.notify-item .notify-pane { color:var(--muted); }
-.notify-item .notify-time { color:var(--muted); font-variant-numeric:tabular-nums; }
-/* Windows notifications (Slack, Outlook, ...) relayed by the notification bridge: avatar letter,
-   two-line app·title / body preview, and an "Ask" button that pastes it into the active terminal. */
-.notify-item.notify-system { cursor:default; align-items:start; }
-.notify-avatar { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; border-radius:50%; background:#555; color:#fff; font-size:11px; font-weight:700; margin-top:1px; }
-.notify-avatar.cat-communication { background:#4a154b; }
-.notify-avatar.cat-security { background:#b23b3b; }
-.notify-avatar.cat-system { background:#2b6cb0; }
-.notify-item .notify-system-main { display:flex; flex-direction:column; gap:2px; white-space:normal; }
-.notify-system-head { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.notify-system-body { color:var(--muted); overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; word-break:break-word; }
-.notify-side { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
-.notify-ask { background:transparent; border:1px solid var(--border); border-radius:4px; padding:1px 7px; color:var(--text); font-size:11px; cursor:pointer; }
-.notify-ask:hover { background:var(--hover); border-color:#e8a33d; }
-.notify-status { padding:4px 10px; border-top:1px solid var(--border); color:var(--muted); font-size:11px; }
-.notify-status.hidden { display:none; }
-.notify-head-actions { display:flex; gap:2px; }
-.notify-mute:hover { border-color:#b23b3b; }
-.notify-mute-menu { position:absolute; right:6px; min-width:180px; max-width:300px; display:flex; flex-direction:column; background:var(--panel); border:1px solid #444; border-radius:6px; box-shadow:0 6px 20px rgba(0,0,0,.5); z-index:60; overflow:hidden; }
-.notify-mute-option { background:transparent; border:0; padding:6px 10px; color:var(--text); font-size:12px; text-align:left; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.notify-mute-option:hover { background:var(--hover); }
-.excl-box { min-width:520px; max-width:640px; }
-.excl-add { display:grid; grid-template-columns:1fr 1fr 1fr auto; gap:6px; margin-bottom:10px; }
-.excl-add input { min-width:0; background:#1e1e1e; color:var(--text); border:1px solid #444; border-radius:5px; padding:5px 8px; font-size:12px; }
-.excl-add button { flex:none; }
-.excl-list { max-height:45vh; overflow:auto; border:1px solid var(--border); border-radius:6px; font-size:12px; }
-.notify-excl-empty { padding:12px 10px; color:var(--muted); text-align:center; }
-.notify-excl-row { display:grid; grid-template-columns:1fr 1fr 1fr auto; align-items:center; gap:6px; padding:5px 10px; border-bottom:1px solid var(--border); }
-.notify-excl-row:last-child { border-bottom:0; }
-.notify-excl-text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); }
-.notify-excl-text.excl-any { color:var(--muted); }
-.notify-excl-remove { flex:none; background:transparent; border:0; padding:0 6px; color:var(--muted); font-size:13px; cursor:pointer; border-radius:3px; }
-.notify-excl-remove:hover { background:var(--hover); color:#b23b3b; }
-.excl-section { margin:10px 0 6px; font-size:12px; font-weight:600; color:var(--muted); }
-.notify-excl-row.route-row { grid-template-columns:1fr auto auto; }
 .route-autosend { display:inline-flex; align-items:center; gap:4px; color:var(--muted); font-size:11px; cursor:pointer; white-space:nowrap; }
 .route-autosend input { accent-color:var(--accent); margin:0; }
 button { background:#2a2a2a; color:var(--text); border:1px solid #444; padding:5px 10px; border-radius:6px; cursor:pointer; }

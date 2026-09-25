@@ -130,8 +130,6 @@ function applyLanguage() {
   // Re-label open terminal tabs in the new language (custom pane names, if set, are kept).
   for (const group of termGroups.values()) renderTermTab(group);
   refreshAttentionChip(); // its text mixes pane names and the localized waiting word
-  if (!notifyPanel.classList.contains('hidden')) renderNotifyList(); // kind words + empty text
-  if (typeof renderSystemNotificationStatus === 'function') renderSystemNotificationStatus();
   renderUnsupportedText();
   refreshEditorTabs(); // the read-only tooltip on force-opened tabs is localized
   refreshUpdateBtn(); // its tooltip is built manually (has a {version} slot), not via data-i18n
@@ -331,17 +329,8 @@ function jumpToPane(entry) {
   activateTerminal(group.id);
 }
 
-// --- Desktop toast for an OSC 9 report + the bell dropdown (notification center). The bell lists
-// Windows notifications only (see addSystemNotification); terminal reports do NOT enter it
-// (issue #78) — they show as the pane badge / chip, and as a toast when the user isn't looking at
-// this workspace (window unfocused / minimized or tab hidden) — a visible pane already shows its badge.
-const notifyBell = document.getElementById('notifyBell');
-const notifyCount = document.getElementById('notifyCount');
-const notifyPanel = document.getElementById('notifyPanel');
-const notifyList = document.getElementById('notifyList');
-const notifyClear = document.getElementById('notifyClear');
-let notifications = []; // Windows notification entries (notificationCenter.toHistoryEntry), newest first
-
+// --- Desktop toast for an OSC 9 report: raised only when the user isn't looking at this
+// workspace (window unfocused / minimized or tab hidden) — a visible pane already shows its badge.
 function maybeToast(entry) {
   const focused = document.hasFocus();
   const visible = document.visibilityState === 'visible';
@@ -360,428 +349,6 @@ function maybeToast(entry) {
     };
   } catch {}
 }
-
-function renderNotifyList() {
-  notifyList.textContent = '';
-  if (!notifications.length) {
-    const empty = document.createElement('div');
-    empty.className = 'notify-empty';
-    empty.textContent = t('attention.historyEmpty');
-    notifyList.appendChild(empty);
-    notifyClear.disabled = true;
-    return;
-  }
-  notifyClear.disabled = false;
-  for (const n of notifications) {
-    if (n.source === 'windows') notifyList.appendChild(renderSystemNotifyItem(n));
-  }
-}
-
-function openNotifyPanel() {
-  for (const n of notifications) if (n.source === 'windows') n.read = true;
-  renderNotifyList();
-  refreshAttentionChip(); // unread count → bell badge
-  notifyPanel.classList.remove('hidden');
-  notifyBell.setAttribute('aria-expanded', 'true');
-}
-function closeNotifyPanel() {
-  closeMuteMenu();
-  notifyPanel.classList.add('hidden');
-  notifyBell.setAttribute('aria-expanded', 'false');
-}
-notifyBell.addEventListener('click', (event) => {
-  event.stopPropagation();
-  if (notifyPanel.classList.contains('hidden')) openNotifyPanel(); else closeNotifyPanel();
-});
-notifyPanel.addEventListener('click', (event) => event.stopPropagation());
-notifyClear.addEventListener('click', () => { notifications = []; renderNotifyList(); refreshAttentionChip(); });
-document.addEventListener('click', closeNotifyPanel);
-document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeNotifyPanel(); });
-
-// --- Windows notification center (issue #73): OS toasts (Slack, Outlook, Teams, ...) relayed by the
-// main-process bridge land in the same bell list as the terminal reports. Each row offers "Ask":
-// the notification is pasted verbatim into the active terminal pane (bracketed paste, no Enter)
-// so the CLI there — Claude Code, codex, ... — gets it as a question the user can still edit.
-// Nothing is sent to an AI automatically; the user's click is the trigger.
-const notifyStatus = document.getElementById('notifyStatus');
-let systemNotificationStatus = { status: 'disabled' };
-
-function addSystemNotification(payload) {
-  const n = window.notificationCenter.normalizeSystemNotification({ type: 'notification', event: payload && payload.event,
-    id: payload && payload.windowsNotificationId, app: payload && payload.app && payload.app.name,
-    appId: payload && payload.app && payload.app.id, title: payload && payload.title, body: payload && payload.body,
-    timestamp: payload && payload.timestamp, link: payload && payload.link, workspace: payload && payload.workspace,
-    slack: payload && payload.slack });
-  if (!n) return;
-  const known = window.notificationCenter.hasEntry(notifications, n);
-  if (n.event === 'removed' && known) {
-    // History is kept (design §25); the row just loses its "still in the notification center" mark.
-    for (const e of notifications) if (e.source === 'windows' && e.windows.notificationId === n.windowsNotificationId) e.windows.active = false;
-  } else if (!known && (n.event !== 'removed' || n.app.name || n.title || n.body)) {
-    // A bare "removed" for something we never showed is nothing; a buffered one (view opened after
-    // the dismissal) still carries its text and lands as an already-greyed, already-read row.
-    const entry = window.notificationCenter.toHistoryEntry(n);
-    if (n.event !== 'added') entry.read = true; // pre-existing / dismissed toasts were already seen in Windows
-    if (n.event === 'removed') entry.windows.active = false;
-    notifications = window.notificationLog.pushNotification(notifications, entry);
-    refreshAttentionChip();
-  }
-  if (!notifyPanel.classList.contains('hidden')) renderNotifyList();
-}
-
-function renderSystemNotifyItem(n) {
-  const item = document.createElement('div');
-  item.className = 'notify-item notify-system' + (n.windows && n.windows.active === false ? ' stale' : '');
-  const avatar = document.createElement('span');
-  avatar.className = `notify-avatar cat-${n.category || 'other'}`;
-  avatar.textContent = window.notificationCenter.appInitial(n.app);
-  const main = document.createElement('span');
-  main.className = 'notify-main notify-system-main';
-  const head = document.createElement('span');
-  head.className = 'notify-system-head';
-  // Slack (via the toast payload): "Slack · Ubiregi · #to-team-dev"; others fall back to app · title.
-  head.textContent = [n.app, n.workspace, n.title].filter(Boolean).join(' · ');
-  head.title = head.textContent;
-  const body = document.createElement('span');
-  body.className = 'notify-system-body';
-  body.textContent = window.notificationCenter.bodyPreview(n.body);
-  body.title = String(n.body || '');
-  main.append(head, body);
-  const side = document.createElement('span');
-  side.className = 'notify-side';
-  const time = document.createElement('span');
-  time.className = 'notify-time';
-  time.textContent = window.notificationLog.formatClock(n.time);
-  const ask = document.createElement('button');
-  ask.className = 'notify-ask';
-  ask.textContent = t('notify.ask');
-  ask.title = t('notify.askHint');
-  ask.addEventListener('click', (event) => { event.stopPropagation(); closeNotifyPanel(); askInTerminal(n); });
-  const mute = document.createElement('button');
-  mute.className = 'notify-ask notify-mute';
-  mute.textContent = t('notify.mute');
-  mute.title = t('notify.muteHint');
-  mute.addEventListener('click', (event) => { event.stopPropagation(); openMuteMenu(mute, n); });
-  side.append(time, ask, mute);
-  if (n.slack) {
-    // Slack only: the binding needs the channel ids from the toast's launch URI.
-    const bind = document.createElement('button');
-    bind.className = 'notify-ask notify-bind';
-    bind.textContent = t('notify.bind');
-    bind.title = t('notify.bindHint');
-    bind.addEventListener('click', (event) => { event.stopPropagation(); openBindMenu(bind, n); });
-    side.append(bind);
-  }
-  item.append(avatar, main, side);
-  return item;
-}
-
-// --- 通知除外設定 (issue #75). "Mute" on a row offers rules scoped from the row itself: the whole
-// app, this workspace (Slack: the toast header), or this title (Slack: the channel). Rules are
-// managed in main (settings.json) and mirrored to every view; the settings modal (bell panel's
-// "Excluded" button, or the Workspace menu) lists every rule with per-rule removal and manual add.
-const notifyExclToggle = document.getElementById('notifyExclToggle');
-const exclModal = document.getElementById('exclModal');
-const exclModalList = document.getElementById('exclModalList');
-const exclAddApp = document.getElementById('exclAddApp');
-const exclAddWorkspace = document.getElementById('exclAddWorkspace');
-const exclAddTitle = document.getElementById('exclAddTitle');
-let notificationExclusions = [];
-let muteMenu = null;
-
-function closeMuteMenu() {
-  if (muteMenu) { muteMenu.remove(); muteMenu = null; }
-}
-
-function openMuteMenu(anchor, n) {
-  closeMuteMenu();
-  const menu = document.createElement('div');
-  menu.className = 'notify-mute-menu';
-  const scopes = [
-    { key: 'notify.muteApp', value: n.app, rule: { app: n.app } },
-    { key: 'notify.muteWorkspace', value: n.workspace, rule: { app: n.app, workspace: n.workspace } },
-    { key: n.slack ? 'notify.muteChannel' : 'notify.muteTitle', value: n.title, rule: { app: n.app, workspace: n.workspace, title: n.title } }
-  ];
-  for (const scope of scopes) {
-    if (!scope.value) continue;
-    const btn = document.createElement('button');
-    btn.className = 'notify-mute-option';
-    btn.textContent = t(scope.key).replace('{v}', scope.value);
-    btn.addEventListener('click', (event) => {
-      event.stopPropagation();
-      closeMuteMenu();
-      addExclusionRule(scope.rule);
-    });
-    menu.appendChild(btn);
-  }
-  if (!menu.childElementCount) return;
-  menu.addEventListener('click', (event) => event.stopPropagation());
-  notifyPanel.appendChild(menu);
-  // Under the button, right-aligned to the panel edge, clamped so it never overflows the panel.
-  const panelBox = notifyPanel.getBoundingClientRect();
-  const anchorBox = anchor.getBoundingClientRect();
-  menu.style.top = `${Math.max(0, anchorBox.bottom - panelBox.top + 2)}px`;
-  menu.style.right = '6px';
-  muteMenu = menu;
-}
-document.addEventListener('click', closeMuteMenu);
-
-// "Bind" menu: pick which pane of THIS workspace future toasts from the channel go to. Reuses the
-// mute-menu chrome (one floating menu at a time — closeMuteMenu clears both).
-function openBindMenu(anchor, n) {
-  closeMuteMenu();
-  if (!n.slack || !config) return;
-  const menu = document.createElement('div');
-  menu.className = 'notify-mute-menu';
-  for (const entry of terminals.values()) {
-    const paneName = paneTabText(entry);
-    const btn = document.createElement('button');
-    btn.className = 'notify-mute-option';
-    btn.textContent = t('notify.bindTo').replace('{v}', paneName);
-    btn.addEventListener('click', (event) => {
-      event.stopPropagation();
-      closeMuteMenu();
-      addRoute({
-        teamId: n.slack.teamId, channelId: n.slack.channelId,
-        workspace: window.notificationCenter.workspaceKey(config.distro, config.wslPath),
-        paneId: entry.bindId, pane: paneName,
-        autoSend: false, workspaceName: n.workspace, channelName: n.title
-      });
-    });
-    menu.appendChild(btn);
-  }
-  if (!menu.childElementCount) { alert(t('notify.askNoTerminal')); return; }
-  menu.addEventListener('click', (event) => event.stopPropagation());
-  notifyPanel.appendChild(menu);
-  const panelBox = notifyPanel.getBoundingClientRect();
-  const anchorBox = anchor.getBoundingClientRect();
-  menu.style.top = `${Math.max(0, anchorBox.bottom - panelBox.top + 2)}px`;
-  menu.style.right = '6px';
-  muteMenu = menu;
-}
-
-// Mutations are deltas (add / remove one rule) resolved against main's authoritative list, so
-// concurrent edits — double-clicks here or another window saving at the same time — can't
-// overwrite each other. The exclSaving flag just keeps this view from stacking its own requests.
-let exclSaving = false;
-
-async function mutateExclusions(call) {
-  if (exclSaving) return false;
-  exclSaving = true;
-  try {
-    const res = await call();
-    if (res && res.ok) { applyExclusions(res.exclusions); return true; }
-  } catch {} finally { exclSaving = false; }
-  return false;
-}
-
-function addExclusionRule(rule) {
-  return mutateExclusions(() => window.api.addNotificationExclusion(rule));
-}
-
-function removeExclusionRule(index) {
-  const rule = notificationExclusions[index];
-  if (!rule) return Promise.resolve(false);
-  return mutateExclusions(() => window.api.removeNotificationExclusion(rule));
-}
-
-// New rules also retire what is already on screen; the terminal-report entries are untouched.
-function applyExclusions(list) {
-  notificationExclusions = Array.isArray(list) ? list : [];
-  notifications = notifications.filter((e) => e.source !== 'windows'
-    || !window.notificationCenter.isExcluded({ app: e.app, workspace: e.workspace, title: e.title }, notificationExclusions));
-  renderExclusionList();
-  if (!notifyPanel.classList.contains('hidden')) renderNotifyList();
-  refreshAttentionChip();
-}
-
-function renderExclusionList() {
-  exclModalList.textContent = '';
-  if (!notificationExclusions.length) {
-    const empty = document.createElement('div');
-    empty.className = 'notify-excl-empty';
-    empty.textContent = t('notify.exclusionsEmpty');
-    exclModalList.appendChild(empty);
-    return;
-  }
-  notificationExclusions.forEach((rule, index) => {
-    const row = document.createElement('div');
-    row.className = 'notify-excl-row';
-    for (const field of ['app', 'workspace', 'title']) {
-      const cell = document.createElement('span');
-      cell.className = 'notify-excl-text' + (rule[field] ? '' : ' excl-any');
-      cell.textContent = rule[field] || t('notify.exclAny');
-      cell.title = cell.textContent;
-      row.appendChild(cell);
-    }
-    const remove = document.createElement('button');
-    remove.className = 'notify-excl-remove';
-    remove.textContent = '×';
-    remove.title = t('notify.exclusionRemove');
-    remove.addEventListener('click', (event) => { event.stopPropagation(); removeExclusionRule(index); });
-    row.appendChild(remove);
-    exclModalList.appendChild(row);
-  });
-}
-
-function openExclusionSettings() {
-  renderExclusionList();
-  renderRouteList();
-  exclModal.classList.remove('hidden');
-  exclAddApp.focus();
-}
-function closeExclusionSettings() {
-  exclModal.classList.add('hidden');
-}
-
-async function addExclusionFromForm() {
-  const rule = { app: exclAddApp.value.trim(), workspace: exclAddWorkspace.value.trim(), title: exclAddTitle.value.trim() };
-  if (!rule.app && !rule.workspace && !rule.title) return;
-  // The form only clears on a confirmed save — a failed write keeps the input for a retry.
-  if (await addExclusionRule(rule)) {
-    exclAddApp.value = ''; exclAddWorkspace.value = ''; exclAddTitle.value = '';
-  }
-  exclAddApp.focus();
-}
-
-if (notifyExclToggle) {
-  notifyExclToggle.addEventListener('click', (event) => {
-    event.stopPropagation();
-    closeNotifyPanel();
-    openExclusionSettings();
-  });
-}
-document.getElementById('exclAdd').addEventListener('click', addExclusionFromForm);
-for (const input of [exclAddApp, exclAddWorkspace, exclAddTitle]) {
-  input.addEventListener('keydown', (event) => { if (event.key === 'Enter') addExclusionFromForm(); });
-}
-document.getElementById('exclClose').addEventListener('click', closeExclusionSettings);
-exclModal.addEventListener('mousedown', (event) => { if (event.target === exclModal) closeExclusionSettings(); });
-document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeExclusionSettings(); });
-window.api.onMenuNotificationExclusions(openExclusionSettings);
-window.api.onNotificationExclusions(applyExclusions);
-// Re-render after the initial fetch: the modal may already be open (menu click right after load)
-// and would otherwise sit on an empty list until the next exclusions event.
-window.api.notificationExclusions().then((list) => { notificationExclusions = Array.isArray(list) ? list : []; renderExclusionList(); }).catch(() => {});
-
-// --- Channel → terminal bindings (auto-ask, issue #77). Same delta/authority model as the
-// exclusions; the settings modal lists every binding with an auto-send toggle and removal.
-const routeModalList = document.getElementById('routeModalList');
-let notificationRoutes = [];
-let routeSaving = false;
-
-async function mutateRoutes(call) {
-  if (routeSaving) return false;
-  routeSaving = true;
-  try {
-    const res = await call();
-    if (res && res.ok) { applyRoutes(res.routes); return true; }
-  } catch {} finally { routeSaving = false; }
-  return false;
-}
-function addRoute(rule) { return mutateRoutes(() => window.api.addNotificationRoute(rule)); }
-function removeRoute(route) { return mutateRoutes(() => window.api.removeNotificationRoute(route)); }
-function setRouteAutoSend(route, autoSend) {
-  return mutateRoutes(() => window.api.setNotificationRouteAutoSend({ teamId: route.teamId, channelId: route.channelId, autoSend }));
-}
-
-function applyRoutes(list) {
-  notificationRoutes = Array.isArray(list) ? list : [];
-  renderRouteList();
-}
-
-function renderRouteList() {
-  routeModalList.textContent = '';
-  if (!notificationRoutes.length) {
-    const empty = document.createElement('div');
-    empty.className = 'notify-excl-empty';
-    empty.textContent = t('notify.routesEmpty');
-    routeModalList.appendChild(empty);
-    return;
-  }
-  for (const route of notificationRoutes) {
-    const row = document.createElement('div');
-    row.className = 'notify-excl-row route-row';
-    const text = document.createElement('span');
-    text.className = 'notify-excl-text';
-    text.textContent = `${route.channelName || route.channelId}（${route.workspaceName || route.teamId}）→ ${route.pane}`;
-    text.title = `${text.textContent} — ${route.workspace}`;
-    const toggle = document.createElement('label');
-    toggle.className = 'route-autosend';
-    toggle.title = t('notify.routeAutoSendHint');
-    const check = document.createElement('input');
-    check.type = 'checkbox';
-    check.checked = !!route.autoSend;
-    check.addEventListener('change', () => { setRouteAutoSend(route, check.checked); });
-    toggle.append(check, document.createTextNode(t('notify.routeAutoSend')));
-    const remove = document.createElement('button');
-    remove.className = 'notify-excl-remove';
-    remove.textContent = '×';
-    remove.title = t('notify.routeRemove');
-    remove.addEventListener('click', (event) => { event.stopPropagation(); removeRoute(route); });
-    row.append(text, toggle, remove);
-    routeModalList.appendChild(row);
-  }
-}
-
-// A routed toast lands in the bound pane as a ready-to-send question. Focus is never stolen: the
-// paste happens where it belongs and the pane's own UI (CLI echo) makes it visible. Enter is sent
-// only when the rule opted in AND the pane speaks bracketed paste (a CLI is running) — a plain
-// shell never gets an auto-executed line.
-window.api.onNotificationAutoAsk((payload) => {
-  if (!payload || !payload.notification) return;
-  const n = payload.notification;
-  let target = null;
-  for (const e of terminals.values()) if (e.bindId === payload.paneId) { target = e; break; }
-  if (!target) return; // pane closed (or bound in another view): the toast stays a normal bell entry
-  const multiline = !!(target.term.modes && target.term.modes.bracketedPasteMode);
-  // Auto-Enter fires only into an AI CLI that is *right now* waiting for input: bracketed paste
-  // alone is not proof of a CLI (bash 5.1+ speaks it too, and Enter there would EXECUTE the
-  // notification text as commands). cliReported = an OSC 9 report arrived and no shell prompt
-  // (OSC 7) or pty exit followed; attention lit = that report is the pane's latest event and no
-  // keystroke touched the pane since — and leaving a CLI always takes keystrokes (/exit, Ctrl+C),
-  // which clear it. Decided BEFORE pasting, because the paste itself clears the attention badge.
-  const autoEnter = payload.autoSend === true && multiline && target.cliReported === true && target.attention != null;
-  const text = window.notificationCenter.sanitizeForPaste(window.notificationCenter.askPrompt(
-    { app: n.app && n.app.name, workspace: n.workspace, title: n.title, link: n.link, body: n.body },
-    { lead: t('notify.autoAskLead') }), { multiline });
-  target.term.paste(text);
-  if (autoEnter) writeUserInput(target, '\r');
-});
-
-window.api.onNotificationRoutes(applyRoutes);
-window.api.notificationRoutes().then((list) => { notificationRoutes = Array.isArray(list) ? list : []; renderRouteList(); }).catch(() => {});
-
-// Paste the notification into the active pane of the current terminal tab (or the first live pane).
-function askInTerminal(n) {
-  let entry = activeTerminal();
-  if (!entry) for (const e of terminals.values()) { entry = e; break; }
-  if (!entry) { alert(t('notify.askNoTerminal')); return; }
-  jumpToPane(entry);
-  if (entry.attention != null) clearPaneAttention(entry);
-  // Multi-line only when the app in the pane speaks bracketed paste (Claude Code, codex, ...);
-  // a plain shell would execute each line, so there the text is flattened to one line.
-  const multiline = !!(entry.term.modes && entry.term.modes.bracketedPasteMode);
-  entry.term.paste(window.notificationCenter.sanitizeForPaste(window.notificationCenter.askPrompt(n, { lead: t('notify.askLead') }), { multiline }));
-  entry.term.focus();
-}
-
-function renderSystemNotificationStatus() {
-  if (!notifyStatus) return;
-  const key = `notify.status.${systemNotificationStatus.status || 'disabled'}`;
-  const text = t(key);
-  notifyStatus.textContent = text === key ? '' : text;
-  notifyStatus.classList.toggle('hidden', !notifyStatus.textContent);
-}
-
-window.api.onSystemNotification(addSystemNotification);
-window.api.onSystemNotificationStatus((s) => { systemNotificationStatus = s || { status: 'disabled' }; renderSystemNotificationStatus(); });
-window.api.systemNotificationState().then((state) => {
-  if (!state) return;
-  systemNotificationStatus = state.status || { status: 'disabled' };
-  renderSystemNotificationStatus();
-  for (const n of (state.notifications || []).slice().reverse()) addSystemNotification(n);
-}).catch(() => {});
 
 // nativeImage lives in the main process, so the overlay dot travels as a data URL.
 function attentionOverlayIcon() {
@@ -806,11 +373,6 @@ function refreshAttentionChip() {
     appName: 'WSL Workbench',
     kindWords: attentionKindWords()
   });
-  // Bell badge = unread Windows notifications only; waiting panes show on the chip / title / tabs.
-  const badge = window.notificationCenter.unreadCount(notifications);
-  notifyBell.classList.toggle('lit', badge > 0);
-  notifyCount.classList.toggle('hidden', badge === 0);
-  notifyCount.textContent = badge ? String(badge) : '';
   attentionChip.classList.toggle('hidden', !summary);
   attentionChip.textContent = summary ? summary.chip : '';
   attentionChip.title = summary ? t('attention.jumpHint') : '';
@@ -1057,10 +619,7 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   const id = nextTermId++;
   const host = document.createElement('div');
   host.className = 'term-pane';
-  // bindId: globally unique, stable for the pane's lifetime — the identity notification routes
-  // target (display names are neither unique nor language-stable). Panes don't survive an app
-  // restart, so neither do bindings to them; a stale route simply stops firing until re-bound.
-  const entry = { id, groupId: group.id, bindId: crypto.randomUUID(), term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null, attention: null, attentionKind: '' };
+  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null, attention: null, attentionKind: '' };
   if (group.paneIds.length > 0) {
     entry.divider = makeTermDivider(group);
     group.container.appendChild(entry.divider);
@@ -1084,25 +643,14 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   // Split Terminal / New Terminal read it so a new shell starts where the user actually is.
   term.parser.registerOscHandler(7, (payload) => {
     const parsed = window.terminalActions.parseOsc7Cwd(payload);
-    if (parsed) {
-      entry.cwd = parsed;
-      // OSC 7 comes from the shell's PROMPT_COMMAND, i.e. only when a shell prompt is drawn — so
-      // its arrival means the AI CLI gave the terminal back to the shell. Auto-send must not fire
-      // into that shell, however recently a CLI reported from here.
-      entry.cliReported = false;
-    }
+    if (parsed) entry.cwd = parsed;
     return true;
   });
   // OSC 9 = "waiting for your input" from an AI CLI (Claude Code Stop hook, codex notify, ...):
   // light this pane's attention badge. Progress-style payloads return null and pass silently.
   term.parser.registerOscHandler(9, (payload) => {
     const parsed = window.terminalActions.parseOsc9Attention(payload);
-    if (parsed) {
-      setPaneAttention(entry, parsed);
-      // Evidence an AI CLI runs in this pane — the auto-send gate requires it (bracketed paste
-      // alone is not proof: bash 5.1+ enables it too). Cleared when the shell exits/restarts.
-      entry.cliReported = true;
-    }
+    if (parsed) setPaneAttention(entry, parsed);
     return true;
   });
   // Per-pane close (shown only while split): kills this pane's shell and gives its space back.
@@ -1246,7 +794,6 @@ window.api.onTerminalExit((id) => {
   const entry = terminals.get(id);
   if (!entry) return;
   entry.exited = true;
-  entry.cliReported = false; // whatever CLI reported from here is gone with the shell
   entry.term.write(`\r\n\x1b[90m${t('terminal.restartHint')}\x1b[0m\r\n`);
 });
 
@@ -3026,8 +2573,7 @@ let renderGeneration = 0;
 function treeInteractionBusy() {
   return currentTreeDragPath !== null
     || !document.getElementById('contextMenu').classList.contains('hidden')
-    || !promptModal.classList.contains('hidden')
-    || !exclModal.classList.contains('hidden');
+    || !promptModal.classList.contains('hidden');
 }
 
 async function pollTreeChanges() {
