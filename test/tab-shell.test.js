@@ -76,9 +76,8 @@ test('nextActiveTab: closing the active tab activates its right neighbor, else t
   assert.equal(nextActiveTab([1], 1, 1), null);    // nothing remains
 });
 
-test('shellWindowTitle: active workspace plus the attention mark when a CLI waits', () => {
+test('shellWindowTitle: active workspace plus the app name; app name alone without one', () => {
   assert.equal(shellWindowTitle({ activeTitle: 'nix/wb' }), 'nix/wb — WSL Workbench');
-  assert.equal(shellWindowTitle({ activeTitle: 'nix/wb', attentionCount: 2 }), '● nix/wb — WSL Workbench');
   assert.equal(shellWindowTitle({}), 'WSL Workbench');
 });
 

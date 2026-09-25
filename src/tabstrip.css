@@ -11,8 +11,6 @@ body { margin:0; overflow:hidden; background:var(--bg); color:var(--text); font-
 .wtab:hover { background:var(--hover); }
 .wtab.active { background:#1e1e1e; color:var(--text); }
 .wtab-title { overflow:hidden; text-overflow:ellipsis; }
-/* Attention dot: a CLI in this tab's workspace waits for user input (same amber as in-view badges). */
-.wtab.attention .wtab-title::before { content:'●'; color:#e8a33d; margin-right:5px; }
 .wtab-close { width:16px; height:16px; line-height:14px; text-align:center; border-radius:3px; color:var(--muted); flex:none; }
 .wtab-close:hover { background:#555; color:#fff; }
 /* Drag feedback: the grabbed tab follows the pointer inside the strip, dims when torn outside. */

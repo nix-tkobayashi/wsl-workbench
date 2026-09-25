@@ -129,7 +129,6 @@ function applyLanguage() {
   updateSplitButton(); // its tooltip switches with the pane count, not only the language
   // Re-label open terminal tabs in the new language (custom pane names, if set, are kept).
   for (const group of termGroups.values()) renderTermTab(group);
-  refreshAttentionChip(); // its text mixes pane names and the localized waiting word
   renderUnsupportedText();
   refreshEditorTabs(); // the read-only tooltip on force-opened tabs is localized
   refreshUpdateBtn(); // its tooltip is built manually (has a {version} slot), not via data-i18n
@@ -270,129 +269,10 @@ function setActivePane(group, paneId) {
 // Every PANE has its own name (Cursor-style): custom when set, else localized "Terminal <pane id>".
 function paneTabText(entry) { return entry.name || `${t('terminal.tab')} ${entry.id}`; }
 
-// --- Attention badges: a pane lights up when its CLI reports "finished, waiting for your input"
-// (OSC 9 — e.g. a Claude Code Stop hook or codex notify), and goes dark on the next keystroke into
-// that pane. Never idle-based: only the explicit notification turns it on, so a merely quiet
-// terminal is never marked. Surfaced in three places driven by one summary: the pane's tab
-// segment, the menubar chip (top-left), and the window title + taskbar overlay (for a window
-// that's behind others). ---
-const attentionChip = document.getElementById('attentionChip');
-let attentionIconUrl = null; // 16x16 orange dot for the taskbar overlay, drawn once
-
-function waitingPanes() {
-  const items = [];
-  for (const e of terminals.values()) if (e.attention != null) items.push(e);
-  return items;
-}
-
-// Toggle the segment dots in place (same reason as refreshTabSegmentFocus: no node rebuild).
-function refreshTabAttention(group) {
-  const label = group.tab && group.tab.querySelector('.term-tab-label');
-  if (!label) return;
-  for (const el of label.querySelectorAll('.term-tab-seg')) {
-    const e = terminals.get(Number(el.dataset.paneId));
-    el.classList.toggle('attention', !!(e && e.attention != null));
-  }
-}
-
-function setPaneAttention(entry, { label = '', kind = '' } = {}) {
-  entry.attention = label; // '' = unnamed notification; displays fall back to the pane name
-  entry.attentionKind = kind; // 'done' / 'permission' / '' (or a custom word from another tool)
-  const group = termGroups.get(entry.groupId);
-  if (group) refreshTabAttention(group);
-  maybeToast(entry);
-  refreshAttentionChip();
-}
-
-function clearPaneAttention(entry) {
-  entry.attention = null;
-  entry.attentionKind = '';
-  const group = termGroups.get(entry.groupId);
-  if (group) refreshTabAttention(group);
-  refreshAttentionChip();
-}
-
-// Localized words for the `;kind` field of an OSC 9 report (see parseOsc9Attention).
-function attentionKindWords() {
-  return { done: t('attention.kind.done'), permission: t('attention.kind.permission') };
-}
-
-function attentionTitleFor(entry) {
-  return window.terminalActions.attentionTitle({ label: entry.attention || '', kind: entry.attentionKind || '', kindWords: attentionKindWords() });
-}
-
-// Bring a pane to the front (its terminal tab active, the pane focused).
-function jumpToPane(entry) {
-  const group = termGroups.get(entry.groupId);
-  if (!group) return;
-  setActivePane(group, entry.id);
-  activateTerminal(group.id);
-}
-
-// --- Desktop toast for an OSC 9 report: raised only when the user isn't looking at this
-// workspace (window unfocused / minimized or tab hidden) — a visible pane already shows its badge.
-function maybeToast(entry) {
-  const focused = document.hasFocus();
-  const visible = document.visibilityState === 'visible';
-  if (!window.notificationLog.shouldToast({ focused, visible })) return;
-  if (typeof Notification !== 'function' || Notification.permission === 'denied') return;
-  const text = window.notificationLog.toastText({
-    title: attentionTitleFor(entry),
-    paneName: paneTabText(entry),
-    workspace: config ? lastTwoSegmentsFor(config.wslPath) : ''
-  });
-  try {
-    const toast = new Notification(text.title, { body: text.body, silent: false });
-    toast.onclick = () => {
-      window.api.focusWorkspace();
-      if (terminals.get(entry.id) === entry) jumpToPane(entry);
-    };
-  } catch {}
-}
-
-// nativeImage lives in the main process, so the overlay dot travels as a data URL.
-function attentionOverlayIcon() {
-  if (attentionIconUrl) return attentionIconUrl;
-  const canvas = document.createElement('canvas');
-  canvas.width = 16;
-  canvas.height = 16;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#e8a33d';
-  ctx.beginPath();
-  ctx.arc(8, 8, 7, 0, Math.PI * 2);
-  ctx.fill();
-  attentionIconUrl = canvas.toDataURL('image/png');
-  return attentionIconUrl;
-}
-
-function refreshAttentionChip() {
-  const waiting = waitingPanes();
-  const summary = window.terminalActions.attentionSummary({
-    items: waiting.map((e) => ({ label: e.attention, kind: e.attentionKind, paneName: paneTabText(e) })),
-    waitingWord: t('attention.waiting'),
-    appName: 'WSL Workbench',
-    kindWords: attentionKindWords()
-  });
-  attentionChip.classList.toggle('hidden', !summary);
-  attentionChip.textContent = summary ? summary.chip : '';
-  attentionChip.title = summary ? t('attention.jumpHint') : '';
-  document.title = summary ? summary.docTitle : 'WSL Workbench';
-  window.api.setAttention({ count: waiting.length, icon: waiting.length ? attentionOverlayIcon() : '' });
-}
-
-// User-initiated pty writes that bypass term.onData (Shift+Enter newline, image-paste Ctrl+V)
-// must clear the badge the same way a plain keystroke does.
+// User-initiated pty writes that bypass term.onData (Shift+Enter newline, image-paste Ctrl+V).
 function writeUserInput(entry, data) {
-  if (entry.attention != null) clearPaneAttention(entry);
   window.api.terminalWrite({ id: entry.id, data });
 }
-
-// The chip jumps to the (first) waiting pane; once the user types there it clears, and the chip
-// moves on to the next waiting pane, so repeated clicks walk through all of them.
-attentionChip.addEventListener('click', () => {
-  const entry = waitingPanes()[0];
-  if (entry) jumpToPane(entry);
-});
 
 // Rebuild a tab's label: one clickable segment per pane, so split panes stay individually
 // selectable and renameable. Called whenever panes are added/closed/renamed/refocused and on
@@ -404,7 +284,7 @@ function renderTermTab(group) {
   const segments = window.terminalActions.buildTabSegments({
     panes: group.paneIds.map((pid) => {
       const e = terminals.get(pid) || {};
-      return { id: pid, name: e.name || null, attention: e.attention != null };
+      return { id: pid, name: e.name || null };
     }),
     activePaneId: group.activePaneId,
     defaultWord: t('terminal.tab')
@@ -417,7 +297,7 @@ function renderTermTab(group) {
       label.appendChild(sep);
     }
     const el = document.createElement('span');
-    el.className = 'term-tab-seg' + (seg.focused ? ' focused' : '') + (seg.attention ? ' attention' : '');
+    el.className = 'term-tab-seg' + (seg.focused ? ' focused' : '');
     el.dataset.paneId = String(seg.id);
     el.textContent = seg.label;
     el.title = t('terminal.renameHint');
@@ -489,7 +369,6 @@ async function pasteImageToTerminal(entry) {
 function wireTerminal(entry) {
   const { id, term } = entry;
   term.onData((data) => {
-    if (entry.attention != null) clearPaneAttention(entry); // the user responded: badge off
     if (entry.exited) { restartTerminal(entry); return; }
     window.api.terminalWrite({ id, data });
   });
@@ -498,7 +377,6 @@ function wireTerminal(entry) {
     if (event.type !== 'keydown') return true;
     // Shift+Enter inserts a newline like Alt+Enter: send ESC+CR so CLIs (e.g. Claude Code) treat it as a newline, not submit.
     if (event.key === 'Enter' && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
-      if (entry.attention != null) clearPaneAttention(entry); // Shift+Enter is user input too
       if (entry.exited) restartTerminal(entry);
       else window.api.terminalWrite({ id, data: '\x1b\r' });
       event.preventDefault();
@@ -619,7 +497,7 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   const id = nextTermId++;
   const host = document.createElement('div');
   host.className = 'term-pane';
-  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null, attention: null, attentionKind: '' };
+  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null };
   if (group.paneIds.length > 0) {
     entry.divider = makeTermDivider(group);
     group.container.appendChild(entry.divider);
@@ -644,13 +522,6 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   term.parser.registerOscHandler(7, (payload) => {
     const parsed = window.terminalActions.parseOsc7Cwd(payload);
     if (parsed) entry.cwd = parsed;
-    return true;
-  });
-  // OSC 9 = "waiting for your input" from an AI CLI (Claude Code Stop hook, codex notify, ...):
-  // light this pane's attention badge. Progress-style payloads return null and pass silently.
-  term.parser.registerOscHandler(9, (payload) => {
-    const parsed = window.terminalActions.parseOsc9Attention(payload);
-    if (parsed) setPaneAttention(entry, parsed);
     return true;
   });
   // Per-pane close (shown only while split): kills this pane's shell and gives its space back.
@@ -742,7 +613,6 @@ function closePane(paneId) {
   if (group.activePaneId === paneId) group.activePaneId = group.paneIds[group.paneIds.length - 1];
   refreshPaneChrome(group);
   renderTermTab(group); // drop the closed pane's tab segment
-  refreshAttentionChip(); // a waiting pane may have just gone away
   setTimeout(() => {
     fitGroupPanes(group);
     const focus = terminals.get(group.activePaneId);
@@ -763,7 +633,6 @@ function closeTerminal(groupId) {
   group.container.remove();
   group.tab.remove();
   termGroups.delete(groupId);
-  refreshAttentionChip(); // a waiting pane may have just gone away
   if (activeGroupId === groupId) {
     const next = termGroups.keys().next().value;
     if (next != null) activateTerminal(next);
@@ -783,7 +652,6 @@ function disposeAllTerminals() {
   terminals.clear();
   termGroups.clear();
   activeGroupId = null;
-  refreshAttentionChip();
 }
 
 window.api.onTerminalData(({ id, data }) => {

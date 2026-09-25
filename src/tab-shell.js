@@ -50,11 +50,10 @@
     return rest[Math.min(i, rest.length - 1)];
   }
 
-  // Window (taskbar / Alt+Tab) title: the active tab's workspace plus the attention mark when any
-  // tab's CLI is waiting for input — a background window stays identifiable either way.
-  function shellWindowTitle({ activeTitle = '', attentionCount = 0 } = {}) {
-    const base = activeTitle ? `${activeTitle} — WSL Workbench` : 'WSL Workbench';
-    return attentionCount > 0 ? `● ${base}` : base;
+  // Window (taskbar / Alt+Tab) title: the active tab's workspace, so a background window stays
+  // identifiable.
+  function shellWindowTitle({ activeTitle = '' } = {}) {
+    return activeTitle ? `${activeTitle} — WSL Workbench` : 'WSL Workbench';
   }
 
   const tabShell = { tabTitleForWorkspace, classifyTabDrop, startsTabDrag, insertionIndex, nextActiveTab, shellWindowTitle };

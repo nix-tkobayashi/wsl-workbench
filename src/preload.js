@@ -50,9 +50,6 @@ contextBridge.exposeInMainWorld('api', {
   onUpdateAvailable: (cb) => ipcRenderer.on('update:available', (_event, payload) => cb(payload)),
   onPerfStats: (cb) => ipcRenderer.on('perf:stats', (_event, payload) => cb(payload)),
   installUpdate: () => ipcRenderer.invoke('update:install'),
-  setAttention: (payload) => ipcRenderer.send('window:attention', payload),
-  // A desktop toast was clicked: bring this workspace's window to the front with its tab active.
-  focusWorkspace: () => ipcRenderer.send('window:focusWorkspace'),
   // Tab strip (shell windows only): render state pushed by main, user intent sent back.
   tabsReady: () => ipcRenderer.send('tabs:ready'),
   onTabsState: (cb) => ipcRenderer.on('tabs:state', (_event, state) => cb(state)),

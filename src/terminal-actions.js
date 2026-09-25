@@ -67,65 +67,8 @@
     return panes.map((p) => ({
       id: p.id,
       label: p.name || `${defaultWord} ${p.id}`,
-      focused: multi && p.id === activePaneId,
-      attention: !!p.attention
+      focused: multi && p.id === activePaneId
     }));
-  }
-
-  // Payload of an OSC 9 sequence → { label, kind } ("this pane's CLI finished and waits for input").
-  // OSC 9 is what a Claude Code Stop hook / codex notify emits; the payload names the tool (may be
-  // empty — the badge then falls back to the pane name) and may carry a second `;kind` field that
-  // says WHY it waits: "claude;done" (turn ended) vs "claude;permission" (approval prompt). Returns
-  // null for structured payloads like "4;1;50" (ConEmu / Windows Terminal progress reports share
-  // OSC 9 with a "<digit>;" prefix) so a build showing a progress bar never lights the badge.
-  // Control characters are stripped and both fields capped, since they land in the menubar chip,
-  // the window title and a desktop toast.
-  function parseOsc9Attention(payload) {
-    const text = String(payload == null ? '' : payload);
-    if (/^\d+;/.test(text)) return null;
-    const clean = (s) => s.replace(/[\x00-\x1f\x7f]/g, '').trim();
-    const [name, kind = ''] = text.split(';');
-    return { label: clean(name).slice(0, 32), kind: clean(kind).toLowerCase().slice(0, 16) };
-  }
-
-  // "claude · permission" / "claude" — the tool plus its localized kind word (unknown kinds show
-  // raw so a custom `;kind` from another tool still means something). Empty label → kind alone.
-  function attentionTitle({ label = '', kind = '', kindWords = {} } = {}) {
-    const word = kind ? (kindWords[kind] || kind) : '';
-    return [label, word].filter(Boolean).join(' · ');
-  }
-
-  // Chip + window-title text for the panes currently waiting on the user. One waiting pane names
-  // the tool (with its kind) and the pane ("codex · permission — Terminal 2"); several collapse to
-  // a count ("<waitingWord> (3)"). Returns null when nothing waits (chip hidden, title back to the
-  // plain app name).
-  function attentionSummary({ items = [], waitingWord = 'Waiting', appName = 'WSL Workbench', kindWords = {} } = {}) {
-    if (!items.length) return null;
-    const first = items[0];
-    const title = attentionTitle({ label: first.label, kind: first.kind, kindWords });
-    const one = title ? `${title} — ${first.paneName}` : String(first.paneName || '');
-    const chip = items.length === 1 ? one : `${waitingWord} (${items.length})`;
-    return { chip, docTitle: `● ${chip} — ${appName}` };
-  }
-
-  // Shell snippet run at pane startup: exports the pane's pty device (WSL_WORKBENCH_TTY=/dev/pts/N)
-  // so AI-CLI hooks can reach the pane without a controlling terminal. Claude Code runs its hooks
-  // in a new session (setsid; stdin is a socket), so `/dev/tty` fails there — the env var, inherited
-  // from the shell through the CLI to the hook, is the only PPID-independent route back to the pane.
-  const TTY_EXPORT = 'export WSL_WORKBENCH_TTY="$(tty 2>/dev/null)"';
-
-  // POSIX-sh one-liner for a hook / notify command that lights the badge for `name`. Resolution
-  // order: WSL_WORKBENCH_TTY (set above) → /dev/tty (a hook that does have a controlling terminal)
-  // → the parent process's stdout (the CLI itself writes to the pane). Only pts/tty devices are ever
-  // written to — the path is canonicalized (readlink -f: no `..` traversal, no symlink tricks) before
-  // the glob and a character-device check (`-c`) — so a stale or hostile value can't redirect it.
-  // `kind` (optional) becomes the second `;` field, e.g. osc9HookCommand('claude', 'permission').
-  function osc9HookCommand(name, kind) {
-    const clean = (v, n) => String(v == null ? '' : v).replace(/[^A-Za-z0-9_.-]/g, '').slice(0, n);
-    const label = clean(name, 32) + (kind ? ';' + clean(kind, 16) : '');
-    return 'T="${WSL_WORKBENCH_TTY:-}"; { [ -n "$T" ] && [ -w "$T" ]; } || ' +
-      '{ T=/dev/tty; ( : > /dev/tty ) 2>/dev/null || T="$(readlink /proc/$PPID/fd/1 2>/dev/null)"; }; ' +
-      'T="$(readlink -f -- "$T" 2>/dev/null)"; case "$T" in /dev/pts/*|/dev/tty*) [ -c "$T" ] && printf \'\\033]9;' + label + '\\007\' > "$T";; esac';
   }
 
   // Whether the active tab can take one more split pane (issue #84). Every pane is its own pty, so
@@ -139,7 +82,7 @@
     return next * paneMinWidth + (next - 1) * dividerWidth <= width ? 'ok' : 'room';
   }
 
-  const terminalActions = { splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, parseOsc9Attention, attentionTitle, attentionSummary, TTY_EXPORT, osc9HookCommand };
+  const terminalActions = { splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = terminalActions;
   }
