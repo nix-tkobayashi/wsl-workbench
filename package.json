@@ -1,6 +1,6 @@
 {
   "name": "wsl-workbench",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "description": "Lightweight WSL file tree, editor, and terminal workbench for AI CLIs",
   "main": "src/main.js",
   "scripts": {
@@ -29,9 +29,6 @@
     "files": [
       "src/**/*",
       "package.json"
-    ],
-    "extraResources": [
-      { "from": "native/notification-bridge/", "to": "native/", "filter": ["*.ps1"] }
     ],
     "win": {
       "icon": "build/icon.ico",

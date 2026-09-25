@@ -15,8 +15,6 @@ Lightweight Windows Electron app for working in WSL:
   permission it can notify the app via OSC 9 — the pane's tab segment and a top-left chip light up
   until you type in that pane, the taskbar icon gets an overlay dot, and a Windows toast appears
   when the window is behind others (see [Waiting-for-input badge](#waiting-for-input-badge-ai-clis))
-- Notification center: the bell next to the chip lists recent Windows toast notifications (Slack,
-  Outlook, Teams, ...) with Ask / Mute / Bind actions (terminal reports are not listed there)
 - Files the text editor can't show (binary, or not UTF-8 — `.xlsx`, `.zip`, ...) open as a
   guidance tab with an **Open Anyway** button that shows the raw bytes read-only
 - Tree auto-refreshes (files created in the terminal appear without a manual refresh)
@@ -57,9 +55,6 @@ The optional `<kind>` field says *why* the CLI waits, so the chip / toast read
 `claude · permission` (an approval prompt) or `claude · finished` (its turn ended) instead of just
 `claude`. `done` and `permission` are localized; any other word is shown as-is.
 
-Terminal reports are not listed in the bell's notification center — that panel is for Windows
-notifications only (see below); the badge, chip, title and toast are the whole story for a pane.
-
 Configure your CLIs to send it. The pane's shell exports `WSL_WORKBENCH_TTY=/dev/pts/N`, and the
 commands below write there — Claude Code runs hooks in a new session without a controlling
 terminal, so a plain `> /dev/tty` silently fails (#66). Outside Workbench the commands fall back
@@ -84,27 +79,6 @@ notify = ["/bin/sh", "-c", "T=\"${WSL_WORKBENCH_TTY:-}\"; { [ -n \"$T\" ] && [ -
 
 Any other tool works the same way: `printf '\033]9;mytool\007' > "$WSL_WORKBENCH_TTY"` at the
 moment it starts waiting (`printf '\033]9;mytool;permission\007'` to tag the kind).
-
-## Windows notification center (Slack, Outlook, Teams, ...)
-
-The bell lists **Windows toast notifications** — anything that lands in the Windows 11
-notification center (Slack, Outlook, Teams, Windows Security, ...) — newest first. Each row shows
-the app, title, a body preview and the time; unread ones count
-into the bell badge until you open the panel. Rows whose toast was dismissed in Windows stay listed
-but greyed out. Only the last 50 entries per workspace are kept, and nothing is stored on disk.
-
-**Ask** on a Windows row pastes the notification (app, title, full body) into the active terminal
-pane as a bracketed paste — without pressing Enter — so you can hand a Slack message straight to
-Claude Code / codex running there, edit the question, and submit it yourself. Notifications are
-never sent to an AI or anywhere else automatically.
-
-How it works: the main process runs `native/notification-bridge/notification-bridge.ps1`
-(Windows PowerShell, no extra install) which reads the notification list through the WinRT
-`UserNotificationListener` and streams it as NDJSON on stdout; it polls every 2 s (the change event
-only fires for packaged apps), skips the app's own toasts, and exits with the app. Windows asks for
-**notification access** the first time (Settings > Privacy & security > Notifications); if it is
-denied, or the helper cannot start, the panel's footer says so and everything else keeps working.
-Disable the feature with `"systemNotifications": { "enabled": false }` in `settings.json`.
 
 ## Run from source
 

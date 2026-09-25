@@ -10,16 +10,6 @@
   <div id="toolbar">
     <img id="appIcon" src="./app-icon.ico" alt="" />
     <button id="attentionChip" class="attention-chip hidden"></button>
-    <div id="notifyWrap">
-      <button id="notifyBell" class="notify-bell" data-i18n-title="attention.historyHint" title="Notification history" aria-haspopup="true" aria-expanded="false">
-        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M8 1.5a.75.75 0 0 1 .75.75v.53A4.5 4.5 0 0 1 12.5 7.25v2.6l1.2 1.8a.75.75 0 0 1-.62 1.17H2.92a.75.75 0 0 1-.62-1.17l1.2-1.8v-2.6a4.5 4.5 0 0 1 3.75-4.47v-.53A.75.75 0 0 1 8 1.5Zm-1.9 12.1h3.8a1.9 1.9 0 0 1-3.8 0Z"/></svg><span id="notifyCount" class="notify-count hidden"></span>
-      </button>
-      <div id="notifyPanel" class="notify-panel hidden" role="menu">
-        <div class="notify-head"><span data-i18n="attention.history">Notifications</span><span class="notify-head-actions"><button id="notifyExclToggle" class="notify-clear" data-i18n="notify.settings" data-i18n-title="notify.settingsHint" title="Notification settings">Settings</button><button id="notifyClear" class="notify-clear" data-i18n="attention.clearHistory">Clear</button></span></div>
-        <div id="notifyList" class="notify-list"></div>
-        <div id="notifyStatus" class="notify-status hidden"></div>
-      </div>
-    </div>
     <span class="title" id="workspaceName"></span>
     <nav id="menubar">
       <button class="menubtn" data-menu="0" data-i18n="menu.workspace">Workspace</button>
@@ -129,31 +119,12 @@
       </div>
     </div>
   </div>
-  <div id="exclModal" class="modal hidden">
-    <div class="modal-box excl-box">
-      <div class="modal-message" data-i18n="notify.settingsTitle">Notification settings</div>
-      <div class="excl-section" data-i18n="notify.exclusionsSection">Exclusion rules</div>
-      <div class="excl-add">
-        <input type="text" id="exclAddApp" spellcheck="false" autocomplete="off" data-i18n-placeholder="notify.exclApp" placeholder="App (e.g. Slack)" />
-        <input type="text" id="exclAddWorkspace" spellcheck="false" autocomplete="off" data-i18n-placeholder="notify.exclWorkspace" placeholder="Workspace" />
-        <input type="text" id="exclAddTitle" spellcheck="false" autocomplete="off" data-i18n-placeholder="notify.exclTitle" placeholder="Title / channel" />
-        <button id="exclAdd" data-i18n="notify.exclAdd">Add</button>
-      </div>
-      <div id="exclModalList" class="excl-list"></div>
-      <div class="excl-section" data-i18n="notify.routesSection">Channel bindings (auto-ask)</div>
-      <div id="routeModalList" class="excl-list"></div>
-      <div class="modal-actions">
-        <button id="exclClose" class="primary" data-i18n="notify.exclClose">Close</button>
-      </div>
-    </div>
-  </div>
   <script src="./i18n.js"></script>
   <script src="./file-types.js"></script>
   <script src="./markdown.js"></script>
   <script src="./preview-find.js"></script>
   <script src="./terminal-actions.js"></script>
   <script src="./notification-log.js"></script>
-  <script src="./notification-center.js"></script>
   <script src="./recent-filter.js"></script>
   <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
