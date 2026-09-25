@@ -33,7 +33,7 @@ const DEFAULT_WSL_HOME_PATH = process.env.WSLWB_HOME_PATH || `/home/${os.userInf
 const WSL_FS_TIMEOUT_MS = Math.max(1000, Number(process.env.WSLWB_FS_TIMEOUT_MS) || 5000);
 
 const { WORKSPACE_EXT } = require('./workspace-args'); // single source for the extension + argv parsing
-const { shellCdCommand, TTY_EXPORT } = require('./terminal-actions'); // inherited-cwd `cd` + pty export for terminal:start
+const { shellCdCommand } = require('./terminal-actions'); // inherited-cwd `cd` for terminal:start
 const { tabTitleForWorkspace, classifyTabDrop, nextActiveTab, shellWindowTitle } = require('./tab-shell');
 
 // --- Tabbed windows: every BrowserWindow is a thin shell (its own webContents renders only the
@@ -43,7 +43,7 @@ const { tabTitleForWorkspace, classifyTabDrop, nextActiveTab, shellWindowTitle }
 // renderer state survive the move. ---
 const TABSTRIP_H = 34; // must match the strip height in tabstrip.html
 const windowState = new Map(); // BrowserWindow id -> { tabs: [view webContents id...], activeId }
-const viewState = new Map();   // view webContents id -> { view, workspace, terminals, showLanding, attention, winId }
+const viewState = new Map();   // view webContents id -> { view, workspace, terminals, showLanding, winId }
 // Most-recently-focused window ids, front first. Electron exposes no z-order, so this stands in
 // for it when a tab drop lands where two windows' strips overlap (classifyTabDrop picks the first
 // hit, which must be the front-most strip).
@@ -395,7 +395,6 @@ function createWorkspaceView(initialWorkspace = defaultWorkspace(), { showLandin
     workspace: normalizeWorkspace(initialWorkspace),
     terminals: new Map(), // terminal id -> pty (multiple terminal tabs per workspace)
     showLanding,
-    attention: 0, // panes in this view currently waiting for user input (OSC 9)
     winId: null
   });
   hardenWebContents(wc);
@@ -431,8 +430,8 @@ function layoutViews(win) {
   }
 }
 
-// Push the full strip model to a shell (tabs, active tab, aggregated attention) and mirror the
-// aggregate on the window title (Alt+Tab) + taskbar overlay. One source of truth: main.
+// Push the full strip model to a shell (tabs, active tab) and the window title (Alt+Tab).
+// One source of truth: main.
 function pushTabsState(win) {
   const ws = windowState.get(win.id);
   if (!ws || win.isDestroyed()) return;
@@ -447,33 +446,16 @@ function pushTabsState(win) {
       ),
       // Hover tooltip: the untruncated identity of the tab (full workspace path; ellipsized
       // labels and same-named leaf directories are both disambiguated by it).
-      tooltip: landing || !state ? tr('tabs.newTab') : `${state.workspace.distro}: ${state.workspace.wslPath}`,
-      attention: !!(state && state.attention > 0)
+      tooltip: landing || !state ? tr('tabs.newTab') : `${state.workspace.distro}: ${state.workspace.wslPath}`
     };
   });
-  const attentionTotal = ws.tabs.reduce((n, id) => n + ((viewState.get(id) || {}).attention || 0), 0);
   const active = tabs.find((tab) => tab.id === ws.activeId);
   win.webContents.send('tabs:state', {
     tabs,
     activeId: ws.activeId,
     lang: currentLang,
-    title: shellWindowTitle({ activeTitle: active ? active.title : '', attentionCount: attentionTotal })
+    title: shellWindowTitle({ activeTitle: active ? active.title : '' })
   });
-  updateWindowOverlay(win, attentionTotal);
-}
-
-// The overlay dot travels from a workspace renderer as a data URL once (canvas-drawn); reuse it
-// for every window. setOverlayIcon is a no-op outside Windows and must never break the caller.
-let attentionIconDataUrl = null;
-function updateWindowOverlay(win, attentionTotal) {
-  try {
-    if (attentionTotal > 0 && attentionIconDataUrl) {
-      const image = nativeImage.createFromDataURL(attentionIconDataUrl);
-      if (!image.isEmpty()) win.setOverlayIcon(image, tr('attention.waiting'));
-    } else {
-      win.setOverlayIcon(null, '');
-    }
-  } catch {}
 }
 
 function addTab(win, viewId, { activate = true } = {}) {
@@ -745,8 +727,8 @@ function samplePerf() {
     if (!win.isDestroyed()) win.webContents.send('perf:stats', lastPerfPayload);
   }
 }
-// Desktop toasts (renderer `new Notification`) on Windows need the app's AppUserModelID — the same
-// id electron-builder stamps on the installer's shortcuts — or they show as "electron.app.*".
+// Windows taskbar identity: the same AppUserModelID electron-builder stamps on the installer's
+// shortcuts, so dev runs and the installed app group under one pinned icon.
 app.setAppUserModelId('com.wslworkbench.app');
 
 app.whenReady().then(() => {
@@ -1174,32 +1156,6 @@ ipcMain.on('window:close', (event) => {
   windowForSender(event.sender)?.close();
 });
 
-// Attention state from a workspace view (panes whose AI CLI finished and waits for input, OSC 9).
-// Stored per view, then mirrored per window: a dot on the view's tab, the aggregated count on the
-// window title and the taskbar icon overlay — the right tab and the right window stay identifiable
-// even when hidden. The dot image is drawn by the renderer (canvas → data URL).
-ipcMain.on('window:attention', (event, { count = 0, icon = '' } = {}) => {
-  const state = viewState.get(event.sender.id);
-  if (!state) return;
-  state.attention = Math.max(0, Number(count) || 0);
-  if (icon) attentionIconDataUrl = String(icon);
-  const win = state.winId != null ? BrowserWindow.fromId(state.winId) : null;
-  if (win && !win.isDestroyed()) pushTabsState(win);
-});
-
-// A toast for this workspace was clicked: surface it — restore a minimized window, raise it, and
-// make the view the active tab. Windows only honors focus() from a process that already has it,
-// which the toast click grants us; setAlwaysOnTop is not used (it would steal focus permanently).
-ipcMain.on('window:focusWorkspace', (event) => {
-  const state = viewState.get(event.sender.id);
-  const win = state && state.winId != null ? BrowserWindow.fromId(state.winId) : null;
-  if (!win || win.isDestroyed()) return;
-  if (win.isMinimized()) win.restore();
-  activateTab(win, event.sender.id);
-  win.show();
-  win.focus();
-});
-
 // Pop a top-level application menu's submenu at a screen position, so the in-app toolbar buttons
 // can show the real menus (the native menu bar itself is hidden via autoHideMenuBar). index maps
 // to the application menu's top-level order: 0 Workspace, 1 Edit, 2 View, 3 Language, 4 Help.
@@ -1550,7 +1506,7 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = 
   // best-effort `cd` on top of the workspace-root --cd, so a bad path lands at the root, not in an
   // error. The workspace itself is NOT changed by an inherited cwd.
   const launch = command ? `${command}; exec bash` : 'exec bash';
-  const parts = [WSLG_WAYLAND_FIX, CWD_PROMPT_EXPORT, TTY_EXPORT];
+  const parts = [WSLG_WAYLAND_FIX, CWD_PROMPT_EXPORT];
   const cd = shellCdCommand(cwd);
   if (cd) parts.push(cd);
   parts.push(launch);
