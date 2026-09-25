@@ -79,6 +79,8 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .editor-tab-label { min-width:0; overflow:hidden; text-overflow:ellipsis; }
 .editor-tab:hover { background:var(--hover); }
 .editor-tab.active { background:#181818; color:var(--text); }
+/* Preview tab (tree single-click, issue #87): italic like VS Code; kept (upright) on double-click / edit. */
+.editor-tab.preview .editor-tab-label { font-style:italic; }
 .editor-tab-dirty { color:#ffcc66; min-width:8px; font-size:10px; }
 .editor-tab-close { width:14px; text-align:center; border-radius:3px; color:var(--muted); }
 .editor-tab-close:hover { background:#555; color:#fff; }

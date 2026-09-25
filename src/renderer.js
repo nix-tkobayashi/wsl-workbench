@@ -825,7 +825,7 @@ function shellQuotePath(p) {
 
 // --- Editor tabs: multiple open files share one textarea/img; each tab keeps its own state.
 // selectedPath is the active tab's path (also used for tree highlight + save). ---
-const editorTabs = new Map(); // path -> { path, name, value, dirty, isImage, imageSrc, disabled, el }
+const editorTabs = new Map(); // path -> { path, name, value, dirty, isImage, imageSrc, disabled, preview, el }
 const editorTabList = document.getElementById('editorTabList');
 // The tab strip hides its scrollbars (they squeeze the 30px bar); scroll it with the mouse wheel
 // instead — vertical wheel motion maps to horizontal tab scrolling, like VS Code's tab bar.
@@ -870,7 +870,10 @@ function updateEditorTabEl(tab) {
   tab.el.querySelector('.editor-tab-dirty').textContent = tab.externallyChanged ? '⚠' : (tab.dirty ? '●' : '');
   tab.el.classList.toggle('active', tab.path === selectedPath);
   tab.el.classList.toggle('changed', !!tab.externallyChanged);
-  tab.el.title = tab.externallyChanged ? t('editor.externallyChanged') : (tab.raw ? `${tab.path} — ${t('unsupportedFile.readOnly')}` : tab.path);
+  tab.el.classList.toggle('preview', !!tab.preview); // italic label, VS Code style (issue #87)
+  let title = tab.raw ? `${tab.path} — ${t('unsupportedFile.readOnly')}` : tab.path;
+  if (tab.preview) title += ` — ${t('editor.previewTabHint')}`;
+  tab.el.title = tab.externallyChanged ? t('editor.externallyChanged') : title;
 }
 function refreshEditorTabs() { for (const tab of editorTabs.values()) updateEditorTabEl(tab); }
 
@@ -880,9 +883,21 @@ function scrollActiveEditorTabIntoView() {
   if (tab && tab.el) tab.el.scrollIntoView({ inline: 'nearest', block: 'nearest' });
 }
 
+let editorReloading = false; // a disk reload rewrites the textarea via insertText: not a user edit
 function setDirty(value) {
   const tab = editorTabs.get(selectedPath);
-  if (tab) { tab.dirty = value; updateEditorTabEl(tab); }
+  if (!tab) return;
+  tab.dirty = value;
+  if (value && !editorReloading) keepEditorTab(tab); // an edit keeps a preview tab (never replaced under the user)
+  updateEditorTabEl(tab);
+}
+
+// Promote a preview tab to a normal one: tree double-click, tab double-click, or an edit (#87).
+function keepEditorTab(tab) {
+  if (!tab || !tab.preview) return;
+  tab.preview = false;
+  updateEditorTabEl(tab);
+  scheduleSessionSave();
 }
 
 function highlightTreeRow(path) {
@@ -1078,6 +1093,10 @@ function makeEditorTabEl(tab) {
     if (current && current.externallyChanged) await promptReloadIfNeeded(current);
   });
   close.addEventListener('click', (event) => { event.stopPropagation(); closeEditorTab(tab.path); });
+  el.addEventListener('dblclick', (event) => {
+    if (event.target === close) return;
+    keepEditorTab(editorTabs.get(tab.path));
+  });
   editorTabList.appendChild(el);
   return el;
 }
@@ -1114,7 +1133,8 @@ function scheduleSessionSave() {
   // A pending save for a DIFFERENT workspace must be written out, not debounce-cancelled — else
   // switching workspaces within the debounce window drops the outgoing workspace's last tab state.
   if (sessionSavePending && sessionSavePending.key !== key) flushSessionSave();
-  sessionSavePending = { key, tabs: [...editorTabs.keys()], active: selectedPath };
+  const previewTab = [...editorTabs.values()].find((tab) => tab.preview);
+  sessionSavePending = { key, tabs: [...editorTabs.keys()], active: selectedPath, preview: previewTab ? previewTab.path : null };
   clearTimeout(sessionSaveTimer);
   sessionSaveTimer = setTimeout(flushSessionSave, 300);
 }
@@ -1135,7 +1155,7 @@ async function restoreEditorSession() {
       // via openFileInEditor, which reads the (now new) global config.
       if (config !== cfg) return;
       if (!st) continue; // deleted since the last session
-      await openFileInEditor({ path: p, type: 'file' });
+      await openFileInEditor({ path: p, type: 'file' }, { preview: p === saved.preview });
     }
     if (config === cfg && typeof saved.active === 'string' && editorTabs.has(saved.active)) {
       activateEditorTab(saved.active);
@@ -1146,15 +1166,33 @@ async function restoreEditorSession() {
   if (config === cfg) scheduleSessionSave(); // normalize the stored list (drops now-missing files)
 }
 
-// Open a file in a tab (or activate its existing tab). Replaces the old single-file loadFile.
-async function openFileInEditor(node) {
-  if (editorTabs.has(node.path)) { activateEditorTab(node.path); return; }
+// Open a file in a tab (or activate its existing tab). `preview` = a tree single-click: the file
+// lands in the (single) preview tab, replacing whatever it showed; a double-click (`preview`
+// false) opens a normal tab or keeps an existing preview tab. Rules: editorTabRules.planOpen (#87).
+async function openFileInEditor(node, { preview = false } = {}) {
+  const plan = window.editorTabRules.planOpen([...editorTabs.values()], node.path, { preview });
+  if (plan.action === 'activate' || plan.action === 'promote') {
+    if (plan.action === 'promote') keepEditorTab(editorTabs.get(node.path));
+    activateEditorTab(node.path);
+    return;
+  }
   persistActiveEditor(); // save the previously active tab before switching
   // Register and activate synchronously (read-only while loading) so a second open of the same
   // file activates this tab instead of creating a duplicate, and edits can't be lost mid-load.
-  const tab = { path: node.path, name: basenameFor(node.path), value: '', dirty: false, isImage: false, imageSrc: null, isPdf: false, pdfSrc: null, unsupported: false, raw: false, tooLarge: false, disabled: true, el: null, mtimeMs: null, size: null, externallyChanged: false };
+  const tab = { path: node.path, name: basenameFor(node.path), value: '', dirty: false, isImage: false, imageSrc: null, isPdf: false, pdfSrc: null, unsupported: false, raw: false, tooLarge: false, disabled: true, preview, el: null, mtimeMs: null, size: null, externallyChanged: false };
   tab.el = makeEditorTabEl(tab);
-  editorTabs.set(node.path, tab);
+  if (plan.action === 'replace') {
+    // The outgoing preview tab closes without a prompt (it is never dirty — an edit keeps it) and
+    // the new file takes its slot in the strip, so the other tabs don't jump.
+    const old = editorTabs.get(plan.replacePath);
+    old.el.replaceWith(tab.el);
+    const entries = window.editorTabRules.replaceInOrder([...editorTabs.values()], old.path, tab);
+    editorTabs.clear();
+    for (const e of entries) editorTabs.set(e.path, e);
+    if (editorRenderedFor === old.path) editorRenderedFor = null;
+  } else {
+    editorTabs.set(node.path, tab);
+  }
   selectedPath = node.path;
   renderActiveEditor();
   highlightTreeRow(node.path);
@@ -1387,7 +1425,8 @@ async function reloadTabFromDisk(tab, { force = false } = {}) {
     // editor.value === tab.value and leaves the textarea (and its undo stack) alone. The insertText
     // fires the 'input' listener (setDirty(true)), so dirty is cleared after, not before.
     if (tab.path === selectedPath && !tab.isImage && editorRenderedFor === tab.path) {
-      replaceEditorValuePreservingUndo(content);
+      editorReloading = true; // the input event this raises must not promote a preview tab (#87)
+      try { replaceEditorValuePreservingUndo(content); } finally { editorReloading = false; }
     }
     tab.dirty = false;
     tab.externallyChanged = false;
@@ -2042,8 +2081,13 @@ function rowFor(node) {
     if (node.type === 'directory') {
       toggle(node.path);
     } else {
-      await openFileInEditor(node); // opens/activates a tab and updates the tree highlight
+      await openFileInEditor(node, { preview: true }); // preview tab (VS Code style, #87); updates the tree highlight
     }
+  });
+  // Double-click a file: keep it open (the preview tab it landed in on the first click is promoted).
+  row.addEventListener('dblclick', (event) => {
+    event.stopPropagation();
+    if (node.type === 'file') openFileInEditor(node, { preview: false });
   });
 
   row.addEventListener('contextmenu', (event) => showContextMenu(event, node));

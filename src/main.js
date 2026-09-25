@@ -1084,11 +1084,13 @@ ipcMain.handle('workspace:openRecent', (event, { distro = DEFAULT_DISTRO, wslPat
 // --- Editor session persistence: which files were open per workspace, restored on reopen. ---
 const SESSION_TABS_MAX = 15;
 const SESSION_KEYS_MAX = 20;
-ipcMain.on('session:save', (_event, { key, tabs, active } = {}) => {
+ipcMain.on('session:save', (_event, { key, tabs, active, preview } = {}) => {
   if (typeof key !== 'string' || !key) return;
   const cleanTabs = (Array.isArray(tabs) ? tabs : []).filter((p) => typeof p === 'string').slice(0, SESSION_TABS_MAX);
   const sessions = { ...(readSettings().sessions || {}) };
-  sessions[key] = { tabs: cleanTabs, active: typeof active === 'string' ? active : null, ts: Date.now() };
+  // `preview` = the one preview tab (issue #87), restored as such; only meaningful if still listed.
+  sessions[key] = { tabs: cleanTabs, active: typeof active === 'string' ? active : null,
+    preview: typeof preview === 'string' && cleanTabs.includes(preview) ? preview : null, ts: Date.now() };
   // Cap stored workspaces, dropping the least recently saved.
   const keys = Object.keys(sessions).sort((a, b) => (sessions[b].ts || 0) - (sessions[a].ts || 0));
   for (const k of keys.slice(SESSION_KEYS_MAX)) delete sessions[k];

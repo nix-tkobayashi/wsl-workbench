@@ -42,3 +42,9 @@ test('terminal split metrics in renderer.js match style.css', () => {
   assert.match(ruleBody('.term-pane'), new RegExp(`min-width:\\s*${paneMin[1]}px`));
   assert.match(ruleBody('.term-divider'), new RegExp(`flex:\\s*0 0 ${divider[1]}px`));
 });
+
+// Preview tabs (issue #87) are told apart from kept tabs by an italic label, like VS Code.
+test('preview editor tabs render their label in italics (#87)', () => {
+  const body = ruleBody('.editor-tab.preview .editor-tab-label');
+  assert.match(body, /font-style:\s*italic/);
+});
