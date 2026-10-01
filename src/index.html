@@ -76,11 +76,15 @@
     </main>
   </div>
   <div id="contextMenu" class="context-menu hidden">
+    <button data-action="open-files" data-i18n="ctx.openFiles">Open</button>
     <button data-action="new-file" data-i18n="ctx.newFile">New File</button>
     <button data-action="new-folder" data-i18n="ctx.newFolder">New Folder</button>
-    <div class="menu-separator" id="ctxSepEdit"></div>
+    <div class="menu-separator"></div>
     <button data-action="rename" data-i18n="ctx.rename">Rename</button>
     <button data-action="delete" class="danger" data-i18n="ctx.delete">Delete</button>
+    <div class="menu-separator"></div>
+    <button data-action="copy-path" data-i18n="ctx.copyPath">Copy Path</button>
+    <button data-action="copy-relative-path" data-i18n="ctx.copyRelativePath">Copy Relative Path</button>
     <div class="menu-separator"></div>
     <button data-action="reveal" data-i18n="ctx.reveal">Reveal in Explorer</button>
     <button data-action="open-new-window" data-i18n="ctx.openNewWindow">Open in New Window</button>
@@ -124,6 +128,7 @@
   <script src="./preview-find.js"></script>
   <script src="./terminal-actions.js"></script>
   <script src="./editor-tab-rules.js"></script>
+  <script src="./tree-selection.js"></script>
   <script src="./recent-filter.js"></script>
   <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>

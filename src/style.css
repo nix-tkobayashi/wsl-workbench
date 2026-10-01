@@ -223,6 +223,9 @@ body.resizing iframe { pointer-events:none; }
 .row { display:flex; align-items:center; gap:5px; height:24px; padding:2px 4px; border-radius:4px; cursor:default; white-space:nowrap; }
 .row:hover { background:var(--hover); }
 .row.selected { background:#26385f; }
+/* Multi-selection (#93): an accent edge on top of the selection fill, so the picked rows read as a set
+   and stay distinct from the single active-file highlight. */
+.row.multi { background:#26385f; box-shadow:inset 2px 0 0 var(--accent); }
 /* flex:none on the gutter cells. Without it they share the row's flex shrinking, so a row whose name
    overflows loses gutter width while a row whose name fits keeps it — neighbouring rows end up with
    different twisty/icon widths and their names stop lining up. (An empty twisty on file rows can

@@ -5,6 +5,10 @@ let selectedPath = null;
 const expanded = new Set();
 let contextNode = null;
 let treeSelection = null; // last-clicked tree node; the target for a clipboard-image paste into the tree
+// Multi-selection in the tree (#93): path -> node, in selection order. Ctrl+click / Shift+click /
+// Ctrl+A fill it; a plain click empties it. With 2+ entries, Delete / drag / Copy Path act on all.
+let treeMulti = new Map();
+let treeMultiAnchor = null; // Shift+click range start (the last plain- or Ctrl-clicked row)
 
 const layout = document.getElementById('layout');
 const rightPane = document.getElementById('rightPane');
@@ -672,10 +676,11 @@ document.getElementById('newTerminalBtn').addEventListener('click', () => {
 });
 document.getElementById('splitTerminalBtn').addEventListener('click', () => splitActiveTerminal());
 
-// Path of the tree item currently being dragged within the app. This is the authoritative
-// internal-origin signal: it is only set during a genuine tree dragstart, so external drags
-// (text/URLs/files from other apps) cannot trigger terminal insertion or fs:move.
-let currentTreeDragPath = null;
+// Paths of the tree items currently being dragged within the app (the whole multi-selection when
+// the dragged row is part of it). This is the authoritative internal-origin signal: it is only set
+// during a genuine tree dragstart, so external drags (text/URLs/files from other apps) cannot
+// trigger terminal insertion or fs:move.
+let currentTreeDragPaths = null;
 
 // True when a drag carries external OS files. Must be checked via dataTransfer.types during dragover:
 // dataTransfer.files is empty until the actual drop, so testing files.length there wrongly rejects the
@@ -1190,6 +1195,7 @@ function retargetEditorTabs(oldPath, newPath) {
     }
   }
   scheduleSessionSave();
+  retargetTreeMulti(oldPath, newPath);
   // Keep the tree's expanded state in sync so a renamed/moved directory stays open and the
   // active descendant row still renders (and gets re-highlighted) after renderTree().
   for (const p of [...expanded]) {
@@ -1834,8 +1840,14 @@ function showContextMenu(event, node) {
   event.preventDefault();
   event.stopPropagation();
   contextNode = node;
-  document.querySelectorAll('.row.selected').forEach((el) => el.classList.remove('selected'));
-  event.currentTarget.classList.add('selected');
+  // Right-clicking inside a multi-selection keeps it (the menu acts on all of it); anywhere else the
+  // selection collapses to the clicked row, as in VS Code.
+  const multi = isInTreeMulti(node);
+  if (!multi) {
+    clearTreeMulti();
+    document.querySelectorAll('.row.selected').forEach((el) => el.classList.remove('selected'));
+    event.currentTarget.classList.add('selected');
+  }
   const menu = document.getElementById('contextMenu');
   // The workspace root has no row; its menu offers create/reveal but not rename/delete.
   const isRoot = !!config && node.path === config.wslPath;
@@ -1843,9 +1855,16 @@ function showContextMenu(event, node) {
   // a right-click followed by Delete acts on this node — not on whatever was last left-clicked. Root
   // clears the target (it's never deletable and has no row to paste beside).
   setTreePasteTarget(isRoot ? null : node);
-  menu.querySelector('[data-action="rename"]').style.display = isRoot ? 'none' : '';
-  menu.querySelector('[data-action="delete"]').style.display = isRoot ? 'none' : '';
-  document.getElementById('ctxSepEdit').style.display = isRoot ? 'none' : '';
+  const show = (action, on) => { menu.querySelector(`[data-action="${action}"]`).style.display = on ? '' : 'none'; };
+  // A multi-selection only gets the actions that make sense for several items at once.
+  show('open-files', multi && [...treeMulti.values()].some((n) => n.type === 'file'));
+  show('new-file', !multi);
+  show('new-folder', !multi);
+  show('rename', !multi && !isRoot);
+  show('delete', !isRoot);
+  show('reveal', !multi);
+  show('open-new-window', !multi);
+  tidyMenuSeparators(menu);
   menu.classList.remove('hidden');
   const x = Math.min(event.clientX, window.innerWidth - menu.offsetWidth - 8);
   const y = Math.min(event.clientY, window.innerHeight - menu.offsetHeight - 8);
@@ -1857,25 +1876,188 @@ function hideContextMenu() {
   document.getElementById('contextMenu').classList.add('hidden');
 }
 
-// Delete a file/directory after a path-showing confirm, then close any open tabs under it and
-// refresh. Shared by the context-menu action and the tree pane's Delete-key handler. The workspace
-// root has no row and must never be deletable, so callers guard against it.
-async function deleteTreeNode(node) {
-  if (!node || !config || node.path === config.wslPath) return;
-  const message = node.type === 'directory' ? t('confirm.deleteDir') : t('confirm.deleteFile');
-  if (!confirm(`${message}\n\n${node.path}`)) return;
-  await window.api.deleteFsItem({ distro: config.distro, targetPath: node.path });
-  closeEditorTabsUnder(node.path);
-  // Drop the paste/Delete target if it pointed at what we just removed, so a follow-up Delete
-  // doesn't act on a stale path (falls back to the workspace root).
-  if (treeSelection && treeSelection.path === node.path) setTreePasteTarget(null);
+// Hide menu separators that would sit at the top/bottom of the menu or next to another separator
+// once some actions are hidden.
+function tidyMenuSeparators(menu) {
+  let prevVisible = null; // the last visible child: 'item' | separator element
+  for (const el of menu.children) {
+    if (el.classList.contains('menu-separator')) {
+      el.style.display = prevVisible === 'item' ? '' : 'none';
+      if (prevVisible === 'item') prevVisible = el;
+    } else if (el.style.display !== 'none') {
+      prevVisible = 'item';
+    }
+  }
+  if (prevVisible && prevVisible !== 'item') prevVisible.style.display = 'none';
+}
+
+// --- Tree multi-selection (#93) ---
+function isInTreeMulti(node) {
+  return !!node && treeMulti.size > 1 && treeMulti.has(node.path);
+}
+
+// The nodes an action on `node` applies to: the whole multi-selection when `node` is part of it,
+// otherwise just `node`.
+function treeTargetsFor(node) {
+  return isInTreeMulti(node) ? [...treeMulti.values()] : [node];
+}
+
+function nodeFromRow(row) {
+  return { path: row.dataset.path, type: row.dataset.type, name: basenameFor(row.dataset.path) };
+}
+
+function visibleTreeRows() {
+  return [...document.querySelectorAll('#tree .row[data-path]')];
+}
+
+function paintTreeMulti() {
+  for (const row of visibleTreeRows()) row.classList.toggle('multi', treeMulti.has(row.dataset.path));
+}
+
+function setTreeMulti(nodes) {
+  treeMulti = new Map(nodes.map((n) => [n.path, n]));
+  paintTreeMulti();
+}
+
+function clearTreeMulti() {
+  if (treeMulti.size) setTreeMulti([]);
+}
+
+// Ctrl+click toggles the row; Shift+click selects the visible range from the anchor. The row the
+// user was on before (the last plain click) joins the selection, so click + Ctrl+click picks both.
+function pickTreeRow(node, { range = false } = {}) {
+  const seed = treeSelection && (!config || treeSelection.path !== config.wslPath) ? treeSelection : null;
+  if (range) {
+    const rows = visibleTreeRows();
+    const anchor = treeMultiAnchor || (seed && seed.path);
+    const paths = window.treeSelectionRules.range(rows.map((r) => r.dataset.path), anchor, node.path);
+    const wanted = new Set(paths);
+    setTreeMulti(rows.filter((r) => wanted.has(r.dataset.path)).map(nodeFromRow));
+    if (!treeMultiAnchor) treeMultiAnchor = node.path;
+  } else {
+    const next = new Map(treeMulti);
+    if (!next.size && seed) next.set(seed.path, seed); // so Ctrl+click on the plain-clicked row deselects it
+    if (next.has(node.path)) next.delete(node.path); else next.set(node.path, node);
+    setTreeMulti([...next.values()]);
+    treeMultiAnchor = node.path;
+  }
+  // The Delete-key / paste target must be a selected row: a Ctrl+click that just deselected `node`
+  // hands it to the most recent remaining pick (or the workspace root when nothing is left).
+  setTreePasteTarget(treeMulti.has(node.path) ? node : ([...treeMulti.values()].pop() || null));
+}
+
+// Re-key the selection after a rename/move so moved items stay selected under their new paths.
+function retargetTreeMulti(oldPath, newPath) {
+  const { isUnder } = window.treeSelectionRules;
+  const remap = (p) => (isUnder(p, oldPath) ? newPath + p.slice(oldPath.length) : p);
+  if (treeMulti.size) {
+    setTreeMulti([...treeMulti.values()].map((n) => {
+      const np = remap(n.path);
+      return np === n.path ? n : { ...n, path: np, name: basenameFor(np) };
+    }));
+  }
+  if (treeMultiAnchor) treeMultiAnchor = remap(treeMultiAnchor);
+  if (treeSelection && isUnder(treeSelection.path, oldPath)) {
+    const np = remap(treeSelection.path);
+    setTreePasteTarget({ ...treeSelection, path: np, name: basenameFor(np) });
+  }
+}
+
+// After a re-render, forget selected paths whose rows are gone (deleted, or hidden in a collapsed
+// folder) so an action never targets something the user can't see.
+function pruneTreeMulti() {
+  if (!treeMulti.size) return;
+  const visible = new Set(visibleTreeRows().map((r) => r.dataset.path));
+  const kept = [...treeMulti.values()].filter((n) => visible.has(n.path));
+  if (kept.length === treeMulti.size) return;
+  setTreeMulti(kept);
+  if (treeSelection && !treeMulti.has(treeSelection.path)) setTreePasteTarget(kept.pop() || null);
+}
+
+// A short list of paths for a confirm dialog: the first few, then "… (+N)".
+function pathListPreview(paths, max = 10) {
+  const head = paths.slice(0, max).join('\n');
+  return paths.length > max ? `${head}\n… (+${paths.length - max})` : head;
+}
+
+// Delete files/directories after a path-showing confirm, then close any open tabs under them and
+// refresh. Shared by the context-menu action and the tree pane's Delete-key handler. A directory and
+// something inside it are deleted once (via the directory). The workspace root has no row and is
+// never deletable. Failures don't stop the rest; they're reported together at the end.
+async function deleteTreeNodes(nodes) {
+  if (!config) return;
+  const rules = window.treeSelectionRules;
+  const paths = rules.topLevel(nodes.filter(Boolean).map((n) => n.path)).filter((p) => p !== config.wslPath);
+  if (!paths.length) return;
+  let message;
+  if (paths.length === 1) {
+    const node = nodes.find((n) => n && n.path === paths[0]);
+    message = `${node.type === 'directory' ? t('confirm.deleteDir') : t('confirm.deleteFile')}\n\n${paths[0]}`;
+  } else {
+    message = `${t('confirm.deleteMany').replace('{n}', String(paths.length))}\n\n${pathListPreview(paths)}`;
+  }
+  if (!confirm(message)) return;
+  const failures = [];
+  for (const targetPath of paths) {
+    try {
+      await window.api.deleteFsItem({ distro: config.distro, targetPath });
+      closeEditorTabsUnder(targetPath);
+    } catch (error) {
+      failures.push(`${targetPath}: ${error.message || String(error)}`);
+    }
+  }
+  // Drop the paste/Delete target if it pointed at (or into) what we just removed, so a follow-up
+  // Delete doesn't act on a stale path (falls back to the workspace root).
+  if (treeSelection && paths.some((p) => rules.isUnder(treeSelection.path, p))) setTreePasteTarget(null);
+  clearTreeMulti();
   await renderTree();
+  if (failures.length) alert(failures.join('\n'));
+}
+
+// Move tree items into `targetDirPath` (drag & drop onto a folder row or empty tree space). Items
+// already there are skipped; a folder can't go inside itself. Moved items stay selected.
+async function moveTreePaths(paths, targetDirPath) {
+  if (!config || !paths || !paths.length) return;
+  const { moves, invalid } = window.treeSelectionRules.planMove(paths, targetDirPath);
+  const failures = invalid.map((p) => `${basenameFor(p)}: Cannot move a directory into itself.`);
+  let moved = false;
+  for (const { source, dest } of moves) {
+    try {
+      await window.api.move({ distro: config.distro, sourcePath: source, targetDirPath });
+      retargetEditorTabs(source, dest);
+      moved = true;
+    } catch (error) {
+      failures.push(`${basenameFor(source)}: ${error.message || String(error)}`);
+    }
+  }
+  if (moved) {
+    expanded.add(targetDirPath);
+    await renderTree();
+  }
+  if (failures.length) alert(failures.join('\n'));
 }
 
 async function handleContextAction(action) {
   if (!contextNode) return;
   const node = contextNode;
+  const targets = treeTargetsFor(node);
   try {
+    if (action === 'open-files') {
+      // Several files at once open as kept (non-preview) tabs; a preview tab would replace itself.
+      for (const target of targets) {
+        if (target.type === 'file') await openFileInEditor(target, { preview: false });
+      }
+      return;
+    }
+
+    if (action === 'copy-path' || action === 'copy-relative-path') {
+      const paths = targets.map((n) => (action === 'copy-path' || !config
+        ? n.path
+        : window.treeSelectionRules.relativeTo(config.wslPath, n.path)));
+      window.api.clipboardWriteText(paths.join('\n'));
+      return;
+    }
+
     if (action === 'new-file' || action === 'new-folder') {
       const parentDirPath = parentDirFor(node);
       const type = action === 'new-folder' ? 'directory' : 'file';
@@ -1899,7 +2081,7 @@ async function handleContextAction(action) {
     }
 
     if (action === 'delete') {
-      await deleteTreeNode(node);
+      await deleteTreeNodes(targets);
       return;
     }
 
@@ -1927,6 +2109,7 @@ function rowFor(node) {
   row.dataset.path = node.path;
   row.dataset.type = node.type;
   if (node.path === selectedPath) row.classList.add('selected');
+  if (treeMulti.has(node.path)) row.classList.add('multi');
 
   const twisty = document.createElement('span');
   twisty.className = 'twisty';
@@ -1945,6 +2128,10 @@ function rowFor(node) {
 
   row.addEventListener('click', async (event) => {
     event.stopPropagation();
+    // Ctrl/Shift+click only changes the multi-selection (#93): nothing opens, folders don't toggle.
+    if (event.ctrlKey || event.metaKey || event.shiftKey) { pickTreeRow(node, { range: event.shiftKey }); return; }
+    clearTreeMulti();
+    treeMultiAnchor = node.path;
     setTreePasteTarget(node); // remember the paste target (clipboard-image paste saves next to it)
     if (node.type === 'directory') {
       toggle(node.path);
@@ -1955,6 +2142,7 @@ function rowFor(node) {
   // Double-click a file: keep it open (the preview tab it landed in on the first click is promoted).
   row.addEventListener('dblclick', (event) => {
     event.stopPropagation();
+    if (event.ctrlKey || event.metaKey || event.shiftKey) return; // two quick Ctrl+clicks are selection, not open
     if (node.type === 'file') openFileInEditor(node, { preview: false });
   });
 
@@ -1962,16 +2150,18 @@ function rowFor(node) {
 
   twisty.addEventListener('click', (event) => {
     event.stopPropagation(); // suppresses the row click, so update the paste target here too
-    if (node.type === 'directory') { setTreePasteTarget(node); toggle(node.path); }
+    if (event.ctrlKey || event.metaKey || event.shiftKey) { pickTreeRow(node, { range: event.shiftKey }); return; }
+    if (node.type === 'directory') { clearTreeMulti(); treeMultiAnchor = node.path; setTreePasteTarget(node); toggle(node.path); }
   });
 
   row.addEventListener('dragstart', (event) => {
-    currentTreeDragPath = node.path;
-    event.dataTransfer.setData('text/plain', node.path);
+    // Dragging a row of the multi-selection drags all of it; any other row drags just itself.
+    currentTreeDragPaths = treeTargetsFor(node).map((n) => n.path);
+    event.dataTransfer.setData('text/plain', currentTreeDragPaths.join('\n'));
     // 'copyMove' lets the tree accept it as a move and the terminal accept it as a path insert.
     event.dataTransfer.effectAllowed = 'copyMove';
   });
-  row.addEventListener('dragend', () => { currentTreeDragPath = null; });
+  row.addEventListener('dragend', () => { currentTreeDragPaths = null; });
 
   row.addEventListener('dragover', (event) => {
     if (node.type !== 'directory') return;
@@ -2002,16 +2192,7 @@ function rowFor(node) {
       return;
     }
 
-    const sourcePath = currentTreeDragPath;
-    if (!sourcePath || sourcePath === node.path) return;
-    try {
-      await window.api.move({ distro: config.distro, sourcePath, targetDirPath: node.path });
-      expanded.add(node.path);
-      retargetEditorTabs(sourcePath, `${node.path}/${basenameFor(sourcePath)}`);
-      await renderTree();
-    } catch (error) {
-      alert(error.message || String(error));
-    }
+    await moveTreePaths(currentTreeDragPaths, node.path);
   });
 
   return row;
@@ -2063,6 +2244,7 @@ async function renderTree() {
   tree.innerHTML = '';
   tree.appendChild(fragment);
   tree.scrollTop = prevScroll;
+  pruneTreeMulti();
   const cwdEl = document.getElementById('cwd');
   // Distro name as a badge, path as plain text (the full distro:path stays in the tooltip).
   const distroEl = document.getElementById('cwdDistro');
@@ -2094,6 +2276,8 @@ async function applyWorkspace(nextConfig) {
   const prevExpanded = new Set(expanded);
   config = nextConfig;
   setTreePasteTarget(null); // reset the paste target to the new workspace root
+  treeMulti = new Map(); // the old workspace's selection; its rows are about to be replaced
+  treeMultiAnchor = null;
   expanded.clear();
   expanded.add(config.wslPath);
   try {
@@ -2355,7 +2539,7 @@ function initTreeRootDropTarget() {
     // when the drag crosses from empty space onto a row (a row drop won't reach the pane handler).
     if (event.target.closest('.row')) { pane.classList.remove('drag-over'); return; }
     const external = isExternalFileDrag(event);
-    if (!currentTreeDragPath && !external) return;
+    if (!currentTreeDragPaths && !external) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = external ? 'copy' : 'move';
     pane.classList.add('drag-over'); // highlight the whole pane: the drop targets the workspace root
@@ -2383,18 +2567,9 @@ function initTreeRootDropTarget() {
       return;
     }
 
-    if (!currentTreeDragPath) return;
+    if (!currentTreeDragPaths) return;
     event.preventDefault();
-    const sourcePath = currentTreeDragPath;
-    const sourceParent = sourcePath.split('/').slice(0, -1).join('/') || '/';
-    if (sourceParent === rootPath) return; // already directly under the workspace root
-    try {
-      await window.api.move({ distro: config.distro, sourcePath, targetDirPath: rootPath });
-      retargetEditorTabs(sourcePath, `${rootPath}/${basenameFor(sourcePath)}`);
-      await renderTree();
-    } catch (error) {
-      alert(error.message || String(error));
-    }
+    await moveTreePaths(currentTreeDragPaths, rootPath); // items already at the root are skipped
   });
 }
 
@@ -2422,15 +2597,31 @@ function initTreePasteTarget() {
   // selection and stopPropagation, so this only fires off-row) — the way to paste into the top dir.
   pane.addEventListener('click', (event) => {
     if (event.target.closest('.row')) return;
+    clearTreeMulti();
+    treeMultiAnchor = null;
     setTreePasteTarget(null);
   });
-  // Delete key: remove the last-clicked file/directory (the same node a context-menu delete would
-  // target). Scoped to the tree pane's focus so it never fires while editing text in the editor.
-  // deleteTreeNode guards the workspace root (treeSelection is null when the root is the target).
+  // Delete key: remove the multi-selection, or else the last-clicked file/directory (the same items a
+  // context-menu delete would target). Ctrl+A selects every visible row; Escape
+  // clears the selection. Scoped to the tree pane's focus so it never fires while editing text in the
+  // editor. deleteTreeNodes guards the workspace root (treeSelection is null when the root is the target).
   pane.addEventListener('keydown', (event) => {
-    if (event.key !== 'Delete' || !treeSelection) return;
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'a') {
+      event.preventDefault();
+      setTreeMulti(visibleTreeRows().map(nodeFromRow));
+      return;
+    }
+    if (event.key === 'Escape') {
+      // Deselect everything, including the Delete target, so Delete can't hit an unhighlighted row.
+      if (treeMulti.size) { clearTreeMulti(); setTreePasteTarget(null); }
+      return;
+    }
+    if (event.key !== 'Delete') return;
+    // The visible multi-selection wins (Ctrl+A leaves no single target); else the last-clicked row.
+    const targets = treeMulti.size ? [...treeMulti.values()] : (treeSelection ? [treeSelection] : []);
+    if (!targets.length) return;
     event.preventDefault();
-    deleteTreeNode(treeSelection).catch((error) => alert(error.message || String(error)));
+    deleteTreeNodes(targets).catch((error) => alert(error.message || String(error)));
   });
   pane.addEventListener('paste', async (event) => {
     if (!config || !window.api.clipboardHasImage()) return;
@@ -2455,7 +2646,7 @@ function initTerminalDropTarget() {
 
   terminalPane.addEventListener('dragover', (event) => {
     // Only react to genuine internal tree drags, never to external text/URL/file drags.
-    if (!currentTreeDragPath) return;
+    if (!currentTreeDragPaths) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
     terminalPane.classList.add('drag-over');
@@ -2467,11 +2658,12 @@ function initTerminalDropTarget() {
   });
   terminalPane.addEventListener('drop', (event) => {
     terminalPane.classList.remove('drag-over');
-    if (!currentTreeDragPath) return;
+    if (!currentTreeDragPaths) return;
     const entry = activeTerminal();
     if (!entry) return;
     event.preventDefault();
-    entry.term.paste(shellQuotePath(currentTreeDragPath) + ' '); // insert via bracketed paste, like the clipboard paste
+    // All dragged paths, space-separated, via bracketed paste like the clipboard paste.
+    entry.term.paste(currentTreeDragPaths.map(shellQuotePath).join(' ') + ' ');
     entry.term.focus();
   });
 }
@@ -2483,7 +2675,7 @@ let pollingTree = false;
 let renderGeneration = 0;
 
 function treeInteractionBusy() {
-  return currentTreeDragPath !== null
+  return currentTreeDragPaths !== null
     || !document.getElementById('contextMenu').classList.contains('hidden')
     || !promptModal.classList.contains('hidden');
 }
