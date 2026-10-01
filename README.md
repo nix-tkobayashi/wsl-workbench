@@ -21,6 +21,9 @@ Lightweight Windows Electron app for working in WSL:
   2 seconds; hover for absolute memory numbers)
 - English / Japanese UI (Language menu)
 - Drag & drop to move within the tree, or copy in from Windows Explorer
+- Multi-select in the tree: `Ctrl`+click / `Shift`+click / `Ctrl+A` (`Esc` clears), then Delete,
+  drag to move (or into the terminal to insert all paths), or right-click for Open / Delete /
+  Copy Path / Copy Relative Path on every selected item
 - Workspace tabs: one window hosts multiple workspaces as tabs (`Ctrl+T` for a new tab). Drag a
   tab out of the window to split it into its own window, or drop it on another window's tab strip
   to merge — terminals and editor state survive the move (the view is re-parented, never reloaded)
