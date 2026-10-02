@@ -189,6 +189,26 @@ CLI profiles (measured in an empty temp folder with a new PTY, prompt 「ツー�
 | `codex.0.160.composer.single-line` | codex-cli 0.160.0 (WSL2) | text, ~600 ms, `\r` → submitted; text+`\r` in one write → not submitted. Verified (Enter only). |
 | `claude-code.2.1.prompt.single-line` | Claude Code 2.1.287 | **Not measured**: the folder-trust prompt was not answered (rule). Not selectable. |
 
+### Connection diagnostics (v0.26.1)
+
+When the adapter reports `APP_UNAVAILABLE`, the message now says how far the last handshake got,
+e.g. `(last attempt: stage=pipe-open, reason=peer-close)`. Stages: `connecting` → `pipe-open` →
+`hello-received` → `auth-sent` → `auth-ok`; reasons: `timeout`, `peer-close`, `socket-error`
+(with `code`), `bad-hello`, `bad-server-proof`, `unexpected-message`, `protocol-*`.
+
+- Adapter: stderr (`[wswb-adapter] {...}`) and `integration\diag\adapter-YYYY-MM-DD.jsonl`.
+- Workbench (`integration\audit\audit-*.jsonl`): `broker_listening` (relay or plain pipe, endpoint),
+  `connection_accepted`, `hello_sent`, `auth_failed` (now also `peer-closed-before-auth`),
+  `connected`; relay: `relay_ready`, `relay_accepted`, `relay_handed_off` / `relay_handoff_failed`,
+  `relay_conn_error` (exception type only), `relay_peer_closed` / `relay_local_closed` (byte
+  counts), `relay_error`. Relayed lines carry `relay_id`.
+- Only stages, reasons, error codes, timings and byte counts are logged — never the secret,
+  nonces or proofs.
+
+Reading them: adapter `pipe-open / peer-close` with no `connection_accepted` in the audit log means
+something other than this Workbench answered on that pipe; `relay_accepted` without `hello_sent`
+means the hand-off to the broker stalled.
+
 ### Verification status (v0.26.0)
 
 - `npm test`: stage A (A01–A07, X01, X02) and stage B mock acceptance (B01–B05, B07–B10 at mock

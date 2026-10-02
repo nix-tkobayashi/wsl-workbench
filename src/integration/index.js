@@ -161,6 +161,7 @@ class IntegrationController {
       server = make(null);
       await server.listen();
     }
+    this.audit.record({ event: 'broker_listening', reason: this.transportGate === 'reviewed' ? 'relay' : 'plain-pipe', endpoint, pid: process.pid });
     this.openJournal();
     this.server = server;
     this.principal = principalFor(secret);

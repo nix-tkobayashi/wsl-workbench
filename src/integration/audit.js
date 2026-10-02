@@ -1,15 +1,19 @@
 // Minimal audit log for the dots integration: who, which target, which tool, the decision, byte
 // counts, and state transitions. Never the terminal text, cursors, keys, or auth material.
-// One JSON line per event in <dir>/audit-YYYY-MM-DD.jsonl; files older than the retention are pruned.
+// One JSON line per event in <dir>/<prefix>-YYYY-MM-DD.jsonl (prefix 'audit' by default; the adapter
+// writes its connection diagnostics with prefix 'adapter'); files older than the retention are pruned.
 
 const fs = require('fs');
 const path = require('path');
 
 const RETENTION_DAYS = 7;
-const FILE_RE = /^audit-(\d{4}-\d{2}-\d{2})\.jsonl$/;
-const ALLOWED_FIELDS = ['event', 'principal', 'tool', 'session_id', 'generation', 'decision', 'code', 'bytes', 'request_id', 'reason', 'permissions'];
+const ALLOWED_FIELDS = ['event', 'principal', 'tool', 'session_id', 'generation', 'decision', 'code', 'bytes', 'request_id', 'reason', 'permissions',
+  // connection diagnostics (no handshake material)
+  'stage', 'relay_id', 'elapsed_ms', 'bytes_in', 'bytes_out', 'endpoint', 'pid'];
 
-function createAuditLog({ dir, now = Date.now, retentionDays = RETENTION_DAYS } = {}) {
+function createAuditLog({ dir, now = Date.now, retentionDays = RETENTION_DAYS, prefix = 'audit' } = {}) {
+  if (!/^[a-z]+$/.test(prefix)) throw new Error('invalid audit prefix');
+  const FILE_RE = new RegExp(`^${prefix}-(\\d{4}-\\d{2}-\\d{2})\\.jsonl$`);
   let lastPrune = 0;
 
   function prune() {
@@ -27,7 +31,7 @@ function createAuditLog({ dir, now = Date.now, retentionDays = RETENTION_DAYS } 
     if (!dir) return;
     const line = { time: new Date(now()).toISOString() };
     for (const key of ALLOWED_FIELDS) if (entry[key] !== undefined) line[key] = entry[key];
-    const file = path.join(dir, `audit-${line.time.slice(0, 10)}.jsonl`);
+    const file = path.join(dir, `${prefix}-${line.time.slice(0, 10)}.jsonl`);
     try {
       fs.mkdirSync(dir, { recursive: true });
       fs.appendFileSync(file, `${JSON.stringify(line)}\n`, { encoding: 'utf8', mode: 0o600 });

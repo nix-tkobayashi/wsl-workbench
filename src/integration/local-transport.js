@@ -70,21 +70,41 @@ function createBrokerServer({ endpoint, secret, onTool, onEvent = () => {}, maxC
 
   let custom = null;
   function handleConnection(socket) {
-    if (sockets.size >= maxConnections) { socket.destroy(); return; }
+    // Relayed connections carry the relay's id so these lines join up with relay_* events.
+    const relayId = socket.relayId === undefined ? undefined : socket.relayId;
+    if (sockets.size >= maxConnections) {
+      onEvent({ event: 'connection_rejected', reason: 'max-connections', relay_id: relayId });
+      socket.destroy();
+      return;
+    }
     sockets.add(socket);
+    onEvent({ event: 'connection_accepted', relay_id: relayId });
     let authed = false;
+    let failed = false;
+    let socketError = null;
+    const startedAt = Date.now();
     const nonce = crypto.randomBytes(32).toString('hex');
     const authTimer = setTimeout(() => { if (!authed) fail('auth-timeout'); }, authTimeoutMs);
     function fail(reason) {
-      if (!authed) { status.lastAuthFailureAt = Date.now(); onEvent({ event: 'auth_failed', reason }); }
+      if (!authed && !failed) {
+        failed = true;
+        status.lastAuthFailureAt = Date.now();
+        onEvent({ event: 'auth_failed', reason, relay_id: relayId, elapsed_ms: Date.now() - startedAt });
+      }
       socket.destroy();
     }
     socket.on('close', () => {
       clearTimeout(authTimer);
       sockets.delete(socket);
-      if (authed) { status.connections = Math.max(0, status.connections - 1); onEvent({ event: 'disconnected', principal }); }
+      if (authed) { status.connections = Math.max(0, status.connections - 1); onEvent({ event: 'disconnected', principal, relay_id: relayId }); return; }
+      // The client went away before authenticating (nothing else would record this attempt).
+      if (!failed) {
+        failed = true;
+        status.lastAuthFailureAt = Date.now();
+        onEvent({ event: 'auth_failed', reason: 'peer-closed-before-auth', code: socketError || undefined, relay_id: relayId, elapsed_ms: Date.now() - startedAt });
+      }
     });
-    socket.on('error', () => {});
+    socket.on('error', (error) => { socketError = (error && error.code) || 'error'; });
     lineReader(socket, (msg) => {
       if (!authed) {
         if (msg.t !== 'auth' || typeof msg.client_nonce !== 'string' || !/^[0-9a-f]{64}$/.test(msg.client_nonce)
@@ -96,7 +116,7 @@ function createBrokerServer({ endpoint, secret, onTool, onEvent = () => {}, maxC
         clearTimeout(authTimer);
         status.connections += 1;
         status.lastConnectedAt = Date.now();
-        onEvent({ event: 'connected', principal });
+        onEvent({ event: 'connected', principal, relay_id: relayId, elapsed_ms: Date.now() - startedAt });
         send(socket, { t: 'auth_ok', proof: hmac(secret, 's', nonce, msg.client_nonce) });
         return;
       }
@@ -108,6 +128,7 @@ function createBrokerServer({ endpoint, secret, onTool, onEvent = () => {}, maxC
       Promise.resolve(result).catch(() => null).then((value) => send(socket, { t: 'res', id: msg.id, result: value || null }));
     }, (reason) => fail(reason));
     send(socket, { t: 'hello', proto: PROTO, nonce });
+    onEvent({ event: 'hello_sent', relay_id: relayId });
   }
   const server = net.createServer(handleConnection);
   server.maxConnections = maxConnections + 1; // we reject the extra one ourselves (cleanly)
@@ -145,9 +166,13 @@ function createBrokerServer({ endpoint, secret, onTool, onEvent = () => {}, maxC
   return { listen, close, status: () => ({ ...status }), principal };
 }
 
-// Adapter side. Resolves once mutually authenticated.
-function connectBroker({ endpoint, secret, timeoutMs = AUTH_TIMEOUT_MS }) {
+// Adapter side. Resolves once mutually authenticated. On failure the rejection carries a
+// non-secret `diag` ({ stage, reason, code, elapsed_ms, bytes_in }) saying how far the handshake
+// got: connecting -> pipe-open -> hello-received -> auth-sent -> auth-ok. onStage(stage) is called
+// as each stage is reached. Nonces, proofs and the secret are never part of it.
+function connectBroker({ endpoint, secret, timeoutMs = AUTH_TIMEOUT_MS, onStage = () => {} }) {
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
     const socket = net.createConnection(endpoint);
     const pendingCalls = new Map();
     let nextId = 1;
@@ -155,8 +180,13 @@ function connectBroker({ endpoint, secret, timeoutMs = AUTH_TIMEOUT_MS }) {
     let clientNonce = null;
     let serverNonce = null;
     let closed = false;
+    let stage = 'connecting';
+    let bytesIn = 0;
+    let failure = null; // { reason, code } of the first thing that went wrong
     const closeListeners = new Set();
-    const timer = setTimeout(() => { socket.destroy(); reject(new Error('TRANSPORT_UNAVAILABLE')); }, timeoutMs);
+    const reach = (next) => { stage = next; try { onStage(next); } catch {} };
+    const noteFailure = (reason, code = null) => { if (!failure) failure = { reason, code }; };
+    const timer = setTimeout(() => { noteFailure('timeout'); socket.destroy(); }, timeoutMs);
 
     function shutdown(err) {
       if (closed) return;
@@ -164,27 +194,39 @@ function connectBroker({ endpoint, secret, timeoutMs = AUTH_TIMEOUT_MS }) {
       clearTimeout(timer);
       for (const { reject: rej, timer: t } of pendingCalls.values()) { clearTimeout(t); rej(new Error('TRANSPORT_UNAVAILABLE')); }
       pendingCalls.clear();
-      if (!authed) reject(err || new Error('TRANSPORT_UNAVAILABLE'));
+      if (!authed) {
+        if (err) noteFailure('socket-error', err.code || null);
+        noteFailure('peer-close');
+        const error = new Error('TRANSPORT_UNAVAILABLE');
+        error.diag = { stage, reason: failure.reason, code: failure.code, elapsed_ms: Date.now() - startedAt, bytes_in: bytesIn };
+        reject(error);
+      }
       for (const fn of closeListeners) { try { fn(); } catch {} }
     }
 
+    socket.on('connect', () => reach('pipe-open'));
+    socket.on('data', (data) => { bytesIn += data.length; });
     socket.on('error', (err) => shutdown(err));
     socket.on('close', () => shutdown());
     lineReader(socket, (msg) => {
       if (!authed) {
         if (msg.t === 'hello' && msg.proto === PROTO && typeof msg.nonce === 'string' && !clientNonce) {
+          reach('hello-received');
           clientNonce = crypto.randomBytes(32).toString('hex');
           serverNonce = msg.nonce;
           send(socket, { t: 'auth', client_nonce: clientNonce, proof: hmac(secret, 'c', msg.nonce, clientNonce) });
+          reach('auth-sent');
           return;
         }
         if (msg.t === 'auth_ok' && clientNonce && safeEqualHex(msg.proof, hmac(secret, 's', serverNonce, clientNonce))) {
           authed = true;
           clearTimeout(timer);
+          reach('auth-ok');
           resolve(api);
           return;
         }
-        socket.destroy(new Error('AUTH_FAILED'));
+        noteFailure(msg.t === 'hello' ? 'bad-hello' : msg.t === 'auth_ok' ? 'bad-server-proof' : 'unexpected-message');
+        socket.destroy();
         return;
       }
       if (msg.t === 'res' && pendingCalls.has(msg.id)) {
@@ -193,7 +235,7 @@ function connectBroker({ endpoint, secret, timeoutMs = AUTH_TIMEOUT_MS }) {
         clearTimeout(call.timer);
         call.resolve(msg.result);
       }
-    }, () => socket.destroy(new Error('PROTOCOL_ERROR')));
+    }, (reason) => { noteFailure(`protocol-${reason}`); socket.destroy(); });
 
     const api = {
       callTool(name, args, callTimeoutMs = 20000) {
