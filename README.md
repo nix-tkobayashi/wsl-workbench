@@ -151,13 +151,15 @@ dot -> plugin -> Secure MCP Tunnel -> MCP adapter (stdio) -> user-only named pip
    key in `%APPDATA%\wsl-workbench\integration\pairing.key` (ACL = your user SID, verified with
    `icacls`) and starts the pipe. On Windows the pipe is created by a small helper with a DACL that
    admits only your account and denies network logons (verified at start; see the gate record).
-2. Focus a pane, press **⇪** > **Share with dots (read-only)...** and pick **30 min / 2 h / 8 h**
-   (the last choice is the default button). The badge shows the state; the same menu extends (by
-   the chosen duration, from now), pauses / resumes capture, clears retained output, or stops sharing.
-   - 5 minutes before the end, the badge turns amber with an **Extend** button and a Windows
-     notification appears; one click on either extends that pane once (a notice for a pane that was
-     restarted meanwhile extends nothing).
-   - Grants are never saved: after a restart nothing is shared until you share again.
+2. Focus a pane, press **⇪** and turn **Read Sharing** ON (confirmation). Each pane has two
+   independent switches, both **OFF by default and with no time limit**: *Read Sharing* and
+   *Input* (stage B, below). The badge always shows the state — **Sharing OFF** / **Read ON · Input
+   OFF** / **Read ON · Input ON** (+ capture paused / AI input paused / confirm pending). The same
+   menu pauses / resumes capture and clears retained output.
+   - A switch stays ON until you turn it off, the terminal's process ends or the pane closes, the
+     integration is turned off, or Workbench exits. Nothing is saved: after a restart or a restored
+     pane, both switches are OFF.
+   - Turning Read Sharing OFF turns Input OFF too, stops capture and discards retained output.
 3. **Integration > Connection Status... > Copy Adapter Config** copies an `mcpServers` entry
    (`WSL Workbench.exe` in Node mode + `src/mcp/adapter.js`). No secret is in its args or env.
 
@@ -169,9 +171,12 @@ pane, 16 MiB total, memory only; opaque cursors; explicit gaps; best-effort reda
 
 Needs, all at once: the restricted pipe verified (status dialog: *Input transport*), **Integration
 > Allow Terminal Input (dots)** turned on (off by default), a healthy operation journal, and per pane:
-sharing on, **⇪ > CLI Input Profile** chosen, **⇪ > Allow Input**. Input has its own short limit: 30
-minutes (never past the sharing's end), not renewed by extending the sharing — allow it again from
-the ⇪ menu. When it runs out only input ends (`input_expired` in the audit log); reading continues. Then `workbench_write_input` and
+Read Sharing ON, **⇪ > CLI Input Profile** chosen, then the **⇪ > Input** switch ON (confirmation; no
+time limit). Input turns OFF by itself — and must be turned on again — when Read Sharing goes OFF,
+the CLI profile changes, or **the shell prompt comes back** (Workbench's shell reports its cwd with
+OSC 7 at every prompt, so the CLI the input was approved for has exited); see *Limits of CLI change
+detection* below. Turning Input OFF stops any pending AI input (unconfirmed → failed; already
+dispatched → `outcome_unknown`, never re-sent). Then `workbench_write_input` and
 `workbench_get_operation` are listed (never `run_command` / `cancel_operation`;
 `command_execution` stays false).
 
@@ -248,6 +253,19 @@ the machine): auto start → helper → tunnel-client → `adapter.cmd` → adap
 process, and `taskkill /F` of only the helper each left no tunnel-client / wrapper / adapter
 process; restarting right after a forced kill ran exactly one tunnel-client; with a hand-started
 tunnel-client running, the app refused (`already_running`).
+
+### Limits of CLI change detection
+
+Workbench cannot see which program runs in the foreground of a WSL terminal (the PTY belongs to
+`wsl.exe`). Input is turned OFF on the signals it can trust — PTY exit / replacement, CLI profile
+change, and the shell prompt reappearing (OSC 7 from Workbench's own `PROMPT_COMMAND`). Not covered:
+a CLI that starts another interactive program without returning to the shell (e.g. a nested CLI or
+`exec`), shells whose prompt does not run Workbench's `PROMPT_COMMAND` (zsh / fish, or a bashrc that
+overwrites it), and a CLI that itself prints OSC 7 (Input would turn OFF right away — the safe
+direction). The per-send confirmation shows the exact text and asks you to check the CLI's prompt
+first; that check remains the final safeguard. Options if needed: (a) a short "re-confirm after N
+minutes idle" rule for Input only, (b) shell integration that also reports the foreground command
+(OSC 133 / 633), (c) per-CLI prompt fingerprints in the profile.
 
 ### Connection diagnostics (v0.26.1)
 

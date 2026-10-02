@@ -226,19 +226,18 @@ test('feature OFF: hooks keep working, nothing is captured, sharing is refused',
   assert.equal(fs.existsSync(path.join(dir, 'integration', 'pairing.key')), false);
 });
 
-test('codex r1: lazy expiry (noticed by a read) still stops capture and drops the buffer', () => {
-  let t = 0;
-  const ctl = makeController(tmpDir(), { now: () => t, monotonic: () => t });
+test('read sharing OFF stops capture and drops the buffer; reads are refused afterwards', () => {
+  const ctl = makeController(tmpDir());
   ctl.server = { status: () => ({}) }; ctl.principal = 'p';
   ctl.ptyStarted(1, 1, { distro: 'Ubuntu', wslPath: '/w' });
   const s = ctl.sessionFor(1, 1);
-  ctl.share(1, 1, { durationMs: 100 });
+  ctl.share(1, 1);
   ctl.ptyData(1, 1, 'abc');
-  t = 101;
-  assert.equal(ctl.broker.handle('p', 'workbench_get_session', { target: ctl.registry.target(s) }).error.code, 'GRANT_EXPIRED');
+  ctl.stopSharing(1, 1);
+  assert.equal(ctl.broker.handle('p', 'workbench_get_session', { target: ctl.registry.target(s) }).error.code, 'GRANT_REVOKED');
   assert.equal(s.capture, 'off');
   assert.equal(s.buffer, null);
-  ctl.ptyData(1, 1, 'after expiry');
+  ctl.ptyData(1, 1, 'after off');
   assert.equal(ctl.registry.totalBytes(), 0);
 });
 
@@ -262,7 +261,7 @@ test('codex r3: a read enforces age retention even before the sweep runs', () =>
   const ctl = makeController(tmpDir(), { now: () => t, monotonic: () => t });
   ctl.server = { status: () => ({}) }; ctl.principal = 'p';
   ctl.ptyStarted(1, 1, { distro: 'Ubuntu', wslPath: '/w' });
-  ctl.share(1, 1, { durationMs: 60 * 60 * 1000 });
+  ctl.share(1, 1);
   ctl.ptyData(1, 1, 'old secret');
   t = 11 * 60 * 1000;
   const r = ctl.broker.handle('p', 'workbench_read_output', { target: ctl.registry.target(ctl.sessionFor(1, 1)) });

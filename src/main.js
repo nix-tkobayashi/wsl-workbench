@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, Menu, clipboard, nativeImage, safeStorage, Notification } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, Menu, clipboard, nativeImage, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -1597,7 +1597,6 @@ function initIntegration() {
       const state = viewState.get(viewId);
       if (state && !state.view.webContents.isDestroyed()) state.view.webContents.send('integration:paneState', panes);
     },
-    notifyExpiring: (info) => showExpiryNotice(info),
     // Stage B: the arbiter's only way into a pty. Returns false when the pane's pty is gone.
     writePty: (viewId, termId, data) => {
       const state = viewState.get(viewId);
@@ -2015,110 +2014,53 @@ function tunnelStatusLines() {
   return lines;
 }
 
-const { SHARE_DURATIONS_MS, INPUT_GRANT_MS, normalizeShareDuration } = require('./integration/access-control');
-
-function durationLabel(ms) {
-  const minutes = Math.round(ms / 60000);
-  return minutes % 60 === 0 ? tr('integration.hours').replace('{n}', String(minutes / 60)) : tr('integration.minutes').replace('{n}', String(minutes));
-}
-
-// The sharing duration last chosen in the share dialog (remembered; never re-shares anything).
-function lastShareDuration() {
-  const i = readSettings().integration;
-  return normalizeShareDuration(i && typeof i === 'object' ? i.shareDurationMs : undefined);
-}
-
-// Ask before sharing: who receives it, which pane (label + stable id), what is sent, for how long.
-// One button per duration (30 min / 2 h / 8 h); the last choice is the default button.
+// Ask before turning read sharing ON: who receives it, which pane (label + stable id), what is
+// sent, and that it has NO time limit (on until turned off, the pane ends, the integration is
+// turned off, or the app exits; never restored after a restart).
 async function confirmShare(win, viewId, termId, label) {
   const session = integration.sessionFor(viewId, termId);
   if (!session) return;
   // Snapshot the incarnation the user is shown: the session object is mutated in place on restart.
   const approvedId = session.sessionId;
   const approvedGeneration = session.generation;
-  const last = lastShareDuration();
   const detail = tr('integration.shareDetail')
     .replace('{principal}', integration.principal || '-')
     .replace('{label}', integration.registry.displayLabel({ ...session, label: String(label || '').slice(0, 80) || session.label }))
     .replace('{session}', `${session.sessionId} (gen ${session.generation})`);
-  const cancelId = SHARE_DURATIONS_MS.length;
   const opts = {
     type: 'warning',
     title: tr('integration.shareTitle'),
     message: tr('integration.shareMessage'),
     detail,
-    buttons: [...SHARE_DURATIONS_MS.map((ms) => tr('integration.shareFor').replace('{d}', durationLabel(ms))), tr('integration.cancel')],
-    defaultId: SHARE_DURATIONS_MS.indexOf(last),
-    cancelId,
+    buttons: [tr('integration.shareConfirm'), tr('integration.cancel')],
+    defaultId: 1,
+    cancelId: 1,
     noLink: true
   };
   const { response } = await dialog.showMessageBox(win, opts);
-  if (response < 0 || response >= cancelId) return;
-  const durationMs = SHARE_DURATIONS_MS[response];
+  if (response !== 0) return;
   // The pane may have been restarted while the dialog was open: share only the same incarnation.
   const now = integration.sessionFor(viewId, termId);
   if (!now || now.sessionId !== approvedId || now.generation !== approvedGeneration) return;
-  try {
-    integration.share(viewId, termId, { label, durationMs });
-    integration.saveIntegration({ shareDurationMs: durationMs });
-  } catch (error) {
+  try { integration.share(viewId, termId, { label }); } catch (error) {
     dialog.showErrorBox(tr('integration.shareTitle'), error.message || String(error));
   }
 }
-
-// "Sharing ends soon": a Windows notification; clicking it extends that exact pane incarnation once
-// (by the duration chosen when sharing). The pane badge offers the same Extend button.
-const expiryNotices = new Map(); // `${viewId}:${termId}` -> Notification
-function showExpiryNotice(info) {
-  if (!Notification.isSupported()) return;
-  const key = `${info.viewId}:${info.termId}`;
-  const old = expiryNotices.get(key);
-  if (old) { try { old.close(); } catch {} }
-  const minutes = Math.max(1, Math.ceil(info.remainingMs / 60000));
-  const n = new Notification({
-    title: tr('integration.expiringTitle'),
-    body: tr('integration.expiringBody').replace('{label}', info.label).replace('{n}', String(minutes)).replace('{d}', durationLabel(info.durationMs)),
-    silent: false
-  });
-  n.on('click', () => {
-    expiryNotices.delete(key);
-    if (integration) integration.extend(info.viewId, info.termId, { sessionId: info.sessionId, generation: info.generation, grantId: info.grantId });
-  });
-  n.on('close', () => { if (expiryNotices.get(key) === n) expiryNotices.delete(key); });
-  expiryNotices.set(key, n);
-  n.show();
-}
-
-function closeExpiryNotice(viewId, termId) {
-  const key = `${viewId}:${termId}`;
-  const n = expiryNotices.get(key);
-  if (n) { expiryNotices.delete(key); try { n.close(); } catch {} }
-}
-
-// The badge's Extend button (renderer). Main resolves the pane from the sender, like the pane menu.
-ipcMain.on('integration:extend', (event, { id } = {}) => {
-  const viewId = event.sender.id;
-  if (!integration || !viewState.has(viewId) || !Number.isInteger(id)) return;
-  if (integration.extend(viewId, id)) closeExpiryNotice(viewId, id);
-});
 
 async function confirmAllowInput(win, viewId, termId) {
   const session = integration.sessionFor(viewId, termId);
   const pane = integration.paneState(viewId).find((p) => p.id === termId);
   if (!session || !pane || !pane.shared) return;
-  const approvedId = session.sessionId;
-  const approvedGeneration = session.generation;
+  const expect = integration.inputTarget(viewId, termId); // what the dialog shows
   const detail = tr('integration.allowInputDetail')
     .replace('{principal}', integration.principal || '-')
     .replace('{label}', integration.registry.displayLabel(session))
     .replace('{session}', `${session.sessionId.slice(0, 8)}… (gen ${session.generation})`)
-    .replace('{until}', new Date(Math.min(pane.expiresAt, Date.now() + INPUT_GRANT_MS)).toLocaleTimeString(currentLang === 'ja' ? 'ja-JP' : 'en-US'));
+    .replace('{profile}', pane.profileId || '-');
   const opts = { type: 'warning', title: tr('integration.paneAllowInput'), message: tr('integration.allowInputMessage'), detail, buttons: [tr('integration.allowInputConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
   const { response } = await dialog.showMessageBox(win, opts);
   if (response !== 0) return;
-  const now = integration.sessionFor(viewId, termId);
-  if (!now || now.sessionId !== approvedId || now.generation !== approvedGeneration) return;
-  try { integration.grantInput(viewId, termId); } catch (error) { dialog.showErrorBox(tr('integration.paneAllowInput'), error.message || String(error)); }
+  try { integration.grantInput(viewId, termId, expect); } catch (error) { dialog.showErrorBox(tr('integration.paneAllowInput'), error.message || String(error)); }
 }
 
 // Per-pane sharing menu (terminal toolbar button). The view (event.sender) owns the pane id; main
@@ -2133,21 +2075,30 @@ ipcMain.on('integration:paneMenu', (event, { id, label = '', x = 0, y = 0 } = {}
     items.push({ label: tr('integration.paneEnableFirst'), click: async () => { if (await confirmEnableIntegration(win)) confirmShare(win, viewId, id, label); } });
   } else if (!pane) {
     items.push({ label: tr('integration.paneNotRunning'), enabled: false });
-  } else if (!pane.shared) {
-    items.push({ label: tr('integration.paneShare'), click: () => confirmShare(win, viewId, id, label) });
   } else {
-    items.push({ label: `${tr('integration.paneSharedUntil')} ${new Date(pane.expiresAt).toLocaleTimeString(currentLang === 'ja' ? 'ja-JP' : 'en-US')}`, enabled: false });
-    items.push({ label: tr('integration.paneExtend').replace('{d}', durationLabel(pane.durationMs || SHARE_DURATIONS_MS[0])), click: () => { if (integration.extend(viewId, id)) closeExpiryNotice(viewId, id); } });
-    items.push(pane.capture === 'paused'
-      ? { label: tr('integration.paneResume'), click: () => integration.resume(viewId, id) }
-      : { label: tr('integration.panePause'), click: () => integration.pause(viewId, id) });
-    items.push({ label: tr('integration.paneClear'), click: () => integration.clearBuffer(viewId, id) });
+    // Two independent switches, both OFF by default and with no time limit. Input needs read ON.
+    items.push({ label: `${tr('integration.paneState')}: ${tr(`integration.state_${pane.state}`)}`, enabled: false });
     items.push({ type: 'separator' });
-    // Stage B: per-pane input (only while the input gate is open).
-    if (integration.inputGate().open || pane.input) {
+    items.push({
+      label: tr('integration.paneReadSwitch'),
+      type: 'checkbox',
+      checked: pane.shared,
+      click: () => { if (pane.shared) integration.stopSharing(viewId, id); else confirmShare(win, viewId, id, label); }
+    });
+    const gateOpen = integration.inputGate().open;
+    if (gateOpen || pane.input) {
       const { verifiedProfiles } = require('./integration/input-profiles');
       items.push({
+        label: tr('integration.paneInputSwitch'),
+        type: 'checkbox',
+        checked: pane.input,
+        // ON only on top of read sharing, with the gate open and a CLI profile chosen; OFF always.
+        enabled: pane.input || (pane.shared && gateOpen && !!pane.profileId),
+        click: () => { if (pane.input) integration.revokeInput(viewId, id); else confirmAllowInput(win, viewId, id); }
+      });
+      items.push({
         label: tr('integration.paneProfile'),
+        enabled: pane.shared,
         submenu: [
           { label: tr('integration.paneProfileNone'), type: 'radio', checked: !pane.profileId, click: () => integration.selectProfile(viewId, id, null) },
           ...verifiedProfiles().map((p) => ({
@@ -2162,14 +2113,15 @@ ipcMain.on('integration:paneMenu', (event, { id, label = '', x = 0, y = 0 } = {}
         items.push(pane.inputPaused
           ? { label: tr('integration.paneResumeInput'), click: () => integration.resumeInput(viewId, id) }
           : { label: tr('integration.paneTakeover'), click: () => integration.takeover(viewId, id) });
-        items.push({ label: tr('integration.paneRevokeInput'), click: () => integration.revokeInput(viewId, id) });
-        if (pane.inputExpiresAt) items.push({ label: `${tr('integration.paneInputUntil')} ${new Date(pane.inputExpiresAt).toLocaleTimeString(currentLang === 'ja' ? 'ja-JP' : 'en-US')}`, enabled: false });
-      } else {
-        items.push({ label: tr('integration.paneAllowInput'), enabled: integration.inputGate().open, click: () => confirmAllowInput(win, viewId, id) });
       }
-      items.push({ type: 'separator' });
     }
-    items.push({ label: tr('integration.paneStop'), click: () => { integration.stopSharing(viewId, id); closeExpiryNotice(viewId, id); } });
+    if (pane.shared) {
+      items.push({ type: 'separator' });
+      items.push(pane.capture === 'paused'
+        ? { label: tr('integration.paneResume'), click: () => integration.resume(viewId, id) }
+        : { label: tr('integration.panePause'), click: () => integration.pause(viewId, id) });
+      items.push({ label: tr('integration.paneClear'), click: () => integration.clearBuffer(viewId, id) });
+    }
   }
   items.push({ type: 'separator' }, { label: tr('integration.menuStatus'), click: () => showIntegrationStatus(win) });
   Menu.buildFromTemplate(items).popup({ window: win, x: Math.round(x), y: Math.round(y + TABSTRIP_H) });

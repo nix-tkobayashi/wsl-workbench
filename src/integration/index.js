@@ -13,7 +13,7 @@
 
 const path = require('path');
 const { SessionRegistry } = require('./session-registry');
-const { AccessControl, RateLimiter, READ_PERMISSIONS, INPUT_PERMISSIONS, DEFAULT_GRANT_MS } = require('./access-control');
+const { AccessControl, RateLimiter, READ_PERMISSIONS, INPUT_PERMISSIONS } = require('./access-control');
 const { Broker } = require('./broker');
 const { createBrokerServer, principalFor } = require('./local-transport');
 const { createAuditLog } = require('./audit');
@@ -29,16 +29,13 @@ const pairing = require('./pairing');
 const TERMINAL_REPORT_RE = /^(?:\x1b\[[IO]|\x1b\[[?>]?[\d;]*[cnR]|\x1b\][\d;]*[^\x07\x1b]*(?:\x07|\x1b\\))+$/;
 function isTerminalReport(data) { return typeof data === 'string' && data.length > 0 && TERMINAL_REPORT_RE.test(data); }
 
-const SWEEP_MS = 5000;
-const EXPIRY_WARNING_MS = 5 * 60 * 1000; // "sharing ends soon" notice, once per expiry
+const SWEEP_MS = 5000; // output-retention pruning only; sharing itself has no time limit
 
 class IntegrationController {
   constructor({
     userDataDir, appVersion = '0.0.0', platform = process.platform,
     readSettings = () => ({}), writeSettings = () => true,
     notifyView = () => {}, limits = {}, now = Date.now, monotonic,
-    // A shared pane's grant ends within EXPIRY_WARNING_MS: main shows a notice with an Extend action.
-    notifyExpiring = () => {},
     // Stage B hooks (main.js): PTY writer, confirmation UI, OS-protected journal key, test overrides.
     writePty = () => false, requestConfirmation = () => { throw new Error('no confirmation UI'); }, cancelConfirmation = () => {},
     journalKey = () => null, secureTransport = null,
@@ -52,13 +49,11 @@ class IntegrationController {
     this.readSettings = readSettings;
     this.writeSettings = writeSettings;
     this.notifyView = notifyView;
-    this.notifyExpiring = notifyExpiring;
     this.now = now;
     this.registry = new SessionRegistry({ limits, now });
     this.endReason = null; // set around an explicit end so the audit line says why
     const onEnd = (grant, code) => this.onGrantEnded(grant, code);
-    const onInputEnd = (grant) => this.onInputExpired(grant);
-    this.access = new AccessControl(monotonic ? { now, monotonic, onEnd, onInputEnd } : { now, onEnd, onInputEnd });
+    this.access = new AccessControl({ now, onEnd });
     this.rateLimiter = new RateLimiter(monotonic ? { monotonic } : {});
     this.audit = createAuditLog({ dir: path.join(this.dir, 'audit'), now });
     this.broker = new Broker({ registry: this.registry, access: this.access, rateLimiter: this.rateLimiter, audit: this.audit, now, serverVersion: appVersion });
@@ -134,6 +129,7 @@ class IntegrationController {
     const settings = this.readSettings() || {};
     if (settings.integration && settings.integration.enabled) {
       try { await this.listen(); } catch (error) { this.lastError = error.message || String(error); }
+      this.pushAllPaneStates(); // panes opened while the listener was starting get their badge
       if (this.enabled && this.tunnel) this.tunnel.autoStart();
     }
   }
@@ -187,6 +183,7 @@ class IntegrationController {
     await this.listen();
     this.saveIntegration({ enabled: true });
     this.audit.record({ event: 'integration_enabled', principal: this.principal });
+    this.pushAllPaneStates();
     if (this.tunnel) this.tunnel.autoStart();
   }
 
@@ -202,6 +199,7 @@ class IntegrationController {
     this.transportGate = 'blocked';
     if (this.store) { this.store.close(); this.store = null; this.arbiter.store = { healthy: false, digest: () => '', lookup: () => null, append: () => { throw new Error('no journal'); }, retentionMs: 0 }; }
     this.audit.record({ event: 'integration_disabled' });
+    this.pushAllPaneStates();
     return { tunnelStopped };
   }
 
@@ -260,8 +258,19 @@ class IntegrationController {
       session.inputProfile = null;
       session.inputPaused = false;
       this.endGrant(session, 'GRANT_REVOKED', `pty_${event}`);
-    } else if (event === 'exited') this.arbiter.sessionChanged(session.sessionId, 'STATE_CONFLICT');
-    else if (event === 'exited') this.pushPaneState(session.viewId);
+    } else if (event === 'started') {
+      this.pushPaneState(session.viewId); // a new / restarted pane shows its (OFF) state right away
+    } else if (event === 'shell_prompt') {
+      // The shell printed its prompt (OSC 7 cwd report): the CLI that input was approved for has
+      // exited (or was never in front). Input must be allowed again for whatever runs next; an
+      // Input ON dialog still open for the old target is invalidated too.
+      session.inputEpoch = (session.inputEpoch || 0) + 1;
+      this.revokeInputFor(session, 'shell_prompt');
+    } else if (event === 'exited') {
+      // The pane's process ended: both switches go OFF (a restarted shell is a new generation).
+      this.arbiter.sessionChanged(session.sessionId, 'STATE_CONFLICT');
+      this.endGrant(session, 'GRANT_REVOKED', 'pty_exited');
+    }
   }
 
   // Single cleanup path for every ended grant (revoke, sweep, or expiry noticed lazily by a read):
@@ -272,14 +281,6 @@ class IntegrationController {
     if (session && session.generation === grant.generation) this.registry.resetCapture(session);
     this.audit.record({ event: 'grant_ended', principal: grant.principal, session_id: grant.session_id, generation: grant.generation, code, reason: this.endReason || undefined });
     if (session) this.pushPaneState(session.viewId);
-  }
-
-  // Input permissions ran out (the read grant stays): stop any pending AI input, tell the view.
-  onInputExpired(grant) {
-    this.arbiter.sessionChanged(grant.session_id, 'GRANT_EXPIRED');
-    this.audit.record({ event: 'input_expired', principal: grant.principal, session_id: grant.session_id, generation: grant.generation });
-    const session = this.registry.sessions.get(grant.session_id);
-    if (session) { this.registry.bump(session); this.pushPaneState(session.viewId); }
   }
 
   endGrant(session, code, reason) {
@@ -295,18 +296,6 @@ class IntegrationController {
   }
 
   sweep() {
-    this.access.sweep(); // onGrantEnded / onInputExpired do the cleanup
-    for (const grant of this.access.grants.values()) {
-      if (grant.warned || this.access.remainingMs(grant) > EXPIRY_WARNING_MS) continue;
-      grant.warned = true;
-      const session = this.registry.sessions.get(grant.session_id);
-      if (!session || session.generation !== grant.generation) continue;
-      this.safe(() => this.notifyExpiring({
-        viewId: session.viewId, termId: session.termId, sessionId: session.sessionId, generation: session.generation, grantId: grant.grant_id,
-        label: this.registry.displayLabel(session), remainingMs: this.access.remainingMs(grant), durationMs: grant.durationMs
-      }));
-      this.pushPaneState(session.viewId);
-    }
     for (const session of this.registry.sessions.values()) if (session.buffer) session.buffer.prune();
   }
 
@@ -317,13 +306,16 @@ class IntegrationController {
     return session && session.lifecycle !== 'closed' ? session : null;
   }
 
-  // Grant read-only access to one pane. Capture starts NOW: earlier scrollback is never shared.
-  share(viewId, termId, { label, durationMs = DEFAULT_GRANT_MS } = {}) {
+  // Read sharing switch ON for one pane. Capture starts NOW: earlier scrollback is never shared.
+  // No time limit: it stays on until turned off, the PTY is replaced/closed, the integration is
+  // turned off, or the app exits.
+  share(viewId, termId, { label } = {}) {
     if (!this.enabled) throw new Error('The dots integration is turned off.');
     const session = this.sessionFor(viewId, termId);
-    if (!session) throw new Error('This terminal is not running.');
+    if (!session || session.lifecycle !== 'alive') throw new Error('This terminal is not running.');
+    if (this.access.active(session.sessionId)) return this.access.active(session.sessionId); // already on
     if (label !== undefined) this.registry.setLabel(session, label);
-    const grant = this.access.issue({ principal: this.principal, sessionId: session.sessionId, generation: session.generation, permissions: READ_PERMISSIONS, durationMs });
+    const grant = this.access.issue({ principal: this.principal, sessionId: session.sessionId, generation: session.generation, permissions: READ_PERMISSIONS });
     this.registry.resetCapture(session);
     this.registry.startCapture(session);
     this.audit.record({ event: 'grant_issued', principal: this.principal, session_id: session.sessionId, generation: session.generation, permissions: READ_PERMISSIONS });
@@ -331,26 +323,8 @@ class IntegrationController {
     return grant;
   }
 
-  // Extend by the duration chosen when sharing, from now. Input keeps its own expiry. When a grant
-  // is named (a notice's Extend action), only that exact grant is extended — never a later re-share.
-  extend(viewId, termId, expect = null) {
-    const session = this.sessionFor(viewId, termId);
-    if (session && expect) {
-      const current = this.access.active(session.sessionId);
-      if (!current || current.grant_id !== expect.grantId || session.sessionId !== expect.sessionId || session.generation !== expect.generation) {
-        this.pushPaneState(viewId);
-        return null;
-      }
-    }
-    const grant = session && this.access.extend(session.sessionId);
-    if (grant) {
-      this.registry.bump(session);
-      this.audit.record({ event: 'grant_extended', principal: grant.principal, session_id: grant.session_id, generation: grant.generation, reason: `${Math.round(grant.durationMs / 60000)}m` });
-    }
-    this.pushPaneState(viewId);
-    return grant;
-  }
-
+  // Read sharing switch OFF: input goes OFF with it; pending (unconfirmed / unsent) AI input is
+  // stopped; anything already dispatched is outcome_unknown and never re-sent.
   stopSharing(viewId, termId) {
     const session = this.sessionFor(viewId, termId);
     if (session) this.endGrant(session, 'GRANT_REVOKED', 'user_stopped');
@@ -393,12 +367,30 @@ class IntegrationController {
   }
 
   // Add input:write + operation:read to the pane's existing (read) grant; same expiry.
-  grantInput(viewId, termId) {
+  // The input-target snapshot a confirmation dialog shows; grantInput(…, expect) refuses when it
+  // changed meanwhile (pane restarted, profile changed, shell prompt came back, read went off).
+  inputTarget(viewId, termId) {
+    const session = this.sessionFor(viewId, termId);
+    if (!session) return null;
+    const grant = this.access.active(session.sessionId);
+    return { sessionId: session.sessionId, generation: session.generation, grantId: grant ? grant.grant_id : null, inputEpoch: session.inputEpoch || 0, profileId: session.inputProfile ? session.inputProfile.id : null };
+  }
+
+  grantInput(viewId, termId, expect = null) {
     const session = this.sessionFor(viewId, termId);
     const grant = session && this.access.active(session.sessionId);
     if (!grant) throw new Error('Share this terminal first.');
+    if (session.lifecycle !== 'alive') throw new Error('This terminal is not running.');
     if (!this.inputGate().open) throw new Error('Terminal input is not enabled.');
-    this.access.grantInput(grant); // own short expiry, never past the read expiry
+    if (!session.inputProfile) throw new Error('Choose a CLI input profile first.');
+    if (expect) {
+      const now = this.inputTarget(viewId, termId);
+      if (!now || now.sessionId !== expect.sessionId || now.generation !== expect.generation || !expect.grantId || now.grantId !== expect.grantId
+        || now.inputEpoch !== expect.inputEpoch || now.profileId !== expect.profileId) {
+        throw new Error('The terminal changed while the dialog was open (CLI exited, profile changed, or pane restarted). Turn Input ON again.');
+      }
+    }
+    this.access.grantInput(grant); // no time limit: on until turned off (or read sharing goes off)
     this.registry.bump(session);
     this.audit.record({ event: 'input_granted', principal: grant.principal, session_id: session.sessionId, generation: session.generation, permissions: INPUT_PERMISSIONS });
     this.pushPaneState(viewId);
@@ -407,13 +399,19 @@ class IntegrationController {
 
   revokeInput(viewId, termId) {
     const session = this.sessionFor(viewId, termId);
-    const grant = session && this.access.active(session.sessionId);
-    if (!grant) return;
+    if (session) this.revokeInputFor(session, 'user_stopped');
+  }
+
+  // Input switch OFF (read stays): pending AI input stops; nothing dispatched is ever re-sent.
+  revokeInputFor(session, reason) {
+    const grant = this.access.active(session.sessionId);
+    if (!grant || !this.access.hasInput(grant)) return false;
     this.arbiter.sessionChanged(session.sessionId, 'GRANT_REVOKED');
     this.access.revokeInput(grant);
     this.registry.bump(session);
-    this.audit.record({ event: 'input_revoked', principal: grant.principal, session_id: session.sessionId, generation: session.generation });
-    this.pushPaneState(viewId);
+    this.audit.record({ event: 'input_revoked', principal: grant.principal, session_id: session.sessionId, generation: session.generation, reason });
+    this.pushPaneState(session.viewId);
+    return true;
   }
 
   selectProfile(viewId, termId, profileId) {
@@ -421,8 +419,15 @@ class IntegrationController {
     if (!session) return;
     const profile = profileId ? findProfile(profileId) : null;
     if (profileId && !profile) throw new Error('Unknown or unverified profile.');
+    const before = session.inputProfile;
+    const changed = !before !== !profile || (before && profile && (before.id !== profile.id || before.revision !== profile.revision));
     this.arbiter.sessionChanged(session.sessionId, 'STATE_CONFLICT');
     session.inputProfile = profile ? { id: profile.id, revision: profile.revision } : null;
+    // A different CLI profile means a different target: input must be confirmed again.
+    if (changed) {
+      session.inputEpoch = (session.inputEpoch || 0) + 1;
+      this.revokeInputFor(session, 'profile_changed');
+    }
     this.registry.bump(session);
     this.pushPaneState(viewId);
   }
@@ -469,10 +474,9 @@ class IntegrationController {
         id: session.termId,
         shared: !!grant,
         permissions: grant ? [...grant.permissions].sort() : [],
-        expiresAt: grant ? this.now() + this.access.remainingMs(grant) : null,
-        durationMs: grant ? grant.durationMs : null,
-        expiringSoon: !!(grant && this.access.remainingMs(grant) <= EXPIRY_WARNING_MS),
-        inputExpiresAt: grant && grant.permissions.has('input:write') ? this.now() + this.access.inputRemainingMs(grant) : null,
+        // 'off' | 'read' | 'read_input' — what the badge shows.
+        state: !grant ? 'off' : (grant.permissions.has('input:write') ? 'read_input' : 'read'),
+        integration: this.enabled,
         capture: session.capture,
         sessionId: session.sessionId,
         generation: session.generation,
@@ -487,6 +491,11 @@ class IntegrationController {
 
   pushPaneState(viewId) {
     try { this.notifyView(viewId, this.paneState(viewId)); } catch {}
+  }
+
+  // Every view's badges (the integration was turned on/off: "共有OFF" badges appear/disappear).
+  pushAllPaneStates() {
+    for (const viewId of new Set([...this.registry.sessions.values()].map((x) => x.viewId))) this.pushPaneState(viewId);
   }
 
   status() {
@@ -513,4 +522,4 @@ class IntegrationController {
   }
 }
 
-module.exports = { IntegrationController, isTerminalReport, INPUT_PERMISSIONS, EXPIRY_WARNING_MS };
+module.exports = { IntegrationController, isTerminalReport, INPUT_PERMISSIONS };
