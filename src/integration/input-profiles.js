@@ -51,10 +51,16 @@ const PROFILES = [
     submit_key: 'Enter',
     supported_keys: ['Enter'],
     submitDelayMs: 600,
-    verified: false,
-    // Not measured: a fresh empty folder shows Claude Code's folder-trust prompt, which the
-    // measurement rules forbid answering automatically. Stays unselectable until measured.
-    evidence: []
+    verified: true,
+    // B06 measurement, 2026-10-03, Windows ConPTY -> wsl.exe (as Workbench), WSL2 Ubuntu, 120x40,
+    // node-pty 1.x, empty temp dir that the user trusted in Claude Code themselves (no prompt was
+    // answered by the measurement), new PTY, prompt 「ツールを使わず、OKとだけ返してください」:
+    //  - text written as UTF-8, then 600 ms, then "\r" -> submitted (prompt moved to the transcript,
+    //    input cleared, reply "OK").
+    //  - text + "\r" in ONE write -> also submitted (reply "OK"); Workbench still sends them as
+    //    separate writes with a confirmation in between.
+    //  Only Enter-as-submit was measured; other keys and multi-line input are unverified, not offered.
+    evidence: ['B06:claude-code-2.1.287:2026-10-03:text+600ms+CR=submit', 'B06:claude-code-2.1.287:2026-10-03:text+CR-one-write=submit']
   }
 ];
 
