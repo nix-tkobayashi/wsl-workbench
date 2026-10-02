@@ -79,11 +79,25 @@ async function getConnection() {
   try { return await connecting; } finally { connecting = null; }
 }
 
+// Request diagnostics (tools/list results, initialize): always to stderr (the MCP client's log), and
+// to the diag file once the integration folder exists. The adapter never creates that folder itself
+// (Workbench creates it with a user-only ACL).
+let requestLog = null;
+function logRequest(entry) {
+  if (!requestLog) {
+    const dir = candidateDirs().find((d) => fs.existsSync(d));
+    if (!dir) { diagLogger(null)(entry); return; }
+    requestLog = diagLogger(dir);
+  }
+  requestLog(entry);
+}
+
 function main() {
   const send = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
   const server = createMcpServer({
     serverVersion: serverVersion(),
     send,
+    onEvent: logRequest,
     callTool: async (name, args) => (await getConnection()).callTool(name, args)
   });
   let pending = '';
