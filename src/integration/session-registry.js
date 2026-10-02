@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const path = require('path');
 const { TerminalNormalizer, OutputBuffer } = require('./output-buffer');
 const { parseOsc7Cwd } = require('../terminal-actions');
+const { detectClis } = require('./input-profiles');
 
 const DEFAULT_LIMITS = {
   sessionBytes: 1024 * 1024,
@@ -92,6 +93,9 @@ class SessionRegistry {
     session.wslPath = stripControls(wslPath, 1024);
     session.initialCwd = stripControls(initialCwd || wslPath, 1024);
     session.cwd = { value: null, source: 'unknown', observed_at: null };
+    // The CLI running in this pane: { family, version, source: 'pane_output' | 'user_confirmed', at }.
+    session.cli = null;
+    session.bannerTail = '';
     session.startedAt = at;
     this.bump(session);
     this.emit('started', session);
@@ -103,6 +107,30 @@ class SessionRegistry {
     const session = this.bySlot(viewId, termId);
     if (!session || session.capture === 'off' || !session.normalizer) return 0;
     const { text, controlRemoved, replaced } = session.normalizer.push(String(data));
+    // A CLI's startup banner in the pane's own output (also while paused): which CLI and version
+    // runs in THIS pane. Scanned over a small tail so a banner split across chunks is still seen.
+    // Stream order: a shell prompt (OSC 7) clears the CLI; a banner AFTER the last prompt of the
+    // chunk (a CLI started from that prompt) identifies the new one; a banner before it is gone.
+    const promptAt = session.promptAt;
+    session.promptAt = null;
+    const tail = session.bannerTail || '';
+    if (promptAt != null) {
+      session.bannerTail = '';
+      this.emit('shell_prompt', session);
+    }
+    if (text) {
+      const scan = promptAt != null ? text.slice(promptAt) : tail + text;
+      session.bannerTail = scan.slice(-160);
+      // Every banner, in order: any different CLI / version on the way revokes input, even if a
+      // later banner in the same chunk matches the original again.
+      const clis = detectClis(scan);
+      for (const cli of clis) {
+        session.lastBanner = { family: cli.family, version: cli.version };
+        this.emit('cli_banner', session);
+      }
+      // Keep what follows the last banner: a next, still incomplete banner must not be lost.
+      if (clis.length) session.bannerTail = scan.slice(clis[clis.length - 1].end).slice(-160);
+    }
     if (session.capture !== 'active') return 0; // paused: OSC 7 still tracked, nothing stored
     const added = session.buffer.append(text, { controlRemoved, replaced });
     if (added) this.enforceGlobalLimit();
@@ -161,13 +189,14 @@ class SessionRegistry {
     // the same session can never be applied to a later capture's positions.
     session.captureId = this.randomUUID();
     session.normalizer = new TerminalNormalizer({
-      onOsc: (code, payload) => {
+      onOsc: (code, payload, at) => {
         if (code !== '7') return;
         const cwd = parseOsc7Cwd(payload);
         if (cwd) session.cwd = { value: cwd, source: 'advisory_osc7', observed_at: new Date(this.now()).toISOString() };
         // Workbench's shell reports OSC 7 from PROMPT_COMMAND, i.e. once per shell prompt: the
-        // foreground is the shell again (a CLI exited). Used to turn input off.
-        this.emit('shell_prompt', session);
+        // foreground is the shell again (a CLI exited). Used to turn input off. Emitted after this
+        // chunk's banner scan (ptyData), so a banner earlier in the same chunk cannot outlive it.
+        session.promptAt = at; // the last prompt's position in this chunk's normalized text
       }
     });
     session.capture = 'active';
@@ -200,6 +229,11 @@ class SessionRegistry {
   // Stop capturing and discard everything retained (grant ended, PTY replaced, slot closed).
   resetCapture(session) {
     const had = session.capture !== 'off';
+    // While not capturing nothing is observed, so the CLI identity can no longer be trusted: the
+    // next share starts with an unknown CLI (until its banner or the user identifies it).
+    session.cli = null;
+    session.bannerTail = '';
+    session.promptAt = null;
     if (session.buffer) session.buffer.clear();
     session.buffer = null;
     session.normalizer = null;

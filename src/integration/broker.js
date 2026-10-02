@@ -62,12 +62,17 @@ function isoTime(ms) { return ms == null ? null : new Date(ms).toISOString(); }
 
 // get_session.input_profile: the locally selected verified profile (null when none). Foreground is
 // never verified, so every operation needs local confirmation, and text_and_submit a second one.
-function inputProfileView(session) {
+function inputProfileView(session, cliStatus) {
   const b = session.inputProfile;
   if (!b || !findProfile(b.id, b.revision)) return null;
+  const cli = session.cli;
   return {
     id: b.id,
     revision: b.revision,
+    // The CLI version input goes to, with how it was established: 'pane_output' (its banner in this
+    // pane), 'user_confirmed', or null value / 'unknown'. Status: verified | compat_approved |
+    // compat_pending | major_changed | family_mismatch | unknown (only the first two accept input).
+    cli_version: { value: cli ? cli.version : null, source: cli ? cli.source : 'unknown', status: cliStatus || 'unknown' },
     foreground_verified: false,
     requires_local_confirmation: true,
     requires_submit_confirmation: true,
@@ -276,7 +281,7 @@ class Broker {
       capture_state: session.capture,
       active_operation_id: this.input && this.input.arbiter.pending.get(session.sessionId) ? this.input.arbiter.pending.get(session.sessionId).id : null,
       user_intervened: !!session.inputPaused,
-      input_profile: inputProfileView(session),
+      input_profile: inputProfileView(session, this.input && this.input.cliStatus ? this.input.cliStatus(session) : null),
       buffer: {
         available_from: first == null ? null : String(first),
         available_to: last == null ? null : String(last),

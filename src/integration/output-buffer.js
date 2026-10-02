@@ -107,7 +107,7 @@ class TerminalNormalizer {
           break;
         }
         case 'osc': {
-          if (code === 0x07 || code === 0x9c) { this.endOsc(); break; }
+          if (code === 0x07 || code === 0x9c) { this.oscAt = out.length; this.endOsc(); break; }
           if (code === 0x1b) { this.state = 'oscEsc'; break; }
           if (code === 0x18 || code === 0x1a) { this.state = 'ground'; break; }
           if (this.oscPayload.length < OSC_PAYLOAD_LIMIT) this.oscPayload += ch;
@@ -115,7 +115,7 @@ class TerminalNormalizer {
           break;
         }
         case 'oscEsc': {
-          if (ch === '\\') { this.endOsc(); break; }
+          if (ch === '\\') { this.oscAt = out.length; this.endOsc(); break; }
           // ESC without '\' terminates the OSC (xterm behaviour) and starts a new escape.
           this.state = 'esc';
           this.oscPayload = '';
@@ -151,7 +151,8 @@ class TerminalNormalizer {
     if (overflow || !this.onOsc) return;
     const sep = payload.indexOf(';');
     const code = sep < 0 ? payload : payload.slice(0, sep);
-    try { this.onOsc(code, sep < 0 ? '' : payload.slice(sep + 1)); } catch {}
+    // oscAt: where in this push's normalized text the sequence ended (stream order for callers).
+    try { this.onOsc(code, sep < 0 ? '' : payload.slice(sep + 1), this.oscAt == null ? 0 : this.oscAt); } catch {}
   }
 
   reset() {
