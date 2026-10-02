@@ -104,7 +104,7 @@ test('happy path: text_and_submit = confirm, text, confirm, delay, Enter; result
     t.prepare();
     const caps = t.ctl.broker.handle(t.P, 'workbench_capabilities', {});
     assert.equal(caps.features.input_write, true);
-    assert.deepEqual(caps.extensions.write_input_actions_v1.profiles.map((p) => p.id), [PROFILE]);
+    assert.deepEqual(caps.extensions.write_input_actions_v1.profiles.map((p) => p.id), [PROFILE, 'claude-code.2.1.prompt.single-line']);
     const view = t.ctl.broker.handle(t.P, 'workbench_get_session', { target: t.target() });
     assert.deepEqual(view.effective_permissions, ['input:write', 'operation:read', 'output:read', 'session:list']);
     assert.equal(view.input_profile.id, PROFILE);
@@ -518,5 +518,35 @@ test('codex B3: get_operation still reports the outcome after a journal failure 
     assert.equal(op.ok, true, JSON.stringify(op));
     assert.equal(op.status, 'outcome_unknown');
     assert.equal(t.write({ text: 'y' }).error.code, 'UNSUPPORTED'); // but no new input
+  } finally { await t.ctl.shutdown(); }
+});
+
+test('Claude Code 2.1.287 profile (measured 2026-10-03): text, confirm, Enter after its own confirmation and the 600 ms delay', posixOnly, async () => {
+  const t = await setup();
+  const CLAUDE = 'claude-code.2.1.prompt.single-line';
+  try {
+    t.ctl.selectProfile(1, 1, CLAUDE);
+    t.ctl.grantInput(1, 1);
+    const view = t.ctl.broker.handle(t.P, 'workbench_get_session', { target: t.target() });
+    assert.equal(view.input_profile.id, CLAUDE);
+    const r = t.ctl.broker.handle(t.P, 'workbench_write_input', {
+      target: t.target(), expected_state_revision: t.rev(), idempotency_key: `k-${crypto.randomUUID()}`,
+      input_contract: 'actions-v1', profile_id: CLAUDE, profile_revision: '1',
+      action: { type: 'text_and_submit', text: 'ツールを使わず、OKとだけ返してください', submit_key: 'Enter' }
+    });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(t.writes.length, 0);
+    t.ctl.confirmOperation(r.operation_id, 'initial', 'approved');
+    assert.deepEqual(t.writes, ['ツールを使わず、OKとだけ返してください']);
+    t.ctl.confirmOperation(r.operation_id, 'submit', 'approved');
+    const op = await t.getOp(r.operation_id, 3000);
+    assert.equal(op.status, 'delivered', JSON.stringify(op));
+    assert.deepEqual(t.writes, ['ツールを使わず、OKとだけ返してください', '\r']);
+    // The codex profile is not interchangeable: naming it while Claude Code is selected is refused.
+    const wrong = t.ctl.broker.handle(t.P, 'workbench_write_input', {
+      target: t.target(), expected_state_revision: t.rev(), idempotency_key: `k-${crypto.randomUUID()}`,
+      input_contract: 'actions-v1', profile_id: PROFILE, profile_revision: '1', action: { type: 'text', text: 'x' }
+    });
+    assert.equal(wrong.ok, false);
   } finally { await t.ctl.shutdown(); }
 });

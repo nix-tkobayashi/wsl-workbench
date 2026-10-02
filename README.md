@@ -200,7 +200,7 @@ CLI profiles (measured in an empty temp folder with a new PTY, prompt 「ツー�
 | Profile | CLI | Result |
 | --- | --- | --- |
 | `codex.0.160.composer.single-line` | codex-cli 0.160.0 (WSL2) | text, ~600 ms, `\r` → submitted; text+`\r` in one write → not submitted. Verified (Enter only). |
-| `claude-code.2.1.prompt.single-line` | Claude Code 2.1.287 | **Not measured**: the folder-trust prompt was not answered (rule). Not selectable. |
+| `claude-code.2.1.prompt.single-line` | Claude Code 2.1.287 (Windows ConPTY → wsl.exe) | text, ~600 ms, `\r` → submitted; text+`\r` in one write → also submitted (still sent separately). Verified (Enter only), 2026-10-03, in an empty folder the user trusted themselves. |
 
 ### Running tunnel-client with Workbench (v0.27.0)
 
