@@ -17,8 +17,8 @@ function setup({ limits } = {}) {
   const access = new AccessControl({ now, monotonic: () => mono });
   const rateLimiter = new RateLimiter({ ratePerSec: 1000, burst: 1000, monotonic: () => mono });
   const broker = new Broker({ registry, access, rateLimiter, now, serverVersion: '9.9.9' });
-  function share(session, principal = P, durationMs) {
-    access.issue({ principal, sessionId: session.sessionId, generation: session.generation, durationMs });
+  function share(session, principal = P) {
+    access.issue({ principal, sessionId: session.sessionId, generation: session.generation });
     registry.resetCapture(session);
     registry.startCapture(session);
   }
@@ -206,24 +206,18 @@ test('tail=true reads the end; max_bytes below one character -> INPUT_INVALID', 
   assert.equal(small.error.minimum_required_bytes, 4);
 });
 
-test('A06: expiry (wall OR monotonic) and revocation deny reads with the grant’s code', () => {
+test('A06: no time limit — a grant stays valid until revoked; revocation denies reads with its code', () => {
   const { registry, access, broker, clock, share } = setup();
   const s = start(registry);
-  share(s, P, 1000);
+  share(s);
   const t = registry.target(s);
-  assert.equal(broker.handle(P, 'workbench_get_session', { target: t }).ok, true);
-  clock.advance(1001);
-  assert.equal(broker.handle(P, 'workbench_get_session', { target: t }).error.code, 'GRANT_EXPIRED');
-  // Wall clock moved BACK does not resurrect: monotonic still says expired.
-  const s2 = start(registry, 1, 2);
-  share(s2, P, 1000);
-  clock.advance(1001);
+  clock.advance(30 * 24 * 60 * 60 * 1000); // a month later
   clock.jumpWall(-10_000);
-  assert.equal(broker.handle(P, 'workbench_get_session', { target: registry.target(s2) }).error.code, 'GRANT_EXPIRED');
-  const s3 = start(registry, 1, 3);
-  share(s3);
-  access.end(s3.sessionId, 'GRANT_REVOKED');
-  assert.equal(broker.handle(P, 'workbench_read_output', { target: registry.target(s3) }).error.code, 'GRANT_REVOKED');
+  assert.equal(broker.handle(P, 'workbench_get_session', { target: t }).ok, true);
+  assert.equal(broker.handle(P, 'workbench_get_session', { target: t }).grant_expires_at, null);
+  assert.equal(broker.handle(P, 'workbench_capabilities', {}).limits.grant_mode, 'until_revoked');
+  access.end(s.sessionId, 'GRANT_REVOKED');
+  assert.equal(broker.handle(P, 'workbench_read_output', { target: t }).error.code, 'GRANT_REVOKED');
   assert.equal(broker.handle(P, 'workbench_list_sessions', {}).sessions.length, 0);
 });
 

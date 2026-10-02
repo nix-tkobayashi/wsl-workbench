@@ -6,7 +6,7 @@
 
 前提:
 - Workbench が起動中で、**Integration > Enable dots Integration** がオンになっている。
-- 対象ペインで **⇪ > Share with dots (read-only, 30 min)** が有効になっている。
+- 対象ペインで **⇪ > 読み取り共有** が ON になっている（v0.29.0 以降は期限なし。それ以前は 30 分）。
 - サンドボックスの外で、本人ユーザーの通常の PowerShell を開く（「管理者として実行」は使わない）。
 
 1. 権限を確認する。`whoami /groups | Select-String 'Mandatory Label'` の結果が `Medium Mandatory Level` であること（High の場合は管理者昇格中なので使わない）。
@@ -134,5 +134,5 @@
 
 ### 運用上の注意
 - API キーは、その PowerShell セッションの中だけにある。tunnel-client を止める、またはウィンドウを閉じると、dot からは使えなくなる。再開するときは、ステップ 7 のキー設定と `run` をやり直す。
-- 共有は 30 分で期限切れになる（`GRANT_EXPIRED`）。期限が切れたら、ペインの ⇪ メニューから共有し直す。
+- v0.29.0 以降、読み取り共有と入力許可は期限のない ON/OFF スイッチ。自分で OFF にする、ペインが終了する、連携を無効にする、Workbench を終了する、のいずれかで OFF になる（再起動後は必ず OFF）。それより前の版では共有は 30 分で期限切れ（`GRANT_EXPIRED`）。
 - 入力（Stage B）を dot から使う場合は、別途ユーザーが判断して「Allow Terminal Input (dots)」をオンにする必要がある（このとき CLI プロファイルとペイン単位の許可も必要）。

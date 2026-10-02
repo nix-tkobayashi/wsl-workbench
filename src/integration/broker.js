@@ -11,7 +11,6 @@ const { API_VERSION, ENABLED_TOOLS, INPUT_TOOLS, validateToolArgs } = require('.
 const { verifiedProfiles, publicProfile, findProfile, MAX_TEXT_BYTES } = require('./input-profiles');
 const { createCursorCodec } = require('./cursor');
 const { redact } = require('./redaction');
-const { DEFAULT_GRANT_MS } = require('./access-control');
 
 const STREAM = 'normalized_text_v1';
 const LIST_SNAPSHOT_MS = 60 * 1000;
@@ -216,7 +215,8 @@ class Broker {
         session_buffer_bytes: limits.sessionBytes,
         session_buffer_age_ms: limits.sessionAgeMs,
         global_buffer_bytes: limits.globalBytes,
-        grant_default_ms: DEFAULT_GRANT_MS,
+        // Sharing and input are per-pane ON/OFF switches with no time limit (until revoked).
+        grant_mode: 'until_revoked',
         rate_per_sec: this.rateLimiter.ratePerSec,
         rate_burst: this.rateLimiter.burst,
         list_cursor_ttl_ms: LIST_SNAPSHOT_MS
@@ -272,7 +272,7 @@ class Broker {
       shell_kind: null,
       shell_integration: { enabled: false, version: null, completion_trust: 'none' },
       effective_permissions: [...grant.permissions].sort(),
-      grant_expires_at: isoTime(Math.min(grant.expiresAtWall, this.now() + Math.max(0, grant.expiresAtMono - this.access.monotonic()))),
+      grant_expires_at: null, // no time limit: valid until the user turns sharing off
       capture_state: session.capture,
       active_operation_id: this.input && this.input.arbiter.pending.get(session.sessionId) ? this.input.arbiter.pending.get(session.sessionId).id : null,
       user_intervened: !!session.inputPaused,

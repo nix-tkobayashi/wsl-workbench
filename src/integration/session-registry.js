@@ -165,6 +165,9 @@ class SessionRegistry {
         if (code !== '7') return;
         const cwd = parseOsc7Cwd(payload);
         if (cwd) session.cwd = { value: cwd, source: 'advisory_osc7', observed_at: new Date(this.now()).toISOString() };
+        // Workbench's shell reports OSC 7 from PROMPT_COMMAND, i.e. once per shell prompt: the
+        // foreground is the shell again (a CLI exited). Used to turn input off.
+        this.emit('shell_prompt', session);
       }
     });
     session.capture = 'active';

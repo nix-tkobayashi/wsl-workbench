@@ -45,7 +45,6 @@ contextBridge.exposeInMainWorld('api', {
   // dots integration: per-pane sharing menu (main decides and confirms) and the badges' state.
   integrationPaneMenu: (payload) => ipcRenderer.send('integration:paneMenu', payload),
   integrationPaneState: () => ipcRenderer.invoke('integration:paneState'),
-  integrationExtend: (payload) => ipcRenderer.send('integration:extend', payload),
   onIntegrationPaneState: (cb) => ipcRenderer.on('integration:paneState', (_event, panes) => cb(panes)),
   onWorkspaceChanged: (cb) => ipcRenderer.on('workspace:changed', (_event, data) => cb(data)),
   onMenuRefreshTree: (cb) => ipcRenderer.on('menu:refreshTree', () => cb()),

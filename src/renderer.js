@@ -187,7 +187,7 @@ const splitTerminalBtn = document.getElementById('splitTerminalBtn');
 // Declared up here (not with the rest of the dots-integration code below) because pane focus
 // changes call updateShareButton() as soon as the first terminal exists.
 const shareTerminalBtn = document.getElementById('shareTerminalBtn');
-let paneShareState = new Map(); // pane id -> { shared, capture, expiresAt } (pushed by main)
+let paneShareState = new Map(); // pane id -> { state, shared, input, capture, ... } (pushed by main)
 
 function splitAvailabilityFor(group) {
   if (!group) return 'limit';
@@ -692,40 +692,25 @@ document.getElementById('splitTerminalBtn').addEventListener('click', () => spli
 // --- dots integration: the main process owns sharing (grants, confirmation dialogs, expiry). The
 // renderer only opens main's per-pane menu for the focused pane and mirrors the state it pushes. ---
 
+// One badge per pane, always naming the current state of the two switches: "共有OFF" /
+// "読取ON・入力OFF" / "読取ON・入力ON" (plus capture paused / AI input paused / confirm pending).
 function renderShareBadges() {
   for (const entry of terminals.values()) {
     if (!entry.shareBadge) continue;
     const st = paneShareState.get(entry.id);
-    const live = !!(st && st.shared && st.expiresAt > Date.now());
-    entry.shareBadge.hidden = !live;
-    if (!live) continue;
-    const minutes = Math.max(1, Math.ceil((st.expiresAt - Date.now()) / 60000));
-    const paused = st.capture === 'paused';
-    entry.shareBadge.classList.toggle('paused', paused);
-    const parts = [t(paused ? 'integration.badgePaused' : 'integration.badgeShared')];
-    // Stage B: input state (with its own, shorter limit). The lock note shows only while an AI input
-    // operation is in progress.
-    if (st.input) {
-      const inputMinutes = st.inputExpiresAt ? Math.max(1, Math.ceil((st.inputExpiresAt - Date.now()) / 60000)) : null;
-      const inputLabel = t(st.inputPaused ? 'integration.badgeInputPaused' : 'integration.badgeInput');
-      parts.push(inputMinutes ? `${inputLabel} ${t('integration.badgeMinutes').replace('{n}', String(inputMinutes))}` : inputLabel);
-    }
+    const show = !!(st && st.integration);
+    entry.shareBadge.hidden = !show;
+    if (!show) continue;
+    const state = st.state || 'off';
+    const parts = [t(`integration.badge_${state}`)];
+    if (state !== 'off' && st.capture === 'paused') parts.push(t('integration.badgeCapturePaused'));
+    if (state === 'read_input' && st.inputPaused) parts.push(t('integration.badgeInputPaused'));
     if (st.pendingStage) parts.push(t('integration.badgePending'));
-    parts.push(t('integration.badgeMinutes').replace('{n}', String(minutes)));
-    const soon = !!st.expiringSoon || st.expiresAt - Date.now() <= 5 * 60 * 1000;
-    entry.shareBadge.classList.toggle('input', !!st.input);
+    entry.shareBadge.classList.toggle('off', state === 'off');
+    entry.shareBadge.classList.toggle('paused', state !== 'off' && st.capture === 'paused');
+    entry.shareBadge.classList.toggle('input', state === 'read_input');
     entry.shareBadge.classList.toggle('pending', !!st.pendingStage);
-    entry.shareBadge.classList.toggle('expiring', soon);
     entry.shareBadge.textContent = parts.join(' · ');
-    if (soon) {
-      // One click extends this pane by the duration chosen when sharing (main re-checks everything).
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'term-share-extend';
-      btn.textContent = t('integration.badgeExtend');
-      btn.addEventListener('click', (event) => { event.stopPropagation(); window.api.integrationExtend({ id: entry.id }); });
-      entry.shareBadge.appendChild(btn);
-    }
   }
   updateShareButton();
 }
@@ -749,7 +734,6 @@ shareTerminalBtn.addEventListener('click', () => {
 });
 window.api.onIntegrationPaneState(applyPaneShareState);
 window.api.integrationPaneState().then(applyPaneShareState).catch(() => {});
-setInterval(renderShareBadges, 15000); // remaining-minutes countdown; main pushes the real expiry
 
 // Paths of the tree items currently being dragged within the app (the whole multi-selection when
 // the dragged row is part of it). This is the authoritative internal-origin signal: it is only set

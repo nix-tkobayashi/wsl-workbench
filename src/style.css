@@ -198,9 +198,7 @@ body.resizing iframe { pointer-events:none; }
 .term-share-badge.paused { background:rgba(80,80,80,.9); }
 .term-share-badge.input { background:rgba(150,40,40,.92); }
 .term-share-badge.pending { outline:2px solid #ffd479; }
-.term-share-badge.expiring { background:rgba(160,110,0,.95); }
-.term-share-extend { pointer-events:auto; margin-left:6px; padding:0 6px; font:inherit; font-size:11px; line-height:14px; border:1px solid #fff; border-radius:3px; background:transparent; color:#fff; cursor:pointer; }
-.term-share-extend:hover { background:rgba(255,255,255,.2); }
+.term-share-badge.off { background:rgba(60,60,60,.75); color:#bbb; }
 #terminalHost { position:relative; flex:1; min-height:0; }
 /* Each tab is a GROUP of 1..N side-by-side panes in a flex row. Inset rather than padding: the
    FitAddon measures the pane hosts and would count padding as usable height, computing one row
