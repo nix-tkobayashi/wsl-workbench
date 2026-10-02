@@ -190,6 +190,14 @@ body.resizing iframe { pointer-events:none; }
 #splitTerminalBtn:disabled { opacity:.4; cursor:default; }
 #splitTerminalBtn:disabled:hover { background:transparent; color:var(--muted); }
 #splitTerminalBtn { font-size:13px; }
+/* dots integration: share button (acts on the focused pane) and the per-pane sharing badge. */
+#shareTerminalBtn { background:transparent; border:0; color:var(--muted); font-size:13px; line-height:1; padding:2px 8px; border-radius:4px; cursor:pointer; }
+#shareTerminalBtn:hover { background:var(--hover); color:var(--text); }
+#shareTerminalBtn.shared { color:#e8a33d; }
+.term-share-badge { position:absolute; top:2px; right:36px; z-index:20; padding:1px 6px; border-radius:4px; background:rgba(120,72,0,.9); color:#fff; font-size:11px; line-height:16px; pointer-events:none; white-space:nowrap; }
+.term-share-badge.paused { background:rgba(80,80,80,.9); }
+.term-share-badge.input { background:rgba(150,40,40,.92); }
+.term-share-badge.pending { outline:2px solid #ffd479; }
 #terminalHost { position:relative; flex:1; min-height:0; }
 /* Each tab is a GROUP of 1..N side-by-side panes in a flex row. Inset rather than padding: the
    FitAddon measures the pane hosts and would count padding as usable height, computing one row

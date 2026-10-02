@@ -136,6 +136,7 @@ function applyLanguage() {
   renderUnsupportedText();
   refreshEditorTabs(); // the read-only tooltip on force-opened tabs is localized
   refreshUpdateBtn(); // its tooltip is built manually (has a {version} slot), not via data-i18n
+  renderShareBadges();
 }
 
 // Promise-based replacement for the unsupported window.prompt() in Electron.
@@ -183,6 +184,10 @@ const MAX_PANES = 8;
 const PANE_MIN_WIDTH = 120; // keep in step with .term-pane { min-width } in style.css
 const DIVIDER_WIDTH = 3;    // keep in step with .term-divider { flex-basis } in style.css
 const splitTerminalBtn = document.getElementById('splitTerminalBtn');
+// Declared up here (not with the rest of the dots-integration code below) because pane focus
+// changes call updateShareButton() as soon as the first terminal exists.
+const shareTerminalBtn = document.getElementById('shareTerminalBtn');
+let paneShareState = new Map(); // pane id -> { shared, capture, expiresAt } (pushed by main)
 
 function splitAvailabilityFor(group) {
   if (!group) return 'limit';
@@ -223,6 +228,7 @@ function activateTerminal(groupId) {
     g.tab.classList.toggle('active', on);
   }
   updateSplitButton();
+  updateShareButton();
   setTimeout(() => {
     fitGroupPanes(group);
     const focus = terminals.get(group.activePaneId);
@@ -268,6 +274,7 @@ function setActivePane(group, paneId) {
   group.activePaneId = paneId;
   refreshPaneChrome(group);
   refreshTabSegmentFocus(group);
+  updateShareButton();
 }
 
 // Every PANE has its own name (Cursor-style): custom when set, else localized "Terminal <pane id>".
@@ -501,7 +508,7 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   const id = nextTermId++;
   const host = document.createElement('div');
   host.className = 'term-pane';
-  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null };
+  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null, shareBadge: null };
   if (group.paneIds.length > 0) {
     entry.divider = makeTermDivider(group);
     group.container.appendChild(entry.divider);
@@ -538,6 +545,12 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   host.appendChild(closeBtn);
   // Track which pane holds focus (xterm's textarea focus bubbles as focusin).
   host.addEventListener('focusin', () => setActivePane(group, id));
+  // dots integration: "shared" badge, shown only while main reports a live grant for this pane.
+  const shareBadge = document.createElement('div');
+  shareBadge.className = 'term-share-badge';
+  shareBadge.hidden = true;
+  host.appendChild(shareBadge);
+  entry.shareBadge = shareBadge;
   terminals.set(id, entry);
   wireTerminal(entry);
   group.paneIds.push(id);
@@ -675,6 +688,52 @@ document.getElementById('newTerminalBtn').addEventListener('click', () => {
   createTerminal({ cwd: (from && from.cwd) || '' });
 });
 document.getElementById('splitTerminalBtn').addEventListener('click', () => splitActiveTerminal());
+
+// --- dots integration: the main process owns sharing (grants, confirmation dialogs, expiry). The
+// renderer only opens main's per-pane menu for the focused pane and mirrors the state it pushes. ---
+
+function renderShareBadges() {
+  for (const entry of terminals.values()) {
+    if (!entry.shareBadge) continue;
+    const st = paneShareState.get(entry.id);
+    const live = !!(st && st.shared && st.expiresAt > Date.now());
+    entry.shareBadge.hidden = !live;
+    if (!live) continue;
+    const minutes = Math.max(1, Math.ceil((st.expiresAt - Date.now()) / 60000));
+    const paused = st.capture === 'paused';
+    entry.shareBadge.classList.toggle('paused', paused);
+    const parts = [t(paused ? 'integration.badgePaused' : 'integration.badgeShared')];
+    // Stage B: input state. The lock note shows only while an AI input operation is in progress.
+    if (st.input) parts.push(t(st.inputPaused ? 'integration.badgeInputPaused' : 'integration.badgeInput'));
+    if (st.pendingStage) parts.push(t('integration.badgePending'));
+    parts.push(t('integration.badgeMinutes').replace('{n}', String(minutes)));
+    entry.shareBadge.classList.toggle('input', !!st.input);
+    entry.shareBadge.classList.toggle('pending', !!st.pendingStage);
+    entry.shareBadge.textContent = parts.join(' · ');
+  }
+  updateShareButton();
+}
+
+function updateShareButton() {
+  const entry = activeTerminal();
+  const st = entry && paneShareState.get(entry.id);
+  shareTerminalBtn.classList.toggle('shared', !!(st && st.shared));
+}
+
+function applyPaneShareState(panes) {
+  paneShareState = new Map((Array.isArray(panes) ? panes : []).map((p) => [p.id, p]));
+  renderShareBadges();
+}
+
+shareTerminalBtn.addEventListener('click', () => {
+  const entry = activeTerminal();
+  if (!entry) return;
+  const rect = shareTerminalBtn.getBoundingClientRect();
+  window.api.integrationPaneMenu({ id: entry.id, label: entry.name || '', x: rect.left, y: rect.bottom });
+});
+window.api.onIntegrationPaneState(applyPaneShareState);
+window.api.integrationPaneState().then(applyPaneShareState).catch(() => {});
+setInterval(renderShareBadges, 15000); // remaining-minutes countdown; main pushes the real expiry
 
 // Paths of the tree items currently being dragged within the app (the whole multi-selection when
 // the dragged row is part of it). This is the authoritative internal-origin signal: it is only set
