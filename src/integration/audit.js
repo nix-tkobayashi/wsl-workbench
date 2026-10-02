@@ -9,7 +9,9 @@ const path = require('path');
 const RETENTION_DAYS = 7;
 const ALLOWED_FIELDS = ['event', 'principal', 'tool', 'session_id', 'generation', 'decision', 'code', 'bytes', 'request_id', 'reason', 'permissions',
   // connection diagnostics (no handshake material)
-  'stage', 'relay_id', 'elapsed_ms', 'bytes_in', 'bytes_out', 'endpoint', 'pid'];
+  'stage', 'relay_id', 'elapsed_ms', 'bytes_in', 'bytes_out', 'endpoint', 'pid',
+  // adapter request diagnostics (tools/list): tool names and count only
+  'tools', 'count'];
 
 function createAuditLog({ dir, now = Date.now, retentionDays = RETENTION_DAYS, prefix = 'audit' } = {}) {
   if (!/^[a-z]+$/.test(prefix)) throw new Error('invalid audit prefix');

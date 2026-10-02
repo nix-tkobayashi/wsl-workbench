@@ -66,14 +66,18 @@ function toolResult(name, result) {
   };
 }
 
-function createMcpServer({ callTool, serverVersion = '0.0.0', send }) {
+// onEvent receives non-secret request diagnostics: method names, tool names and counts only —
+// never arguments, terminal text, keys or auth material.
+function createMcpServer({ callTool, serverVersion = '0.0.0', send, onEvent = () => {} }) {
+  const emit = (entry) => { try { onEvent(entry); } catch {} };
   // Input tools are listed only while Workbench reports its input gate open.
-  async function inputEnabled() {
+  async function inputGate() {
     try {
       const caps = await callTool('workbench_capabilities', {});
-      return !!(caps && caps.ok && caps.features && caps.features.input_write);
-    } catch {
-      return false;
+      if (!caps || !caps.ok) return { on: false, reason: 'capabilities_error' };
+      return { on: !!(caps.features && caps.features.input_write), reason: caps.features && caps.features.input_write ? 'input_on' : 'input_off' };
+    } catch (error) {
+      return { on: false, reason: error && error.message === 'APP_UNAVAILABLE' ? 'app_unavailable' : 'transport_error' };
     }
   }
 
@@ -119,6 +123,8 @@ function createMcpServer({ callTool, serverVersion = '0.0.0', send }) {
       case 'initialize': {
         const requested = msg.params && msg.params.protocolVersion;
         const protocolVersion = SUPPORTED_PROTOCOLS.includes(requested) ? requested : SUPPORTED_PROTOCOLS[0];
+        const client = msg.params && msg.params.clientInfo && typeof msg.params.clientInfo.name === 'string' ? msg.params.clientInfo.name : '';
+        emit({ event: 'mcp_initialize', reason: `${client.replace(/[^\w.@ -]/g, '').slice(0, 60)} ${protocolVersion}`.trim() });
         reply(msg.id, {
           protocolVersion,
           capabilities: { tools: { listChanged: false } },
@@ -139,7 +145,12 @@ function createMcpServer({ callTool, serverVersion = '0.0.0', send }) {
         if (isRequest) reply(msg.id, {});
         return;
       case 'tools/list':
-        if (isRequest) reply(msg.id, { tools: listedTools({ inputEnabled: await inputEnabled() }) });
+        if (isRequest) {
+          const gate = await inputGate();
+          const tools = listedTools({ inputEnabled: gate.on });
+          emit({ event: 'tools_list', count: tools.length, tools: tools.map((t) => t.name).join(','), reason: gate.reason });
+          reply(msg.id, { tools });
+        }
         return;
       case 'tools/call':
         if (isRequest) await handleCall(msg.id, msg.params || {});

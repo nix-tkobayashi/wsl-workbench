@@ -257,6 +257,9 @@ e.g. `(last attempt: stage=pipe-open, reason=peer-close)`. Stages: `connecting` 
 (with `code`), `bad-hello`, `bad-server-proof`, `unexpected-message`, `protocol-*`.
 
 - Adapter: stderr (`[wswb-adapter] {...}`) and `integration\diag\adapter-YYYY-MM-DD.jsonl`.
+  Since v0.28.1 it also records every `tools/list` answer (`tools_list`: returned tool names, count,
+  and why input tools were in or out — `input_on`, `input_off`, `app_unavailable`, …) and every
+  `initialize` (`mcp_initialize`: client name + protocol version). Never arguments, output, or keys.
 - Workbench (`integration\audit\audit-*.jsonl`): `broker_listening` (relay or plain pipe, endpoint),
   `connection_accepted`, `hello_sent`, `auth_failed` (now also `peer-closed-before-auth`),
   `connected`; relay: `relay_ready`, `relay_accepted`, `relay_handed_off` / `relay_handoff_failed`,
