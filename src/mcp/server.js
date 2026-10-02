@@ -96,8 +96,11 @@ function createMcpServer({ callTool, serverVersion = '0.0.0', send }) {
       result = await callTool(name, args);
     } catch (error) {
       const code = error && error.message === 'APP_UNAVAILABLE' ? 'APP_UNAVAILABLE' : 'TRANSPORT_UNAVAILABLE';
+      // How far the last handshake got (stage / reason / error code only; no auth material).
+      const d = error && error.diag;
+      const detail = d ? ` (last attempt: stage=${d.stage}, reason=${d.reason}${d.code ? `, code=${d.code}` : ''})` : '';
       result = localError(code, code === 'APP_UNAVAILABLE'
-        ? 'WSL Workbench is not running or the dots integration is turned off.'
+        ? `WSL Workbench is not running or the dots integration is turned off.${detail}`
         : 'The connection to WSL Workbench was lost. Reconnect, then call capabilities and list sessions again.');
     }
     if (!result || typeof result !== 'object' || typeof result.ok !== 'boolean') result = localError('INTERNAL_ERROR', 'Malformed broker response.');

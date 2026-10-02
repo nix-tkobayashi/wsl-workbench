@@ -7,6 +7,7 @@
 // is a CHILD of the main process: main talks to it over the child's stdio (anonymous pipes), so
 // the relay itself is not reachable by anyone else. It frames each pipe client as a connection id:
 //   helper -> main: "READY <sid> <sddl>" | "O <id>" | "D <id> <base64>" | "C <id>" | "E <base64 message>"
+//                   | "X <id> <ExceptionType>" (a client read/write failed; type name only, for diagnostics)
 //   main -> helper: "D <id> <base64>" | "C <id>"
 // Before any client is accepted the helper reads the pipe's DACL back and main verifies it is
 // exactly { deny NETWORK, allow <current user SID> }, protected (no inheritance), and that the
@@ -51,6 +52,7 @@ public static class WswbPipeRelay {
   private static string Sddl;
 
   private static string B64(string s) { return Convert.ToBase64String(Encoding.UTF8.GetBytes(s ?? "")); }
+  private static string Kind(Exception e) { return e.GetType().Name; }
 
   private static void Emit(string line) {
     byte[] b = Encoding.ASCII.GetBytes(line + "\n");
@@ -82,7 +84,8 @@ public static class WswbPipeRelay {
         if (n <= 0) break;
         Emit("D " + id + " " + Convert.ToBase64String(buf, 0, n));
       }
-    } catch (Exception) {
+    } catch (Exception e) {
+      Emit("X " + id + " " + Kind(e));
     } finally {
       bool present;
       lock (Conns) { present = Conns.Remove(id); }
@@ -105,7 +108,7 @@ public static class WswbPipeRelay {
       if (conn == null) continue;
       if (p[0] == "D" && p.Length == 3) {
         try { byte[] data = Convert.FromBase64String(p[2]); conn.Write(data, 0, data.Length); conn.Flush(); }
-        catch (Exception) { Close(id, conn); }
+        catch (Exception e) { Emit("X " + id + " " + Kind(e)); Close(id, conn); }
       } else if (p[0] == "C") {
         Close(id, conn);
       }
@@ -192,9 +195,12 @@ class RelayConnection extends Duplex {
     this.relayId = id;
     this.sendLine = sendLine;
     this.remoteClosed = false;
+    this.bytesIn = 0;
+    this.bytesOut = 0;
   }
   _read() {}
   _write(chunk, _enc, cb) {
+    this.bytesOut += chunk.length;
     this.sendLine(`D ${this.relayId} ${Buffer.from(chunk).toString('base64')}`);
     cb();
   }
@@ -251,6 +257,7 @@ function createSecurePipeListener({ pipePath, sid, maxConnections = 4, spawnFn =
           const verdict = parts[1] === sid ? verifyDacl(parts[2], sid) : { ok: false, reason: 'helper runs as a different user' };
           if (!verdict.ok) { kill(); settle(reject, new Error(`Pipe DACL verification failed: ${verdict.reason}`)); return; }
           ready = true;
+          onLog({ event: 'relay_ready' });
           settle(resolve, {
             sddl: parts[2],
             close: () => { try { child.stdin.end(); } catch {} kill(); }
@@ -261,19 +268,36 @@ function createSecurePipeListener({ pipePath, sid, maxConnections = 4, spawnFn =
         }
         return; // ignore host noise before READY
       }
+      if (parts[0] === 'E') {
+        // A helper failure after READY (e.g. WaitForConnection threw); the helper exits next.
+        onLog({ event: 'relay_error', reason: Buffer.from(parts[1] || '', 'base64').toString('utf8').slice(0, 200) });
+        return;
+      }
       const id = Number(parts[1]);
       if (!Number.isInteger(id)) return;
       if (parts[0] === 'O') {
+        onLog({ event: 'relay_accepted', relay_id: id });
         const conn = new RelayConnection(id, sendLine);
         conns.set(id, conn);
-        conn.on('close', () => conns.delete(id));
-        onConnection(conn);
+        conn.on('close', () => {
+          conns.delete(id);
+          onLog({ event: conn.remoteClosed ? 'relay_peer_closed' : 'relay_local_closed', relay_id: id, bytes_in: conn.bytesIn, bytes_out: conn.bytesOut });
+        });
+        try {
+          onConnection(conn);
+          onLog({ event: 'relay_handed_off', relay_id: id });
+        } catch (error) {
+          onLog({ event: 'relay_handoff_failed', relay_id: id, reason: String((error && error.message) || error).slice(0, 200) });
+          conn.destroy();
+        }
       } else if (parts[0] === 'D' && parts.length === 3) {
         const conn = conns.get(id);
-        if (conn) conn.push(Buffer.from(parts[2], 'base64'));
+        if (conn) { const data = Buffer.from(parts[2], 'base64'); conn.bytesIn += data.length; conn.push(data); }
       } else if (parts[0] === 'C') {
         const conn = conns.get(id);
         if (conn) { conn.remoteClosed = true; conn.push(null); conn.destroy(); }
+      } else if (parts[0] === 'X') {
+        onLog({ event: 'relay_conn_error', relay_id: id, code: /^[A-Za-z0-9_.]{1,80}$/.test(parts[2] || '') ? parts[2] : 'unknown' });
       }
     }
   });

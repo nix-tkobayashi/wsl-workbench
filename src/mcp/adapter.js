@@ -14,6 +14,7 @@ const os = require('os');
 const path = require('path');
 const { readPairing } = require('../integration/pairing');
 const { connectBroker } = require('../integration/local-transport');
+const { createAuditLog } = require('../integration/audit');
 const { createMcpServer } = require('./server');
 
 function candidateDirs() {
@@ -28,6 +29,17 @@ function serverVersion() {
   try { return JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8')).version || '0.0.0'; } catch { return '0.0.0'; }
 }
 
+// Connection diagnostics: stderr (the MCP client's log) and <integration dir>/diag/adapter-*.jsonl.
+// Only stages, reasons, error codes, timings and byte counts — never the secret, nonces or proofs.
+function diagLogger(dir) {
+  const file = dir ? createAuditLog({ dir: path.join(dir, 'diag'), prefix: 'adapter' }) : null;
+  return (entry) => {
+    const line = { ...entry, pid: process.pid };
+    try { process.stderr.write(`[wswb-adapter] ${JSON.stringify(line)}\n`); } catch {}
+    if (file) file.record(line);
+  };
+}
+
 let connection = null;
 let connecting = null;
 
@@ -35,14 +47,29 @@ async function getConnection() {
   if (connection && !connection.closed) return connection;
   if (connecting) return connecting;
   connecting = (async () => {
-    const pairing = candidateDirs().map(readPairing).find(Boolean);
-    if (!pairing) throw new Error('APP_UNAVAILABLE');
-    try {
-      connection = await connectBroker(pairing);
-    } catch {
-      throw new Error('APP_UNAVAILABLE');
+    const dirs = candidateDirs();
+    let pairing = null;
+    let dir = null;
+    for (const candidate of dirs) { pairing = readPairing(candidate); if (pairing) { dir = candidate; break; } }
+    const log = diagLogger(dir);
+    if (!pairing) {
+      log({ event: 'adapter_pairing_missing', reason: `checked ${dirs.length} dir(s)` });
+      const error = new Error('APP_UNAVAILABLE');
+      error.diag = { stage: 'pairing', reason: 'pairing-missing' };
+      throw error;
     }
-    connection.onClose(() => { connection = null; });
+    log({ event: 'adapter_connect_start', endpoint: pairing.endpoint });
+    try {
+      connection = await connectBroker({ ...pairing, onStage: (stage) => log({ event: 'adapter_stage', stage }) });
+    } catch (cause) {
+      const diag = (cause && cause.diag) || { stage: 'connecting', reason: 'exception', code: (cause && cause.code) || null };
+      log({ event: 'adapter_connect_failed', ...diag });
+      const error = new Error('APP_UNAVAILABLE');
+      error.diag = diag;
+      throw error;
+    }
+    log({ event: 'adapter_connected' });
+    connection.onClose(() => { connection = null; log({ event: 'adapter_disconnected' }); });
     return connection;
   })();
   try { return await connecting; } finally { connecting = null; }
@@ -75,4 +102,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { candidateDirs };
+module.exports = { candidateDirs, getConnection };
