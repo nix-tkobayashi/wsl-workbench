@@ -189,6 +189,58 @@ CLI profiles (measured in an empty temp folder with a new PTY, prompt 「ツー�
 | `codex.0.160.composer.single-line` | codex-cli 0.160.0 (WSL2) | text, ~600 ms, `\r` → submitted; text+`\r` in one write → not submitted. Verified (Enter only). |
 | `claude-code.2.1.prompt.single-line` | Claude Code 2.1.287 | **Not measured**: the folder-trust prompt was not answered (rule). Not selectable. |
 
+### Running tunnel-client with Workbench (v0.27.0)
+
+**Integration > Secure MCP Tunnel (tunnel-client)** starts the OpenAI `tunnel-client` in the
+background and stops it (with the adapter it launched) when Workbench quits. Off by default.
+
+1. **Choose tunnel-client.exe...** and **Choose Profile (YAML)...** (e.g.
+   `%APPDATA%\tunnel-client\wsl-workbench.yaml`). Workbench runs
+   `tunnel-client run --profile-file <yaml> --control-plane.api-key env:CONTROL_PLANE_API_KEY`
+   hidden, with the exe's folder as the working directory.
+2. **Set API Key...** — a runtime key limited to Tunnels Read + Use. It is encrypted with DPAPI
+   (Electron `safeStorage`) into `%APPDATA%\wsl-workbench\integration\tunnel.key.enc`, the file
+   ACL is reset to your user SID, and the saved copy is decrypted once to verify. If encryption, the
+   ACL, or decryption fails, nothing is saved / started — there is no plaintext fallback.
+3. **Start with Workbench** — from then on tunnel-client starts when the app starts (only while the
+   dots integration is on) and when the integration is turned on; turning the integration off or
+   quitting stops it. **Start Now** / **Stop**, **Replace API Key...**, **Delete API Key...** are in
+   the same menu.
+
+- tunnel-client runs inside a Windows **Job Object** with *kill on job close*, created by a small
+  helper (Windows PowerShell `Add-Type`, official Win32 APIs; same approach as the pipe relay). The
+  helper joins the job before starting tunnel-client, so tunnel-client, the adapter wrapper, and
+  everything below are in it. The helper ends the job when Workbench's end of its stdin closes or
+  the Workbench process exits, so the whole tree ends on a **normal quit, integration off, a crash,
+  or a forced kill** of Workbench. If the job can't be set up, nothing is started.
+- No double start: the helper refuses to start while any `tunnel-client` process is already
+  running (for example one started by hand, or a leftover); the status shows its pid.
+- The key goes from Workbench to the helper over stdin and into tunnel-client's environment block
+  only — never into Workbench's own environment (so WSL, terminals and AI CLIs never inherit it),
+  the helper's argv / environment, `settings.json`, or logs.
+- tunnel-client passes its environment to the stdio MCP command it starts, so Workbench starts only
+  profiles whose `mcp.commands[].command` are `.cmd` / `.bat` wrappers that clear the key **before
+  anything else runs** (checked before every start; HTTP-only profiles pass):
+  ```bat
+  @echo off
+  set CONTROL_PLANE_API_KEY=
+  set ELECTRON_RUN_AS_NODE=1
+  "%LOCALAPPDATA%\Programs\wsl-workbench\WSL Workbench.exe" "%LOCALAPPDATA%\Programs\wsl-workbench\resources\app.asar\src\mcp\adapter.js"
+  ```
+  The adapter also drops the variable at start, as a second layer.
+- Starting the tunnel never shares a pane or allows input: those stay the per-pane ⇪ actions.
+- tunnel-client's output goes to `integration\diag\tunnel-client.log` (reset above 5 MiB). Status
+  (starting / running / pid / last exit / last error) is in **Connection Status...**. An automatic
+  start that fails (no key, missing exe/profile, wrapper keeps the key, decryption error, another
+  tunnel-client running) is shown there; it is not retried.
+
+Verified on Windows 11 (2026-10-02, dev build, dummy key, control plane unreachable so nothing left
+the machine): auto start → helper → tunnel-client → `adapter.cmd` → adapter (the wrapper saw no
+`CONTROL_PLANE*` variable); integration off, normal quit, `taskkill /F` of only the Workbench main
+process, and `taskkill /F` of only the helper each left no tunnel-client / wrapper / adapter
+process; restarting right after a forced kill ran exactly one tunnel-client; with a hand-started
+tunnel-client running, the app refused (`already_running`).
+
 ### Connection diagnostics (v0.26.1)
 
 When the adapter reports `APP_UNAVAILABLE`, the message now says how far the last handshake got,

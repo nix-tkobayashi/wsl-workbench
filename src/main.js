@@ -36,6 +36,7 @@ const { WORKSPACE_EXT } = require('./workspace-args'); // single source for the 
 const { shellCdCommand } = require('./terminal-actions'); // inherited-cwd `cd` for terminal:start
 const { tabTitleForWorkspace, classifyTabDrop, nextActiveTab, shellWindowTitle } = require('./tab-shell');
 const { IntegrationController } = require('./integration');
+const { TunnelRunner } = require('./integration/tunnel-runner');
 
 // --- Tabbed windows: every BrowserWindow is a thin shell (its own webContents renders only the
 // tab strip + window controls), and each open workspace is a WebContentsView child. A view keeps
@@ -52,6 +53,7 @@ const windowFocusOrder = [];
 // dots integration (src/integration): created at app ready; null until then. Off unless the user
 // turned it on; terminals behave exactly as before while it is off.
 let integration = null;
+let tunnel = null; // tunnel-client runner (Secure MCP Tunnel); runs only while the integration is on
 
 // --- Language / settings persistence ---
 let currentLang = 'en';
@@ -1585,6 +1587,7 @@ ipcMain.on('terminal:close', (event, { id }) => {
 // share a pane, extend a grant, or turn the integration on. ---
 
 function initIntegration() {
+  tunnel = createTunnelRunner();
   integration = new IntegrationController({
     userDataDir: app.getPath('userData'),
     appVersion: app.getVersion(),
@@ -1607,9 +1610,41 @@ function initIntegration() {
       const pending = inputConfirmations.get(opId);
       if (pending) { inputConfirmations.delete(opId); pending.abort(); }
     },
-    journalKey: loadJournalKey
+    journalKey: loadJournalKey,
+    tunnel
   });
   integration.start().then(() => buildAppMenu()).catch(() => {});
+}
+
+// tunnel-client next to Workbench. Settings (paths, auto start) live under settings.integration.tunnel;
+// the runtime key only in integration/tunnel.key.enc (DPAPI) — see tunnel-runner.js.
+function createTunnelRunner() {
+  const pairing = require('./integration/pairing');
+  const dir = pairing.integrationDir(app.getPath('userData'));
+  const readTunnelSettings = () => {
+    const i = readSettings().integration;
+    return i && typeof i === 'object' && i.tunnel && typeof i.tunnel === 'object' ? i.tunnel : {};
+  };
+  return new TunnelRunner({
+    dir,
+    readConfig: readTunnelSettings,
+    writeConfig: (next) => {
+      const i = readSettings().integration;
+      writeSettings({ integration: { ...(i && typeof i === 'object' ? i : {}), tunnel: next } });
+    },
+    keyStore: {
+      available: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (text) => safeStorage.encryptString(text),
+      decrypt: (buf) => safeStorage.decryptString(buf)
+    },
+    restrictAcl: async (file) => {
+      if (process.platform === 'win32') await pairing.restrictWindowsAcl(file, await pairing.currentUserSid());
+      else fs.chmodSync(file, 0o600);
+    },
+    audit: { record: (e) => { if (integration) integration.audit.record(e); } },
+    onChange: () => { if (!appQuitting) buildAppMenu(); },
+    canRun: () => !!(integration && integration.enabled)
+  });
 }
 
 // HMAC key of the operation journal, protected by the OS (DPAPI via Electron safeStorage). Without
@@ -1698,7 +1733,12 @@ async function showInputConfirmation(req) {
   integration.confirmOperation(req.opId, req.stage, approved ? 'approved' : 'declined');
 }
 
-app.on('will-quit', () => { if (integration) integration.shutdown(); });
+let appQuitting = false;
+app.on('will-quit', () => {
+  appQuitting = true;
+  if (integration) integration.shutdown();
+  else if (tunnel) tunnel.stop('app_exit');
+});
 
 // What an MCP client must run to reach this Workbench: the app's own executable in Node mode and
 // the adapter script shipped inside the app (works for both `npm start` and the installed build).
@@ -1761,7 +1801,8 @@ async function showIntegrationStatus(win) {
     tr('integration.statusAdapter'),
     `  command: ${spec.command}`,
     `  args: ${spec.args.join(' ')}`,
-    `  env: ELECTRON_RUN_AS_NODE=1, WSLWB_INTEGRATION_DIR=${spec.env.WSLWB_INTEGRATION_DIR}`
+    `  env: ELECTRON_RUN_AS_NODE=1, WSLWB_INTEGRATION_DIR=${spec.env.WSLWB_INTEGRATION_DIR}`,
+    ...tunnelStatusLines()
   ];
   if (st.operations.length) {
     lines.push('', tr('integration.statusOperations'));
@@ -1797,7 +1838,11 @@ function integrationMenuItems() {
       enabled: !!integration,
       click: async () => {
         const win = focusedWindow();
-        if (integration.enabled) { await integration.disable(); buildAppMenu(); } else { await confirmEnableIntegration(win); }
+        if (integration.enabled) {
+          const { tunnelStopped } = await integration.disable();
+          buildAppMenu();
+          if (!tunnelStopped) dialog.showErrorBox(tr('tunnel.menu'), tunnel.status().lastError || '');
+        } else { await confirmEnableIntegration(win); }
       }
     },
     { label: tr('integration.menuStatus'), enabled: !!integration, click: () => showIntegrationStatus(focusedWindow()) },
@@ -1820,6 +1865,8 @@ function integrationMenuItems() {
       }
     },
     { type: 'separator' },
+    { label: tr('tunnel.menu'), enabled: !!tunnel, submenu: tunnel ? tunnelMenuItems(enabled) : [] },
+    { type: 'separator' },
     { label: tr('integration.menuRevokeAll'), enabled, click: () => integration.revokeAll() },
     {
       label: tr('integration.menuResetPairing'),
@@ -1834,6 +1881,137 @@ function integrationMenuItems() {
       }
     }
   ];
+}
+
+function tunnelMenuItems(integrationOn) {
+  const st = tunnel.status();
+  const ready = !!(st.exePath && st.profileFile && st.hasKey);
+  const showError = (error) => dialog.showErrorBox(tr('tunnel.menu'), error.message || String(error));
+  const startNow = () => { if (!tunnel.start('user')) showError(new Error(tunnel.status().lastError || '')); };
+  return [
+    {
+      label: tr('tunnel.menuAutoStart'),
+      type: 'checkbox',
+      checked: st.autoStart,
+      enabled: st.autoStart || ready,
+      click: () => {
+        const on = !st.autoStart;
+        tunnel.setConfig({ autoStart: on });
+        if (on && integrationOn && !tunnel.running) startNow();
+      }
+    },
+    tunnel.running
+      ? { label: tr('tunnel.menuStop'), click: () => { if (!tunnel.stop('user')) showError(new Error(tunnel.status().lastError || '')); } }
+      : { label: tr('tunnel.menuStart'), enabled: integrationOn && ready, click: startNow },
+    { type: 'separator' },
+    {
+      label: st.hasKey ? tr('tunnel.menuReplaceKey') : tr('tunnel.menuSetKey'),
+      enabled: st.encryptionAvailable,
+      click: async () => {
+        const value = await showKeyInputWindow(focusedWindow());
+        if (value == null) return;
+        try { await tunnel.setKey(value); } catch (error) { showError(error); }
+      }
+    },
+    {
+      label: tr('tunnel.menuDeleteKey'),
+      enabled: st.hasKey,
+      click: async () => {
+        const win = focusedWindow();
+        const opts = { type: 'warning', title: tr('tunnel.menuDeleteKey'), message: tr('tunnel.deleteKeyMessage'), buttons: [tr('tunnel.deleteKeyConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
+        const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+        if (response !== 0) return;
+        try { tunnel.deleteKey(); } catch (error) { showError(error); }
+      }
+    },
+    { type: 'separator' },
+    {
+      label: tr('tunnel.menuChooseExe'),
+      click: async () => {
+        const win = focusedWindow();
+        const result = await dialog.showOpenDialog(win, {
+          title: tr('tunnel.menuChooseExe'),
+          defaultPath: st.exePath || path.join(os.homedir(), 'wswb-mcp', 'tunnel-client.exe'),
+          filters: [{ name: 'tunnel-client', extensions: ['exe'] }],
+          properties: ['openFile']
+        });
+        if (!result.canceled && result.filePaths[0]) tunnel.setConfig({ exePath: result.filePaths[0] });
+      }
+    },
+    {
+      label: tr('tunnel.menuChooseProfile'),
+      click: async () => {
+        const win = focusedWindow();
+        const result = await dialog.showOpenDialog(win, {
+          title: tr('tunnel.menuChooseProfile'),
+          defaultPath: st.profileFile || path.join(app.getPath('appData'), 'tunnel-client', 'wsl-workbench.yaml'),
+          filters: [{ name: 'YAML', extensions: ['yaml', 'yml'] }],
+          properties: ['openFile']
+        });
+        if (!result.canceled && result.filePaths[0]) tunnel.setConfig({ profileFile: result.filePaths[0] });
+      }
+    },
+    { type: 'separator' },
+    { label: tr('tunnel.menuOpenLog'), enabled: fs.existsSync(st.logPath), click: () => shell.openPath(st.logPath) }
+  ];
+}
+
+// Ask for the tunnel-client runtime key in a small sandboxed window. The value comes back over a
+// one-shot IPC message accepted only from that window; resolves null when cancelled or closed.
+function showKeyInputWindow(parent) {
+  const { buildKeyInputHtml } = require('./integration/key-input-page');
+  return new Promise((resolve) => {
+    const w = new BrowserWindow({
+      parent: parent || undefined, modal: !!parent, show: false, width: 520, height: 260, resizable: false,
+      minimizable: false, maximizable: false, autoHideMenuBar: true, title: tr('tunnel.keyTitle'), backgroundColor: '#1e1e1e',
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'integration', 'key-input-preload.js') }
+    });
+    const wcId = w.webContents.id;
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      ipcMain.removeListener('tunnel-key:submit', onSubmit);
+      ipcMain.removeListener('tunnel-key:cancel', onCancel);
+      resolve(value);
+      if (!w.isDestroyed()) w.destroy();
+    };
+    const onSubmit = (event, value) => { if (event.sender.id === wcId) finish(typeof value === 'string' ? value : null); };
+    const onCancel = (event) => { if (event.sender.id === wcId) finish(null); };
+    ipcMain.on('tunnel-key:submit', onSubmit);
+    ipcMain.on('tunnel-key:cancel', onCancel);
+    w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    w.webContents.on('will-navigate', (event) => event.preventDefault());
+    w.on('closed', () => finish(null));
+    w.once('ready-to-show', () => { if (!done) w.show(); });
+    w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildKeyInputHtml({
+      lang: currentLang,
+      title: tr('tunnel.keyTitle'),
+      heading: tr('tunnel.keyHeading'),
+      note: tr('tunnel.keyNote'),
+      placeholder: 'sk-...',
+      okLabel: tr('tunnel.keySave'),
+      cancelLabel: tr('integration.cancel')
+    }))}`);
+  });
+}
+
+function tunnelStatusLines() {
+  if (!tunnel) return [];
+  const st = tunnel.status();
+  const state = st.state === 'running' ? `${tr('tunnel.stateRunning')} (pid ${st.pid}, ${formatTime(st.startedAt)})` : tr(`tunnel.state_${st.state}`);
+  const lines = [
+    '',
+    `${tr('tunnel.menu')}: ${state}`,
+    `  ${tr('tunnel.statusAutoStart')}: ${st.autoStart ? tr('integration.on') : tr('integration.off')}`,
+    `  ${tr('tunnel.statusKey')}: ${st.hasKey ? tr('tunnel.keyStored') : tr('tunnel.keyMissing')}${st.encryptionAvailable ? '' : ` (${tr('tunnel.noEncryption')})`}`,
+    `  exe: ${st.exePath || '-'}`,
+    `  profile: ${st.profileFile || '-'}`,
+    `  log: ${st.logPath}`
+  ];
+  if (st.lastExit && st.state !== 'running' && st.state !== 'starting') lines.push(`  ${tr('tunnel.statusLastExit')}: ${formatTime(st.lastExit.at)} (code ${st.lastExit.code == null ? st.lastExit.signal : st.lastExit.code})`);
+  if (st.lastError) lines.push(`  ${tr('integration.statusError')}: ${st.lastError}`);
+  return lines;
 }
 
 // Ask before sharing: who receives it, which pane (label + stable id), what is sent, until when.
