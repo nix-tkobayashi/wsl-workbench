@@ -58,8 +58,9 @@ async function setup({ settings = {}, clock = { t: 1_000_000 } } = {}) {
   const read = () => ctl.broker.handle(P, 'workbench_read_output', { target: target() });
   // operation:read goes away with the input switch, so tests look at the arbiter's record directly.
   const getOp = (id) => ctl.arbiter.ops.get(id);
-  const allOn = () => { ctl.share(1, 1); ctl.selectProfile(1, 1, PROFILE); ctl.grantInput(1, 1); };
-  return { ctl, session, P, target, pane, prompt, read, getOp, allOn, writes, confirmations, cancelled, panes, clock, settings: () => st };
+  const banner = () => ctl.ptyData(1, 1, '>_ OpenAI Codex (v0.160.0)\r\n');
+  const allOn = () => { ctl.share(1, 1); banner(); ctl.selectProfile(1, 1, PROFILE); ctl.grantInput(1, 1); };
+  return { ctl, session, P, target, pane, prompt, read, getOp, allOn, banner, writes, confirmations, cancelled, panes, clock, settings: () => st };
 }
 
 test('1/8: both switches start OFF and the pane state names the combination', posixOnly, async () => {
@@ -75,6 +76,7 @@ test('1/8: both switches start OFF and the pane state names the combination', po
     assert.equal(t.read().error.code, 'SESSION_NOT_FOUND');
     t.ctl.share(1, 1);
     assert.equal(t.pane().state, 'read');
+    t.banner();
     t.ctl.selectProfile(1, 1, PROFILE);
     t.ctl.grantInput(1, 1);
     assert.equal(t.pane().state, 'read_input');
@@ -227,9 +229,11 @@ test('codex: an Input ON dialog approved after the CLI exited / profile changed 
   const t = await setup();
   try {
     t.ctl.share(1, 1);
+    t.banner();
     t.ctl.selectProfile(1, 1, PROFILE);
     let shown = t.ctl.inputTarget(1, 1);
     t.ctl.ptyData(1, 1, '\x1b]7;file:///w\x07$ '); // CLI exited while the dialog was open
+    t.banner(); // ...and started again
     assert.throws(() => t.ctl.grantInput(1, 1, shown), /changed while the dialog was open/);
     shown = t.ctl.inputTarget(1, 1);
     t.ctl.selectProfile(1, 1, null);
@@ -238,6 +242,7 @@ test('codex: an Input ON dialog approved after the CLI exited / profile changed 
     shown = t.ctl.inputTarget(1, 1);
     t.ctl.stopSharing(1, 1); // Read OFF -> ON while the dialog is open: a new grant, stale approval
     t.ctl.share(1, 1);
+    t.banner(); // (the CLI identity is forgotten while not sharing; seen again)
     assert.throws(() => t.ctl.grantInput(1, 1, shown), /changed while the dialog was open/);
     shown = t.ctl.inputTarget(1, 1);
     t.ctl.grantInput(1, 1, shown); // unchanged: ok

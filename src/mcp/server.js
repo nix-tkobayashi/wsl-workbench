@@ -58,10 +58,25 @@ function summarize(name, result) {
   }
 }
 
+// The staged observation after Enter (advisory) is reported in the text only, so the tool output
+// schemas (and any client that cached them) stay unchanged.
+function structuredFor(result) {
+  if (!result || typeof result !== 'object' || !('observation' in result)) return result;
+  const { observation, ...rest } = result;
+  return rest;
+}
+
+function observationText(o) {
+  if (!o) return '';
+  return `\nObservation (advisory, pane output after Enter only): CLI acceptance=${o.cli_acceptance}, response=${o.response}${o.note ? ` (${o.note})` : ''}.`
+    + ' "not_confirmed" or "unknown" does NOT mean the input was not sent; never resend or press Enter again.';
+}
+
 function toolResult(name, result) {
+  const structured = structuredFor(result);
   return {
-    content: [{ type: 'text', text: `${summarize(name, result)}\n${JSON.stringify(result)}` }],
-    structuredContent: result,
+    content: [{ type: 'text', text: `${summarize(name, result)}${observationText(result && result.observation)}\n${JSON.stringify(structured)}` }],
+    structuredContent: structured,
     isError: !result.ok
   };
 }
@@ -163,4 +178,4 @@ function createMcpServer({ callTool, serverVersion = '0.0.0', send, onEvent = ()
   return { handle, get initialized() { return initialized; } };
 }
 
-module.exports = { createMcpServer, SUPPORTED_PROTOCOLS, toolResult };
+module.exports = { createMcpServer, SUPPORTED_PROTOCOLS, toolResult, structuredFor };
