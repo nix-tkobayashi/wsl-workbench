@@ -702,7 +702,8 @@ function renderShareBadges() {
     entry.shareBadge.hidden = !show;
     if (!show) continue;
     const state = st.state || 'off';
-    const parts = [t(`integration.badge_${state}`)];
+    const auto = state === 'read_input' && !!st.autoConfirm;
+    const parts = [t(auto ? 'integration.badge_read_input_auto' : `integration.badge_${state}`)];
     if (state !== 'off' && st.capture === 'paused') parts.push(t('integration.badgeCapturePaused'));
     if (state === 'read_input' && st.inputPaused) parts.push(t('integration.badgeInputPaused'));
     if (st.pendingStage) parts.push(t('integration.badgePending'));
@@ -710,7 +711,17 @@ function renderShareBadges() {
     entry.shareBadge.classList.toggle('paused', state !== 'off' && st.capture === 'paused');
     entry.shareBadge.classList.toggle('input', state === 'read_input');
     entry.shareBadge.classList.toggle('pending', !!st.pendingStage);
+    entry.shareBadge.classList.toggle('auto', auto);
     entry.shareBadge.textContent = parts.join(' · ');
+    if (auto) {
+      // Sends run without Workbench's confirmation: one click turns input OFF for this pane.
+      const stop = document.createElement('button');
+      stop.type = 'button';
+      stop.className = 'term-share-stop';
+      stop.textContent = t('integration.badgeStopInput');
+      stop.addEventListener('click', (event) => { event.stopPropagation(); window.api.integrationStopInput({ id: entry.id }); });
+      entry.shareBadge.appendChild(stop);
+    }
   }
   updateShareButton();
 }

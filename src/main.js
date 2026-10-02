@@ -708,11 +708,21 @@ async function downloadAndInstallUpdate(win, installer) {
 // an "update available" button next to Help. Its click handler (update:install below) reuses the
 // same one-click download/verify/install path as the About dialog.
 let startupUpdate = null;
-async function checkForUpdatesInBackground() {
-  const latest = await fetchLatestRelease();
+// Not only at startup: a running app re-checks hourly and when a window gains focus (throttled, see
+// update-schedule.js), so windows that stay open still learn about a release published later.
+const updateSchedule = require('./update-schedule');
+let updateCheck = { lastCheckAt: null, inFlight: false };
+async function checkForUpdatesInBackground(reason = 'startup') {
+  if (!updateSchedule.shouldCheck({ now: Date.now(), ...updateCheck, reason })) return;
+  updateCheck.inFlight = true;
+  let latest = null;
+  try { latest = await fetchLatestRelease(); } catch { latest = null; } finally {
+    updateCheck = { lastCheckAt: Date.now(), inFlight: false };
+  }
   if (!latest || !latest.version || !isNewer(latest.version, app.getVersion())) return;
+  if (startupUpdate && !isNewer(latest.version, startupUpdate.version)) return; // already announced
   startupUpdate = latest;
-  // The update button lives in the workspace toolbar, so notify views (not shells).
+  // The update button lives in the workspace toolbar, so notify every open view (not shells).
   for (const state of viewState.values()) {
     if (!state.view.webContents.isDestroyed()) state.view.webContents.send('update:available', { version: latest.version });
   }
@@ -971,7 +981,10 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     initLanguage();
     initIntegration();
-    checkForUpdatesInBackground(); // fire-and-forget; windows are notified when a newer release exists
+    checkForUpdatesInBackground('startup'); // fire-and-forget; windows are notified when a newer release exists
+    const periodic = setInterval(() => checkForUpdatesInBackground('periodic'), updateSchedule.PERIOD_MS);
+    if (periodic.unref) periodic.unref();
+    app.on('browser-window-focus', () => { checkForUpdatesInBackground('focus'); });
     const workspaceFile = findWorkspaceArg(process.argv);
     if (workspaceFile) {
       try {
@@ -2047,6 +2060,29 @@ async function confirmShare(win, viewId, termId, label) {
   }
 }
 
+// Opt-in per pane: explain once that sends to THIS pane then run without Workbench's confirmation.
+async function confirmAutoConfirm(win, viewId, termId) {
+  const session = integration.sessionFor(viewId, termId);
+  const pane = integration.paneState(viewId).find((p) => p.id === termId);
+  if (!session || !pane || !pane.input) return;
+  const expect = integration.inputTarget(viewId, termId);
+  const detail = tr('integration.autoConfirmDetail')
+    .replace('{label}', integration.registry.displayLabel(session))
+    .replace('{session}', `${session.sessionId.slice(0, 8)}… (gen ${session.generation})`)
+    .replace('{profile}', pane.profileId || '-');
+  const opts = { type: 'warning', title: tr('integration.paneAutoConfirm'), message: tr('integration.autoConfirmMessage'), detail, buttons: [tr('integration.autoConfirmConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
+  const { response } = await dialog.showMessageBox(win, opts);
+  if (response !== 0) return;
+  try { integration.enableAutoConfirm(viewId, termId, expect); } catch (error) { dialog.showErrorBox(tr('integration.paneAutoConfirm'), error.message || String(error)); }
+}
+
+// The badge's "Stop input" button (shown while confirmations are skipped). Resolves the pane from the sender.
+ipcMain.on('integration:stopInput', (event, { id } = {}) => {
+  const viewId = event.sender.id;
+  if (!integration || !viewState.has(viewId) || !Number.isInteger(id)) return;
+  integration.revokeInput(viewId, id);
+});
+
 async function confirmAllowInput(win, viewId, termId) {
   const session = integration.sessionFor(viewId, termId);
   const pane = integration.paneState(viewId).find((p) => p.id === termId);
@@ -2110,6 +2146,12 @@ ipcMain.on('integration:paneMenu', (event, { id, label = '', x = 0, y = 0 } = {}
         ]
       });
       if (pane.input) {
+        items.push({
+          label: tr('integration.paneAutoConfirm'),
+          type: 'checkbox',
+          checked: !!pane.autoConfirm,
+          click: () => { if (pane.autoConfirm) integration.disableAutoConfirm(viewId, id); else confirmAutoConfirm(win, viewId, id); }
+        });
         items.push(pane.inputPaused
           ? { label: tr('integration.paneResumeInput'), click: () => integration.resumeInput(viewId, id) }
           : { label: tr('integration.paneTakeover'), click: () => integration.takeover(viewId, id) });
