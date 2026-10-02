@@ -42,6 +42,10 @@ contextBridge.exposeInMainWorld('api', {
   terminalClose: (payload) => ipcRenderer.send('terminal:close', payload),
   onTerminalData: (cb) => ipcRenderer.on('terminal:data', (_event, payload) => cb(payload)),
   onTerminalExit: (cb) => ipcRenderer.on('terminal:exit', (_event, payload) => cb(payload && payload.id)),
+  // dots integration: per-pane sharing menu (main decides and confirms) and the badges' state.
+  integrationPaneMenu: (payload) => ipcRenderer.send('integration:paneMenu', payload),
+  integrationPaneState: () => ipcRenderer.invoke('integration:paneState'),
+  onIntegrationPaneState: (cb) => ipcRenderer.on('integration:paneState', (_event, panes) => cb(panes)),
   onWorkspaceChanged: (cb) => ipcRenderer.on('workspace:changed', (_event, data) => cb(data)),
   onMenuRefreshTree: (cb) => ipcRenderer.on('menu:refreshTree', () => cb()),
   onMenuRestartTerminal: (cb) => ipcRenderer.on('menu:restartTerminal', () => cb()),

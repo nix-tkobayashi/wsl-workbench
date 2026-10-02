@@ -132,6 +132,74 @@ npm start
 
 Opening a folder from another WSL distro (e.g. `Ubuntu-22.04`) is supported — the distro is taken from the selected path.
 
+## dots integration (preview)
+
+Lets an MCP client — intended for **dots** via a plugin and Secure MCP Tunnel — read terminals you
+**explicitly share** (stage A) and, when you also allow it, type into the CLI running in them
+(stage B). Off by default. Built from the dots integration design handoffs (v1.0 and Stage B
+v1.1, kept outside the repo). Security gate record:
+[`docs/dots-stage-b-security-gate.md`](docs/dots-stage-b-security-gate.md).
+
+```
+dot -> plugin -> Secure MCP Tunnel -> MCP adapter (stdio) -> user-only named pipe -> Workbench main (broker / input arbiter) -> existing pane PTY
+```
+
+### Reading (stage A)
+
+1. **Integration > Enable dots Integration** (confirmation). Workbench creates a 256-bit pairing
+   key in `%APPDATA%\wsl-workbench\integration\pairing.key` (ACL = your user SID, verified with
+   `icacls`) and starts the pipe. On Windows the pipe is created by a small helper with a DACL that
+   admits only your account and denies network logons (verified at start; see the gate record).
+2. Focus a pane, press **⇪** > **Share with dots (read-only, 30 min)**. The badge shows the state;
+   the same menu extends, pauses / resumes capture, clears retained output, or stops sharing.
+3. **Integration > Connection Status... > Copy Adapter Config** copies an `mcpServers` entry
+   (`WSL Workbench.exe` in Node mode + `src/mcp/adapter.js`). No secret is in its args or env.
+
+Tools: `workbench_capabilities`, `workbench_list_sessions`, `workbench_get_session`,
+`workbench_read_output` (normalized, untrusted text captured since sharing began; 1 MiB / 10 min per
+pane, 16 MiB total, memory only; opaque cursors; explicit gaps; best-effort redaction).
+
+### Typing into an existing CLI (stage B, `api_version` 1.1)
+
+Needs, all at once: the restricted pipe verified (status dialog: *Input transport*), **Integration
+> Allow Terminal Input (dots)** turned on (off by default), a healthy operation journal, and per pane:
+sharing on, **⇪ > CLI Input Profile** chosen, **⇪ > Allow Input**. Then `workbench_write_input` and
+`workbench_get_operation` are listed (never `run_command` / `cancel_operation`;
+`command_execution` stays false).
+
+- Prefer `input_contract: "actions-v1"` with `action.type: "text_and_submit"` and the session's
+  `input_profile`. Legacy top-level `text` / `key` still work (single-line).
+- Every operation is confirmed in a Workbench dialog: first the text (check the CLI shows its normal
+  prompt with an empty input line), then Enter separately (check the input line). Dialogs expire
+  after 60 s. Typing in the pane or **Take Over** stops the remaining AI input and pauses AI input
+  until **Resume AI Input**.
+- `delivered` = the PTY library accepted the bytes; CLI acceptance / completion stay `unknown`.
+  Anything stopped after dispatch is `outcome_unknown` and is never re-sent, completed, or undone.
+  Re-sending the same `idempotency_key` only looks the operation up (24 h).
+- Text: ≤ 8192 UTF-8 bytes, no CR / LF (single-line profiles) / Tab / ESC / C0 / C1 / lone
+  surrogates, never normalized. Only profile-verified keys are accepted.
+- Journal (`integration\journal\operations.jsonl`): state + keyed digests only, fsync per step,
+  HMAC-protected (key in DPAPI); a crash never replays — accepted-only → failed, after intent →
+  outcome_unknown. No prompt text in journal, audit, or results.
+
+CLI profiles (measured in an empty temp folder with a new PTY, prompt 「ツールを使わず、OKとだけ返してください」):
+
+| Profile | CLI | Result |
+| --- | --- | --- |
+| `codex.0.160.composer.single-line` | codex-cli 0.160.0 (WSL2) | text, ~600 ms, `\r` → submitted; text+`\r` in one write → not submitted. Verified (Enter only). |
+| `claude-code.2.1.prompt.single-line` | Claude Code 2.1.287 | **Not measured**: the folder-trust prompt was not answered (rule). Not selectable. |
+
+### Verification status (v0.26.0)
+
+- `npm test`: stage A (A01–A07, X01, X02) and stage B mock acceptance (B01–B05, B07–B10 at mock
+  level, output schemas validated), plus the real adapter over stdio.
+- Windows 11 / Electron 42 in Node mode, temp userData: restricted pipe DACL (helper + independent
+  client read), squatting refused, wrong key refused, and adapter → `write_input` → two confirmations
+  → text and Enter as separate writes → `delivered` with a fake PTY.
+- **Not yet verified:** the running app UI (B11), real Claude Code / Codex sessions inside
+  Workbench (B12), other-user / remote clients, and a real dot / plugin / Secure MCP Tunnel (X03).
+  Input is implemented and tested, **dot connection unconfirmed**.
+
 ## Notes
 
 Internal tree drag and drop performs move/rename via Windows UNC path:

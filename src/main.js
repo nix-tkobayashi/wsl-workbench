@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, Menu, clipboard, nativeImage } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, Menu, clipboard, nativeImage, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -35,6 +35,7 @@ const WSL_FS_TIMEOUT_MS = Math.max(1000, Number(process.env.WSLWB_FS_TIMEOUT_MS)
 const { WORKSPACE_EXT } = require('./workspace-args'); // single source for the extension + argv parsing
 const { shellCdCommand } = require('./terminal-actions'); // inherited-cwd `cd` for terminal:start
 const { tabTitleForWorkspace, classifyTabDrop, nextActiveTab, shellWindowTitle } = require('./tab-shell');
+const { IntegrationController } = require('./integration');
 
 // --- Tabbed windows: every BrowserWindow is a thin shell (its own webContents renders only the
 // tab strip + window controls), and each open workspace is a WebContentsView child. A view keeps
@@ -48,6 +49,9 @@ const viewState = new Map();   // view webContents id -> { view, workspace, term
 // for it when a tab drop lands where two windows' strips overlap (classifyTabDrop picks the first
 // hit, which must be the front-most strip).
 const windowFocusOrder = [];
+// dots integration (src/integration): created at app ready; null until then. Off unless the user
+// turned it on; terminals behave exactly as before while it is off.
+let integration = null;
 
 // --- Language / settings persistence ---
 let currentLang = 'en';
@@ -398,6 +402,9 @@ function createWorkspaceView(initialWorkspace = defaultWorkspace(), { showLandin
     winId: null
   });
   hardenWebContents(wc);
+  // dots integration: a reload drops the renderer's panes (and the user's view of what is shared),
+  // so every grant of this view ends. The first load has none, so this is a no-op then.
+  wc.on('did-start-loading', () => { if (integration) integration.viewReset(wc.id); });
   // Views created after the startup update check completed still get the notification (the
   // pre-load webContents.send from checkForUpdatesInBackground is lost if the page isn't ready).
   wc.on('did-finish-load', () => {
@@ -413,6 +420,7 @@ function destroyView(id) {
   for (const ptyProc of state.terminals.values()) {
     try { ptyProc.kill(); } catch {}
   }
+  if (integration) integration.viewGone(id);
   viewState.delete(id);
   try { state.view.webContents.close(); } catch {}
 }
@@ -917,6 +925,10 @@ function buildAppMenu() {
       ]
     },
     {
+      label: tr('menu.integration'),
+      submenu: integrationMenuItems()
+    },
+    {
       label: tr('menu.help'),
       submenu: [
         {
@@ -956,6 +968,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     initLanguage();
+    initIntegration();
     checkForUpdatesInBackground(); // fire-and-forget; windows are notified when a newer release exists
     const workspaceFile = findWorkspaceArg(process.argv);
     if (workspaceFile) {
@@ -1158,7 +1171,8 @@ ipcMain.on('window:close', (event) => {
 
 // Pop a top-level application menu's submenu at a screen position, so the in-app toolbar buttons
 // can show the real menus (the native menu bar itself is hidden via autoHideMenuBar). index maps
-// to the application menu's top-level order: 0 Workspace, 1 Edit, 2 View, 3 Language, 4 Help.
+// to the application menu's top-level order: 0 Workspace, 1 Edit, 2 View, 3 Language,
+// 4 Integration, 5 Help.
 // A workspace view's coordinates are view-relative, so its strip-height offset is added back.
 ipcMain.on('menu:popup', (event, { index, x, y } = {}) => {
   const win = windowForSender(event.sender);
@@ -1519,12 +1533,17 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = 
     env: process.env
   });
   state.terminals.set(id, ptyProc);
+  // dots integration ledger: a new pty in this slot is a new generation (ends any grant on it).
+  if (integration) integration.ptyStarted(wc.id, id, { distro: workspace.distro, wslPath: workspace.wslPath, initialCwd: cd ? cwd : workspace.wslPath });
   ptyProc.onData((data) => {
     if (state.terminals.get(id) !== ptyProc) return; // ignore output from a superseded pty
+    // A copy goes to the integration first; it only stores anything while the pane is shared.
+    if (integration) integration.ptyData(wc.id, id, data);
     if (!wc.isDestroyed()) wc.send('terminal:data', { id, data });
   });
   ptyProc.onExit(() => {
     if (state.terminals.get(id) !== ptyProc) return; // superseded by a newer pty for this id; ignore its late exit
+    if (integration) integration.ptyExited(wc.id, id);
     state.terminals.delete(id);
     if (!wc.isDestroyed()) {
       wc.send('terminal:data', { id, data: `\r\n\x1b[90m${tr('terminal.exited')}\x1b[0m\r\n` });
@@ -1536,7 +1555,12 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = 
 ipcMain.on('terminal:write', (event, { id, data }) => {
   const state = viewState.get(event.sender.id);
   const ptyProc = state && state.terminals.get(id);
-  if (ptyProc) ptyProc.write(data);
+  if (ptyProc) {
+    // Human input is registered BEFORE it reaches the pty, so a pending AI input operation on this
+    // pane stops first (the human always wins) and state_revision moves.
+    if (integration) integration.userInput(event.sender.id, id, data);
+    ptyProc.write(data);
+  }
 });
 
 ipcMain.on('terminal:resize', (event, { id, cols, rows }) => {
@@ -1553,4 +1577,368 @@ ipcMain.on('terminal:close', (event, { id }) => {
     try { ptyProc.kill(); } catch {}
   }
   state.terminals.delete(id);
+  if (integration) integration.ptyClosed(event.sender.id, id);
 });
+
+// --- dots integration (stage A, read-only). Everything that grants access happens here, from an
+// explicit user action with a confirmation dialog; nothing a tool call or terminal output says can
+// share a pane, extend a grant, or turn the integration on. ---
+
+function initIntegration() {
+  integration = new IntegrationController({
+    userDataDir: app.getPath('userData'),
+    appVersion: app.getVersion(),
+    readSettings,
+    writeSettings,
+    notifyView: (viewId, panes) => {
+      const state = viewState.get(viewId);
+      if (state && !state.view.webContents.isDestroyed()) state.view.webContents.send('integration:paneState', panes);
+    },
+    // Stage B: the arbiter's only way into a pty. Returns false when the pane's pty is gone.
+    writePty: (viewId, termId, data) => {
+      const state = viewState.get(viewId);
+      const ptyProc = state && state.terminals.get(termId);
+      if (!ptyProc) return false;
+      ptyProc.write(data);
+      return true;
+    },
+    requestConfirmation: (req) => { showInputConfirmation(req); },
+    cancelConfirmation: (opId) => {
+      const pending = inputConfirmations.get(opId);
+      if (pending) { inputConfirmations.delete(opId); pending.abort(); }
+    },
+    journalKey: loadJournalKey
+  });
+  integration.start().then(() => buildAppMenu()).catch(() => {});
+}
+
+// HMAC key of the operation journal, protected by the OS (DPAPI via Electron safeStorage). Without
+// OS protection the journal stays unavailable and input cannot be used.
+function loadJournalKey() {
+  if (!safeStorage.isEncryptionAvailable()) return null;
+  const file = path.join(integration.dir, 'journal.key.enc');
+  try {
+    return Buffer.from(safeStorage.decryptString(fs.readFileSync(file)), 'hex');
+  } catch (error) {
+    if (error.code !== 'ENOENT') return null; // unreadable / other user / corrupted: never replace silently
+  }
+  const key = require('crypto').randomBytes(32);
+  fs.mkdirSync(integration.dir, { recursive: true });
+  fs.writeFileSync(file, safeStorage.encryptString(key.toString('hex')), { mode: 0o600, flag: 'wx' });
+  return key;
+}
+
+// --- Stage B local confirmation: one dialog per step, bound to the operation; closes itself when
+// the operation stops (takeover, revoke, 60 s expiry). The answer is one-shot. ---
+const inputConfirmations = new Map(); // op id -> AbortController
+
+// A modal window that shows the WHOLE text (scrollable, invisible characters marked) — a native
+// message box would have to truncate it. Resolves true only on an explicit click of the OK button.
+function showConfirmWindow(parent, page, signal) {
+  const { buildConfirmHtml, APPROVE, CANCEL } = require('./integration/confirm-page');
+  return new Promise((resolve) => {
+    const w = new BrowserWindow({
+      parent, modal: true, show: false, width: 680, height: 540, minWidth: 420, minHeight: 300,
+      minimizable: false, maximizable: false, autoHideMenuBar: true, title: page.title, backgroundColor: '#1e1e1e',
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false }
+    });
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      resolve(value);
+      if (!w.isDestroyed()) w.destroy();
+    };
+    w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    w.webContents.on('will-navigate', (event) => event.preventDefault());
+    w.webContents.on('page-title-updated', (event, title) => {
+      event.preventDefault();
+      if (title === APPROVE) finish(true);
+      else if (title === CANCEL) finish(false);
+    });
+    w.on('closed', () => finish(false));
+    if (signal) signal.addEventListener('abort', () => finish(false), { once: true });
+    w.once('ready-to-show', () => { if (!done) w.show(); });
+    w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildConfirmHtml({ lang: currentLang, ...page }))}`);
+  });
+}
+
+async function showInputConfirmation(req) {
+  const state = viewState.get(req.viewId);
+  const win = state && state.winId != null ? BrowserWindow.fromId(state.winId) : null;
+  if (!win || win.isDestroyed()) { integration.confirmOperation(req.opId, req.stage, 'declined'); return; }
+  activateTab(win, req.viewId); // the pane the input goes to must be the one on screen
+  const session = integration.registry.sessions.get(req.sessionId);
+  const label = session ? integration.registry.displayLabel(session) : '-';
+  const seconds = Math.max(1, Math.round((req.deadline - Date.now()) / 1000));
+  const action = req.kind === 'key' ? tr('integration.confirmActionKey').replace('{key}', req.key)
+    : req.submit ? tr('integration.confirmActionTextEnter') : tr('integration.confirmActionText');
+  const details = [
+    [tr('integration.confirmTerminal'), label],
+    [tr('integration.confirmSession'), `${req.sessionId.slice(0, 8)}… (gen ${req.generation})`],
+    [tr('integration.confirmProfile'), `${req.profile.cli_name} ${req.profile.cli_version} (${req.profile.id})`],
+    [tr('integration.confirmAction'), action]
+  ];
+  if (req.text != null) details.push([tr('integration.confirmSize'), `${req.lines} ${tr('integration.confirmLines')}, ${req.bytes} bytes`]);
+  const controller = new AbortController();
+  inputConfirmations.set(req.opId, controller);
+  const approved = await showConfirmWindow(win, {
+    title: tr('integration.confirmTitle'),
+    heading: req.stage === 'submit' ? tr('integration.confirmSubmitMessage') : tr('integration.confirmMessage'),
+    details,
+    text: req.text,
+    markedNote: tr('integration.confirmMarked'),
+    note: `${req.stage === 'submit' ? tr('integration.confirmCheckSubmit') : tr('integration.confirmCheckPrompt')} ${tr('integration.confirmExpires').replace('{s}', String(seconds))}`,
+    okLabel: req.stage === 'submit' ? tr('integration.confirmSendEnter') : tr('integration.confirmType'),
+    cancelLabel: tr('integration.cancel')
+  }, controller.signal);
+  const ours = inputConfirmations.get(req.opId) === controller;
+  inputConfirmations.delete(req.opId);
+  if (!ours || controller.signal.aborted) return; // closed because the operation already stopped
+  integration.confirmOperation(req.opId, req.stage, approved ? 'approved' : 'declined');
+}
+
+app.on('will-quit', () => { if (integration) integration.shutdown(); });
+
+// What an MCP client must run to reach this Workbench: the app's own executable in Node mode and
+// the adapter script shipped inside the app (works for both `npm start` and the installed build).
+function adapterLaunchSpec() {
+  return {
+    command: process.execPath,
+    args: [path.join(__dirname, 'mcp', 'adapter.js')],
+    env: { ELECTRON_RUN_AS_NODE: '1', WSLWB_INTEGRATION_DIR: integration ? integration.dir : '' }
+  };
+}
+
+function formatTime(ms) {
+  if (!ms) return tr('integration.never');
+  return new Date(ms).toLocaleString(currentLang === 'ja' ? 'ja-JP' : 'en-US');
+}
+
+function focusedWindow() { return BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || null; }
+
+async function confirmEnableIntegration(win) {
+  const opts = {
+    type: 'warning',
+    title: tr('integration.enableTitle'),
+    message: tr('integration.enableMessage'),
+    detail: tr('integration.enableDetail'),
+    buttons: [tr('integration.enableConfirm'), tr('integration.cancel')],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  };
+  const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+  if (response !== 0) return false;
+  try {
+    await integration.enable();
+  } catch (error) {
+    dialog.showErrorBox(tr('integration.enableFailed'), error.message || String(error));
+    return false;
+  } finally {
+    buildAppMenu();
+  }
+  return true;
+}
+
+async function showIntegrationStatus(win) {
+  if (!integration) return;
+  const st = integration.status();
+  const spec = adapterLaunchSpec();
+  const lines = [
+    `${tr('integration.statusState')}: ${st.enabled ? tr('integration.on') : tr('integration.off')}`,
+    `${tr('integration.statusConnections')}: ${st.connections}`,
+    `${tr('integration.statusLastConnected')}: ${formatTime(st.lastConnectedAt)}`,
+    `${tr('integration.statusLastCall')}: ${formatTime(st.lastCallAt)}`,
+    `${tr('integration.statusLastAuthFailure')}: ${formatTime(st.lastAuthFailureAt)}`,
+    `${tr('integration.statusGrants')}: ${st.activeGrants}`,
+    `${tr('integration.statusTools')}: workbench_capabilities, workbench_list_sessions, workbench_get_session, workbench_read_output`,
+    `${tr('integration.statusTransport')}: ${st.transportGate === 'reviewed' ? tr('integration.transportVerified') : tr('integration.transportBlocked')}${st.transportNote ? ` — ${st.transportNote}` : ''}`,
+    `${tr('integration.statusInput')}: ${st.inputGateOpen ? tr('integration.on') : tr('integration.off')} (${tr('integration.statusInputSetting')}: ${st.inputEnabled ? tr('integration.on') : tr('integration.off')}, journal: ${st.journalHealthy ? 'ok' : (st.journalError || 'unavailable')})`,
+    `${tr('integration.statusPrincipal')}: ${st.principal || '-'}`,
+    `${tr('integration.statusEndpoint')}: ${st.endpoint || '-'}`,
+    '',
+    tr('integration.statusAdapter'),
+    `  command: ${spec.command}`,
+    `  args: ${spec.args.join(' ')}`,
+    `  env: ELECTRON_RUN_AS_NODE=1, WSLWB_INTEGRATION_DIR=${spec.env.WSLWB_INTEGRATION_DIR}`
+  ];
+  if (st.operations.length) {
+    lines.push('', tr('integration.statusOperations'));
+    for (const op of st.operations) {
+      lines.push(`  ${formatTime(op.acceptedAt)}  ${op.id.slice(0, 8)}  ${op.kind}${op.submit ? '+Enter' : ''}  ${op.status}/${op.phase}${op.code ? ` (${op.code})` : ''}`);
+    }
+  }
+  if (st.lastError) lines.push('', `${tr('integration.statusError')}: ${st.lastError}`);
+  const opts = {
+    type: 'info',
+    title: tr('integration.statusTitle'),
+    message: tr('integration.statusTitle'),
+    detail: lines.join('\n'),
+    buttons: [tr('integration.copyAdapterConfig'), tr('integration.close')],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  };
+  const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+  if (response === 0) {
+    // Not a secret: the adapter reads the pairing key from the protected file itself.
+    clipboard.writeText(JSON.stringify({ mcpServers: { 'wsl-workbench': spec } }, null, 2));
+  }
+}
+
+function integrationMenuItems() {
+  const enabled = !!(integration && integration.enabled);
+  return [
+    {
+      label: tr('integration.menuEnable'),
+      type: 'checkbox',
+      checked: enabled,
+      enabled: !!integration,
+      click: async () => {
+        const win = focusedWindow();
+        if (integration.enabled) { await integration.disable(); buildAppMenu(); } else { await confirmEnableIntegration(win); }
+      }
+    },
+    { label: tr('integration.menuStatus'), enabled: !!integration, click: () => showIntegrationStatus(focusedWindow()) },
+    { type: 'separator' },
+    {
+      label: tr('integration.menuInput'),
+      type: 'checkbox',
+      checked: !!(integration && integration.inputEnabled),
+      // Only offered when the user-restricted pipe is up and verified (transport gate).
+      enabled: enabled && integration.transportGate === 'reviewed',
+      click: async () => {
+        const win = focusedWindow();
+        if (integration.inputEnabled) { await integration.setInputEnabled(false); buildAppMenu(); return; }
+        const opts = { type: 'warning', title: tr('integration.menuInput'), message: tr('integration.inputEnableMessage'), detail: tr('integration.inputEnableDetail'), buttons: [tr('integration.enableConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
+        const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+        if (response === 0) {
+          try { await integration.setInputEnabled(true); } catch (error) { dialog.showErrorBox(tr('integration.menuInput'), error.message || String(error)); }
+        }
+        buildAppMenu();
+      }
+    },
+    { type: 'separator' },
+    { label: tr('integration.menuRevokeAll'), enabled, click: () => integration.revokeAll() },
+    {
+      label: tr('integration.menuResetPairing'),
+      enabled: !!integration,
+      click: async () => {
+        const win = focusedWindow();
+        const opts = { type: 'warning', title: tr('integration.menuResetPairing'), message: tr('integration.resetMessage'), buttons: [tr('integration.resetConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
+        const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+        if (response !== 0) return;
+        try { await integration.resetPairing(); } catch (error) { dialog.showErrorBox(tr('integration.enableFailed'), error.message || String(error)); }
+        buildAppMenu();
+      }
+    }
+  ];
+}
+
+// Ask before sharing: who receives it, which pane (label + stable id), what is sent, until when.
+async function confirmShare(win, viewId, termId, label) {
+  const session = integration.sessionFor(viewId, termId);
+  if (!session) return;
+  // Snapshot the incarnation the user is shown: the session object is mutated in place on restart.
+  const approvedId = session.sessionId;
+  const approvedGeneration = session.generation;
+  const minutes = 30;
+  const detail = tr('integration.shareDetail')
+    .replace('{principal}', integration.principal || '-')
+    .replace('{label}', integration.registry.displayLabel({ ...session, label: String(label || '').slice(0, 80) || session.label }))
+    .replace('{session}', `${session.sessionId} (gen ${session.generation})`)
+    .replace('{minutes}', String(minutes));
+  const opts = {
+    type: 'warning',
+    title: tr('integration.shareTitle'),
+    message: tr('integration.shareMessage'),
+    detail,
+    buttons: [tr('integration.shareConfirm'), tr('integration.cancel')],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  };
+  const { response } = await dialog.showMessageBox(win, opts);
+  if (response !== 0) return;
+  // The pane may have been restarted while the dialog was open: share only the same incarnation.
+  const now = integration.sessionFor(viewId, termId);
+  if (!now || now.sessionId !== approvedId || now.generation !== approvedGeneration) return;
+  try { integration.share(viewId, termId, { label, durationMs: minutes * 60 * 1000 }); } catch (error) {
+    dialog.showErrorBox(tr('integration.shareTitle'), error.message || String(error));
+  }
+}
+
+async function confirmAllowInput(win, viewId, termId) {
+  const session = integration.sessionFor(viewId, termId);
+  const pane = integration.paneState(viewId).find((p) => p.id === termId);
+  if (!session || !pane || !pane.shared) return;
+  const approvedId = session.sessionId;
+  const approvedGeneration = session.generation;
+  const detail = tr('integration.allowInputDetail')
+    .replace('{principal}', integration.principal || '-')
+    .replace('{label}', integration.registry.displayLabel(session))
+    .replace('{session}', `${session.sessionId.slice(0, 8)}… (gen ${session.generation})`)
+    .replace('{until}', new Date(pane.expiresAt).toLocaleTimeString(currentLang === 'ja' ? 'ja-JP' : 'en-US'));
+  const opts = { type: 'warning', title: tr('integration.paneAllowInput'), message: tr('integration.allowInputMessage'), detail, buttons: [tr('integration.allowInputConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
+  const { response } = await dialog.showMessageBox(win, opts);
+  if (response !== 0) return;
+  const now = integration.sessionFor(viewId, termId);
+  if (!now || now.sessionId !== approvedId || now.generation !== approvedGeneration) return;
+  try { integration.grantInput(viewId, termId); } catch (error) { dialog.showErrorBox(tr('integration.paneAllowInput'), error.message || String(error)); }
+}
+
+// Per-pane sharing menu (terminal toolbar button). The view (event.sender) owns the pane id; main
+// resolves the slot itself and never takes a session id from the renderer.
+ipcMain.on('integration:paneMenu', (event, { id, label = '', x = 0, y = 0 } = {}) => {
+  const viewId = event.sender.id;
+  const win = windowForSender(event.sender);
+  if (!win || !integration || !viewState.has(viewId) || !Number.isInteger(id)) return;
+  const pane = integration.paneState(viewId).find((p) => p.id === id && integration.sessionFor(viewId, id));
+  const items = [];
+  if (!integration.enabled) {
+    items.push({ label: tr('integration.paneEnableFirst'), click: async () => { if (await confirmEnableIntegration(win)) confirmShare(win, viewId, id, label); } });
+  } else if (!pane) {
+    items.push({ label: tr('integration.paneNotRunning'), enabled: false });
+  } else if (!pane.shared) {
+    items.push({ label: tr('integration.paneShare'), click: () => confirmShare(win, viewId, id, label) });
+  } else {
+    items.push({ label: `${tr('integration.paneSharedUntil')} ${new Date(pane.expiresAt).toLocaleTimeString(currentLang === 'ja' ? 'ja-JP' : 'en-US')}`, enabled: false });
+    items.push({ label: tr('integration.paneExtend'), click: () => integration.extend(viewId, id) });
+    items.push(pane.capture === 'paused'
+      ? { label: tr('integration.paneResume'), click: () => integration.resume(viewId, id) }
+      : { label: tr('integration.panePause'), click: () => integration.pause(viewId, id) });
+    items.push({ label: tr('integration.paneClear'), click: () => integration.clearBuffer(viewId, id) });
+    items.push({ type: 'separator' });
+    // Stage B: per-pane input (only while the input gate is open).
+    if (integration.inputGate().open || pane.input) {
+      const { verifiedProfiles } = require('./integration/input-profiles');
+      items.push({
+        label: tr('integration.paneProfile'),
+        submenu: [
+          { label: tr('integration.paneProfileNone'), type: 'radio', checked: !pane.profileId, click: () => integration.selectProfile(viewId, id, null) },
+          ...verifiedProfiles().map((p) => ({
+            label: `${p.cli_name} ${p.cli_version} — ${p.mode}${p.multiline ? '' : ' (single-line)'}`,
+            type: 'radio',
+            checked: pane.profileId === p.id,
+            click: () => integration.selectProfile(viewId, id, p.id)
+          }))
+        ]
+      });
+      if (pane.input) {
+        items.push(pane.inputPaused
+          ? { label: tr('integration.paneResumeInput'), click: () => integration.resumeInput(viewId, id) }
+          : { label: tr('integration.paneTakeover'), click: () => integration.takeover(viewId, id) });
+        items.push({ label: tr('integration.paneRevokeInput'), click: () => integration.revokeInput(viewId, id) });
+      } else {
+        items.push({ label: tr('integration.paneAllowInput'), enabled: integration.inputGate().open, click: () => confirmAllowInput(win, viewId, id) });
+      }
+      items.push({ type: 'separator' });
+    }
+    items.push({ label: tr('integration.paneStop'), click: () => integration.stopSharing(viewId, id) });
+  }
+  items.push({ type: 'separator' }, { label: tr('integration.menuStatus'), click: () => showIntegrationStatus(win) });
+  Menu.buildFromTemplate(items).popup({ window: win, x: Math.round(x), y: Math.round(y + TABSTRIP_H) });
+});
+
+ipcMain.handle('integration:paneState', (event) => (integration ? integration.paneState(event.sender.id) : []));
