@@ -39,8 +39,11 @@ class IntegrationController {
     notifyView = () => {}, limits = {}, now = Date.now, monotonic,
     // Stage B hooks (main.js): PTY writer, confirmation UI, OS-protected journal key, test overrides.
     writePty = () => false, requestConfirmation = () => { throw new Error('no confirmation UI'); }, cancelConfirmation = () => {},
-    journalKey = () => null, secureTransport = null
+    journalKey = () => null, secureTransport = null,
+    // Optional tunnel-client runner (tunnel-runner.js): runs only while the integration is on.
+    tunnel = null
   }) {
+    this.tunnel = tunnel;
     this.userDataDir = userDataDir;
     this.dir = pairing.integrationDir(userDataDir);
     this.platform = platform;
@@ -127,6 +130,7 @@ class IntegrationController {
     const settings = this.readSettings() || {};
     if (settings.integration && settings.integration.enabled) {
       try { await this.listen(); } catch (error) { this.lastError = error.message || String(error); }
+      if (this.enabled && this.tunnel) this.tunnel.autoStart();
     }
   }
 
@@ -179,9 +183,13 @@ class IntegrationController {
     await this.listen();
     this.saveIntegration({ enabled: true });
     this.audit.record({ event: 'integration_enabled', principal: this.principal });
+    if (this.tunnel) this.tunnel.autoStart();
   }
 
+  // Always turns the integration off (closing the pipe is the safe direction). Returns
+  // { tunnelStopped: false } when tunnel-client could not be ended, so the caller can tell the user.
   async disable() {
+    const tunnelStopped = this.tunnel ? this.tunnel.stop('integration_disabled') !== false : true;
     this.revokeAll('integration_disabled');
     if (this.server) { try { await this.server.close(); } catch {} }
     this.server = null;
@@ -190,6 +198,7 @@ class IntegrationController {
     this.transportGate = 'blocked';
     if (this.store) { this.store.close(); this.store = null; this.arbiter.store = { healthy: false, digest: () => '', lookup: () => null, append: () => { throw new Error('no journal'); }, retentionMs: 0 }; }
     this.audit.record({ event: 'integration_disabled' });
+    return { tunnelStopped };
   }
 
   // New secret = new principal; all grants (bound to the old principal) end.
@@ -202,6 +211,7 @@ class IntegrationController {
   }
 
   async shutdown() {
+    if (this.tunnel) this.tunnel.stop('app_exit');
     this.revokeAll('app_exit');
     if (this.store) this.store.close();
     if (this.server) { try { await this.server.close(); } catch {} }

@@ -115,4 +115,4 @@ function readPairing(dir) {
   }
 }
 
-module.exports = { integrationDir, endpointFor, ensurePairing, resetPairing, readPairing, currentUserSid, KEY_FILE, ENDPOINT_FILE };
+module.exports = { integrationDir, endpointFor, ensurePairing, resetPairing, readPairing, currentUserSid, restrictWindowsAcl, KEY_FILE, ENDPOINT_FILE };

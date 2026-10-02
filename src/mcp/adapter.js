@@ -9,6 +9,10 @@
 //   "WSL Workbench.exe" "<install dir>\resources\app.asar\src\mcp\adapter.js"
 // Optional: WSLWB_INTEGRATION_DIR=<userData>\integration when the default lookup doesn't fit.
 
+// The tunnel-client runtime key reaches this process only because tunnel-client's children inherit
+// its environment. The adapter never needs it: drop it before anything else runs.
+for (const name of Object.keys(process.env)) if (name.toUpperCase() === 'CONTROL_PLANE_API_KEY') delete process.env[name];
+
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
