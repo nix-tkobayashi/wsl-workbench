@@ -2060,6 +2060,29 @@ async function confirmShare(win, viewId, termId, label) {
   }
 }
 
+// Opt-in per pane: explain once that sends to THIS pane then run without Workbench's confirmation.
+async function confirmAutoConfirm(win, viewId, termId) {
+  const session = integration.sessionFor(viewId, termId);
+  const pane = integration.paneState(viewId).find((p) => p.id === termId);
+  if (!session || !pane || !pane.input) return;
+  const expect = integration.inputTarget(viewId, termId);
+  const detail = tr('integration.autoConfirmDetail')
+    .replace('{label}', integration.registry.displayLabel(session))
+    .replace('{session}', `${session.sessionId.slice(0, 8)}… (gen ${session.generation})`)
+    .replace('{profile}', pane.profileId || '-');
+  const opts = { type: 'warning', title: tr('integration.paneAutoConfirm'), message: tr('integration.autoConfirmMessage'), detail, buttons: [tr('integration.autoConfirmConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
+  const { response } = await dialog.showMessageBox(win, opts);
+  if (response !== 0) return;
+  try { integration.enableAutoConfirm(viewId, termId, expect); } catch (error) { dialog.showErrorBox(tr('integration.paneAutoConfirm'), error.message || String(error)); }
+}
+
+// The badge's "Stop input" button (shown while confirmations are skipped). Resolves the pane from the sender.
+ipcMain.on('integration:stopInput', (event, { id } = {}) => {
+  const viewId = event.sender.id;
+  if (!integration || !viewState.has(viewId) || !Number.isInteger(id)) return;
+  integration.revokeInput(viewId, id);
+});
+
 async function confirmAllowInput(win, viewId, termId) {
   const session = integration.sessionFor(viewId, termId);
   const pane = integration.paneState(viewId).find((p) => p.id === termId);
@@ -2123,6 +2146,12 @@ ipcMain.on('integration:paneMenu', (event, { id, label = '', x = 0, y = 0 } = {}
         ]
       });
       if (pane.input) {
+        items.push({
+          label: tr('integration.paneAutoConfirm'),
+          type: 'checkbox',
+          checked: !!pane.autoConfirm,
+          click: () => { if (pane.autoConfirm) integration.disableAutoConfirm(viewId, id); else confirmAutoConfirm(win, viewId, id); }
+        });
         items.push(pane.inputPaused
           ? { label: tr('integration.paneResumeInput'), click: () => integration.resumeInput(viewId, id) }
           : { label: tr('integration.paneTakeover'), click: () => integration.takeover(viewId, id) });

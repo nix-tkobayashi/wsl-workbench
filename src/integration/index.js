@@ -79,7 +79,8 @@ class IntegrationController {
       audit: this.audit,
       isGateOpen: () => this.inputGate().open,
       now,
-      onChange: (op) => this.pushPaneState(op.viewId)
+      onChange: (op) => this.pushPaneState(op.viewId),
+      autoApprove: (op) => this.autoConfirmApplies(op)
     });
     this.broker.setInput({ arbiter: this.arbiter, gate: () => this.inputGate() });
   }
@@ -255,6 +256,7 @@ class IntegrationController {
   onSessionEvent(event, session) {
     if (event === 'replaced' || event === 'closed') {
       this.arbiter.sessionChanged(session.sessionId, 'STALE_SESSION');
+      this.clearAutoConfirm(session, `pty_${event}`);
       session.inputProfile = null;
       session.inputPaused = false;
       this.endGrant(session, 'GRANT_REVOKED', `pty_${event}`);
@@ -278,6 +280,7 @@ class IntegrationController {
   onGrantEnded(grant, code) {
     this.arbiter.sessionChanged(grant.session_id, code);
     const session = this.registry.sessions.get(grant.session_id);
+    if (session) this.clearAutoConfirm(session, 'grant_ended');
     if (session && session.generation === grant.generation) this.registry.resetCapture(session);
     this.audit.record({ event: 'grant_ended', principal: grant.principal, session_id: grant.session_id, generation: grant.generation, code, reason: this.endReason || undefined });
     if (session) this.pushPaneState(session.viewId);
@@ -358,6 +361,10 @@ class IntegrationController {
     this.audit.record({ event: on ? 'input_enabled' : 'input_disabled' });
     if (!on) {
       this.arbiter.stopAll('PERMISSION_DENIED');
+      for (const s2 of this.registry.sessions.values()) {
+        this.clearAutoConfirm(s2, 'input_disabled');
+        s2.inputEpoch = (s2.inputEpoch || 0) + 1;
+      }
       for (const grant of [...this.access.grants.values()]) {
         this.access.revokeInput(grant);
         const session = this.registry.sessions.get(grant.session_id);
@@ -402,10 +409,71 @@ class IntegrationController {
     if (session) this.revokeInputFor(session, 'user_stopped');
   }
 
+  // --- "skip the send confirmation" (per pane, opt-in, OFF by default) ---
+  // Bound to ONE pane incarnation, read grant, input epoch and CLI profile; never persisted. It
+  // only replaces Workbench's two confirmation dialogs: every check, the write order, the submit
+  // delay, idempotency, journaling and human takeover stay. Operations already waiting when it is
+  // turned on keep their dialogs.
+
+  enableAutoConfirm(viewId, termId, expect) {
+    const session = this.sessionFor(viewId, termId);
+    const grant = session && this.access.active(session.sessionId);
+    if (!session || session.lifecycle !== 'alive') throw new Error('This terminal is not running.');
+    if (!grant || !this.access.hasInput(grant)) throw new Error('Turn Input ON first.');
+    if (!this.inputGate().open) throw new Error('Terminal input is not enabled.');
+    if (!session.inputProfile) throw new Error('Choose a CLI input profile first.');
+    const now = this.inputTarget(viewId, termId);
+    if (!expect || !now || now.sessionId !== expect.sessionId || now.generation !== expect.generation || now.grantId !== expect.grantId
+      || now.inputEpoch !== expect.inputEpoch || now.profileId !== expect.profileId) {
+      throw new Error('The terminal changed while the dialog was open. Turn it on again.');
+    }
+    session.autoConfirm = {
+      sessionId: session.sessionId, generation: session.generation, grantId: grant.grant_id, inputEpoch: session.inputEpoch || 0,
+      profileId: session.inputProfile.id, profileRevision: session.inputProfile.revision, sinceSeq: this.arbiter.seq
+    };
+    // No state_revision bump: an operation already waiting keeps its own dialogs and stays valid.
+    this.audit.record({ event: 'auto_confirm_enabled', principal: grant.principal, session_id: session.sessionId, generation: session.generation, reason: session.inputProfile.id });
+    this.pushPaneState(viewId);
+  }
+
+  disableAutoConfirm(viewId, termId) {
+    const session = this.sessionFor(viewId, termId);
+    if (session) this.clearAutoConfirm(session, 'user_stopped');
+  }
+
+  // Turn the setting off; any operation that was running under it stops (unsent parts are not sent).
+  clearAutoConfirm(session, reason) {
+    const ac = session.autoConfirm;
+    if (!ac) return false;
+    session.autoConfirm = null;
+    const op = this.arbiter.pending.get(session.sessionId);
+    if (op && op.seq > ac.sinceSeq) this.arbiter.stop(op, 'PERMISSION_DENIED', 'Skipping the send confirmation was turned off; the rest was not sent.');
+    this.audit.record({ event: 'auto_confirm_disabled', session_id: session.sessionId, generation: session.generation, reason });
+    this.pushPaneState(session.viewId);
+    return true;
+  }
+
+  // Asked by the arbiter before each step and each write.
+  autoConfirmApplies(op) {
+    const session = this.registry.sessions.get(op.sessionId);
+    const ac = session && session.autoConfirm;
+    if (!ac || session.lifecycle !== 'alive') return false;
+    const grant = this.access.active(session.sessionId);
+    return !!(grant && this.access.hasInput(grant) && this.inputGate().open
+      && ac.sessionId === session.sessionId && ac.generation === session.generation && op.generation === session.generation
+      && ac.grantId === grant.grant_id && op.grantId === grant.grant_id
+      && ac.inputEpoch === (session.inputEpoch || 0)
+      && session.inputProfile && ac.profileId === session.inputProfile.id && ac.profileRevision === session.inputProfile.revision
+      && op.profile.id === ac.profileId && op.profile.revision === ac.profileRevision
+      && op.seq > ac.sinceSeq);
+  }
+
   // Input switch OFF (read stays): pending AI input stops; nothing dispatched is ever re-sent.
   revokeInputFor(session, reason) {
+    this.clearAutoConfirm(session, reason);
     const grant = this.access.active(session.sessionId);
     if (!grant || !this.access.hasInput(grant)) return false;
+    session.inputEpoch = (session.inputEpoch || 0) + 1; // dialogs opened for the old input period are stale
     this.arbiter.sessionChanged(session.sessionId, 'GRANT_REVOKED');
     this.access.revokeInput(grant);
     this.registry.bump(session);
@@ -476,6 +544,7 @@ class IntegrationController {
         permissions: grant ? [...grant.permissions].sort() : [],
         // 'off' | 'read' | 'read_input' — what the badge shows.
         state: !grant ? 'off' : (grant.permissions.has('input:write') ? 'read_input' : 'read'),
+        autoConfirm: !!(grant && grant.permissions.has('input:write') && session.autoConfirm),
         integration: this.enabled,
         capture: session.capture,
         sessionId: session.sessionId,

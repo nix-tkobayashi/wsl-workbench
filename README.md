@@ -254,6 +254,27 @@ process, and `taskkill /F` of only the helper each left no tunnel-client / wrapp
 process; restarting right after a forced kill ran exactly one tunnel-client; with a hand-started
 tunnel-client running, the app refused (`already_running`).
 
+### Skipping the send confirmation (per pane, opt-in, v0.30.0)
+
+**⇪ > Skip Send Confirmation (this pane only)...** (only while Input is ON) makes text AND Enter
+requested by dots for that pane go out without Workbench's two dialogs, after a one-time consent.
+The badge turns red — **Read ON · Input ON · NO CONFIRMATION** — with a **Stop input** button.
+
+- Bound to that pane incarnation, its read grant, the current input period and the selected CLI
+  profile; never shared with other panes and never persisted. Turns OFF with Input OFF, Read
+  Sharing OFF, a CLI profile change, the shell prompt returning (CLI exited), the terminal ending,
+  the dots integration or terminal input turning off, or Workbench exiting.
+- Only the dialogs are skipped. Still enforced: target / permission / profile revalidation right
+  before the text and right before Enter, the write order and the profile's submit delay,
+  idempotency (no duplicate sends), the operation journal and audit (`auto_confirmed`), and your
+  typing / Take Over stopping AI input.
+- Operations that were already waiting when you turned it on keep their dialogs. Turning it off
+  (or any OFF above, or typing in the pane) stops what has not been sent; a partly sent operation
+  is `outcome_unknown` and is never re-sent.
+- It never answers Claude Code's / Codex's own trust or permission prompts, and ChatGPT / dot side
+  approvals are separate. Workbench cannot always tell that the CLI moved to another input screen
+  (see below) — use it only while you watch the pane.
+
 ### Limits of CLI change detection
 
 Workbench cannot see which program runs in the foreground of a WSL terminal (the PTY belongs to

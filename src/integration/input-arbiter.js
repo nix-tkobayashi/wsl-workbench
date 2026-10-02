@@ -41,9 +41,13 @@ class InputArbiter {
   constructor({
     registry, access, store, writePty, requestConfirmation = () => {}, cancelConfirmation = () => {},
     cursorAt = () => null, audit = null, isGateOpen = () => false, now = Date.now, randomUUID = crypto.randomUUID,
-    confirmMs = CONFIRM_MS, writesPerMinute = WRITES_PER_MINUTE, onChange = () => {}
+    confirmMs = CONFIRM_MS, writesPerMinute = WRITES_PER_MINUTE, onChange = () => {},
+    // Per-pane "skip Workbench's send confirmation" (controller decides): (op, stage) => boolean.
+    // Re-asked right before every step and every write; false means the normal dialog.
+    autoApprove = () => false
   }) {
-    Object.assign(this, { registry, access, store, writePty, requestConfirmation, cancelConfirmation, cursorAt, audit, isGateOpen, now, randomUUID, confirmMs, writesPerMinute, onChange });
+    Object.assign(this, { registry, access, store, writePty, requestConfirmation, cancelConfirmation, cursorAt, audit, isGateOpen, now, randomUUID, confirmMs, writesPerMinute, onChange, autoApprove });
+    this.seq = 0; // accept order: auto-approval only applies to operations accepted after it was enabled
     this.ops = new Map();       // op id -> live operation (this process)
     this.pending = new Map();   // session id -> op
     this.acceptLog = new Map(); // session id -> accept timestamps (rate limit)
@@ -145,7 +149,8 @@ class InputArbiter {
       },
       reservedRevision: session.stateRevision, stateRevisionAfter: null, error: null,
       expiresAt: t + this.store.retentionMs, awaiting: null, confirmDeadline: null, timer: null,
-      textWrittenAt: null, outputStart: null, outputEnd: null, version: 0, waiters: new Set()
+      textWrittenAt: null, outputStart: null, outputEnd: null, version: 0, waiters: new Set(),
+      seq: ++this.seq, autoApproved: new Set() // stages approved by the per-pane setting, not a dialog
     };
     this.ops.set(id, op);
     this.pending.set(session.sessionId, op);
@@ -162,6 +167,36 @@ class InputArbiter {
     op.timer = setTimeout(() => this.confirm(op.id, stage, 'expired'), this.confirmMs);
     if (op.timer.unref) op.timer.unref();
     this.changed(op);
+    // An operation that ran under the per-pane setting never falls back to a dialog half-way: if
+    // the setting went away, the rest is stopped (nothing more is sent, nothing is re-sent).
+    if (op.autoApproved.size && !this.isAutoApproved(op, stage)) {
+      this.stop(op, 'PERMISSION_DENIED', 'Skipping the send confirmation was turned off; the rest was not sent.');
+      return;
+    }
+    if (this.isAutoApproved(op, stage)) {
+      // No dialog: approve on the next tick through the normal path (deadline, revalidation, journal).
+      // Checked again then: if the setting went away meanwhile, the normal dialog is shown instead.
+      setImmediate(() => {
+        if (op.status !== 'accepted' || op.awaiting !== stage) return;
+        if (!this.isAutoApproved(op, stage)) {
+          if (op.autoApproved.size) { this.stop(op, 'PERMISSION_DENIED', 'Skipping the send confirmation was turned off; the rest was not sent.'); return; }
+          this.showDialog(op, stage);
+          return;
+        }
+        op.autoApproved.add(stage);
+        this.record({ event: 'auto_confirmed', principal: op.principal, session_id: op.sessionId, generation: op.generation, request_id: op.id, stage });
+        this.confirm(op.id, stage, 'approved');
+      });
+      return;
+    }
+    this.showDialog(op, stage);
+  }
+
+  isAutoApproved(op, stage) {
+    try { return this.autoApprove(op, stage) === true; } catch { return false; }
+  }
+
+  showDialog(op, stage) {
     try {
       this.requestConfirmation({
         opId: op.id, stage, viewId: op.viewId, termId: op.termId, sessionId: op.sessionId, generation: op.generation,
@@ -205,6 +240,8 @@ class InputArbiter {
     if (!binding || binding.id !== op.profile.id || binding.revision !== op.profile.revision) return 'STATE_CONFLICT';
     if (session.inputPaused) return 'USER_INTERVENED';
     if (session.stateRevision !== op.reservedRevision) return 'STATE_CONFLICT';
+    // A step approved by the per-pane setting (not by a dialog) stops if the setting went away.
+    for (const stage of op.autoApproved) if (!this.isAutoApproved(op, stage)) return 'PERMISSION_DENIED';
     return null;
   }
 
