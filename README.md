@@ -150,8 +150,13 @@ dot -> plugin -> Secure MCP Tunnel -> MCP adapter (stdio) -> user-only named pip
    key in `%APPDATA%\wsl-workbench\integration\pairing.key` (ACL = your user SID, verified with
    `icacls`) and starts the pipe. On Windows the pipe is created by a small helper with a DACL that
    admits only your account and denies network logons (verified at start; see the gate record).
-2. Focus a pane, press **⇪** > **Share with dots (read-only, 30 min)**. The badge shows the state;
-   the same menu extends, pauses / resumes capture, clears retained output, or stops sharing.
+2. Focus a pane, press **⇪** > **Share with dots (read-only)...** and pick **30 min / 2 h / 8 h**
+   (the last choice is the default button). The badge shows the state; the same menu extends (by
+   the chosen duration, from now), pauses / resumes capture, clears retained output, or stops sharing.
+   - 5 minutes before the end, the badge turns amber with an **Extend** button and a Windows
+     notification appears; one click on either extends that pane once (a notice for a pane that was
+     restarted meanwhile extends nothing).
+   - Grants are never saved: after a restart nothing is shared until you share again.
 3. **Integration > Connection Status... > Copy Adapter Config** copies an `mcpServers` entry
    (`WSL Workbench.exe` in Node mode + `src/mcp/adapter.js`). No secret is in its args or env.
 
@@ -163,7 +168,9 @@ pane, 16 MiB total, memory only; opaque cursors; explicit gaps; best-effort reda
 
 Needs, all at once: the restricted pipe verified (status dialog: *Input transport*), **Integration
 > Allow Terminal Input (dots)** turned on (off by default), a healthy operation journal, and per pane:
-sharing on, **⇪ > CLI Input Profile** chosen, **⇪ > Allow Input**. Then `workbench_write_input` and
+sharing on, **⇪ > CLI Input Profile** chosen, **⇪ > Allow Input**. Input has its own short limit: 30
+minutes (never past the sharing's end), not renewed by extending the sharing — allow it again from
+the ⇪ menu. When it runs out only input ends (`input_expired` in the audit log); reading continues. Then `workbench_write_input` and
 `workbench_get_operation` are listed (never `run_command` / `cancel_operation`;
 `command_execution` stays false).
 

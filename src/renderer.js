@@ -703,13 +703,29 @@ function renderShareBadges() {
     const paused = st.capture === 'paused';
     entry.shareBadge.classList.toggle('paused', paused);
     const parts = [t(paused ? 'integration.badgePaused' : 'integration.badgeShared')];
-    // Stage B: input state. The lock note shows only while an AI input operation is in progress.
-    if (st.input) parts.push(t(st.inputPaused ? 'integration.badgeInputPaused' : 'integration.badgeInput'));
+    // Stage B: input state (with its own, shorter limit). The lock note shows only while an AI input
+    // operation is in progress.
+    if (st.input) {
+      const inputMinutes = st.inputExpiresAt ? Math.max(1, Math.ceil((st.inputExpiresAt - Date.now()) / 60000)) : null;
+      const inputLabel = t(st.inputPaused ? 'integration.badgeInputPaused' : 'integration.badgeInput');
+      parts.push(inputMinutes ? `${inputLabel} ${t('integration.badgeMinutes').replace('{n}', String(inputMinutes))}` : inputLabel);
+    }
     if (st.pendingStage) parts.push(t('integration.badgePending'));
     parts.push(t('integration.badgeMinutes').replace('{n}', String(minutes)));
+    const soon = !!st.expiringSoon || st.expiresAt - Date.now() <= 5 * 60 * 1000;
     entry.shareBadge.classList.toggle('input', !!st.input);
     entry.shareBadge.classList.toggle('pending', !!st.pendingStage);
+    entry.shareBadge.classList.toggle('expiring', soon);
     entry.shareBadge.textContent = parts.join(' · ');
+    if (soon) {
+      // One click extends this pane by the duration chosen when sharing (main re-checks everything).
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'term-share-extend';
+      btn.textContent = t('integration.badgeExtend');
+      btn.addEventListener('click', (event) => { event.stopPropagation(); window.api.integrationExtend({ id: entry.id }); });
+      entry.shareBadge.appendChild(btn);
+    }
   }
   updateShareButton();
 }

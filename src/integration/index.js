@@ -13,7 +13,7 @@
 
 const path = require('path');
 const { SessionRegistry } = require('./session-registry');
-const { AccessControl, RateLimiter, READ_PERMISSIONS, DEFAULT_GRANT_MS } = require('./access-control');
+const { AccessControl, RateLimiter, READ_PERMISSIONS, INPUT_PERMISSIONS, DEFAULT_GRANT_MS } = require('./access-control');
 const { Broker } = require('./broker');
 const { createBrokerServer, principalFor } = require('./local-transport');
 const { createAuditLog } = require('./audit');
@@ -23,7 +23,6 @@ const { verifiedProfiles, findProfile } = require('./input-profiles');
 const { createSecurePipeListener } = require('./pipe-relay');
 const pairing = require('./pairing');
 
-const INPUT_PERMISSIONS = ['input:write', 'operation:read'];
 
 // Bytes xterm sends on its own (focus reports, device-attribute / cursor-position / colour replies).
 // They travel the same IPC as keystrokes but are not a human taking over the pane.
@@ -31,12 +30,15 @@ const TERMINAL_REPORT_RE = /^(?:\x1b\[[IO]|\x1b\[[?>]?[\d;]*[cnR]|\x1b\][\d;]*[^
 function isTerminalReport(data) { return typeof data === 'string' && data.length > 0 && TERMINAL_REPORT_RE.test(data); }
 
 const SWEEP_MS = 5000;
+const EXPIRY_WARNING_MS = 5 * 60 * 1000; // "sharing ends soon" notice, once per expiry
 
 class IntegrationController {
   constructor({
     userDataDir, appVersion = '0.0.0', platform = process.platform,
     readSettings = () => ({}), writeSettings = () => true,
     notifyView = () => {}, limits = {}, now = Date.now, monotonic,
+    // A shared pane's grant ends within EXPIRY_WARNING_MS: main shows a notice with an Extend action.
+    notifyExpiring = () => {},
     // Stage B hooks (main.js): PTY writer, confirmation UI, OS-protected journal key, test overrides.
     writePty = () => false, requestConfirmation = () => { throw new Error('no confirmation UI'); }, cancelConfirmation = () => {},
     journalKey = () => null, secureTransport = null,
@@ -50,11 +52,13 @@ class IntegrationController {
     this.readSettings = readSettings;
     this.writeSettings = writeSettings;
     this.notifyView = notifyView;
+    this.notifyExpiring = notifyExpiring;
     this.now = now;
     this.registry = new SessionRegistry({ limits, now });
     this.endReason = null; // set around an explicit end so the audit line says why
     const onEnd = (grant, code) => this.onGrantEnded(grant, code);
-    this.access = new AccessControl(monotonic ? { now, monotonic, onEnd } : { now, onEnd });
+    const onInputEnd = (grant) => this.onInputExpired(grant);
+    this.access = new AccessControl(monotonic ? { now, monotonic, onEnd, onInputEnd } : { now, onEnd, onInputEnd });
     this.rateLimiter = new RateLimiter(monotonic ? { monotonic } : {});
     this.audit = createAuditLog({ dir: path.join(this.dir, 'audit'), now });
     this.broker = new Broker({ registry: this.registry, access: this.access, rateLimiter: this.rateLimiter, audit: this.audit, now, serverVersion: appVersion });
@@ -270,6 +274,14 @@ class IntegrationController {
     if (session) this.pushPaneState(session.viewId);
   }
 
+  // Input permissions ran out (the read grant stays): stop any pending AI input, tell the view.
+  onInputExpired(grant) {
+    this.arbiter.sessionChanged(grant.session_id, 'GRANT_EXPIRED');
+    this.audit.record({ event: 'input_expired', principal: grant.principal, session_id: grant.session_id, generation: grant.generation });
+    const session = this.registry.sessions.get(grant.session_id);
+    if (session) { this.registry.bump(session); this.pushPaneState(session.viewId); }
+  }
+
   endGrant(session, code, reason) {
     this.endReason = reason;
     try {
@@ -283,7 +295,18 @@ class IntegrationController {
   }
 
   sweep() {
-    this.access.sweep(); // onGrantEnded does the cleanup
+    this.access.sweep(); // onGrantEnded / onInputExpired do the cleanup
+    for (const grant of this.access.grants.values()) {
+      if (grant.warned || this.access.remainingMs(grant) > EXPIRY_WARNING_MS) continue;
+      grant.warned = true;
+      const session = this.registry.sessions.get(grant.session_id);
+      if (!session || session.generation !== grant.generation) continue;
+      this.safe(() => this.notifyExpiring({
+        viewId: session.viewId, termId: session.termId, sessionId: session.sessionId, generation: session.generation, grantId: grant.grant_id,
+        label: this.registry.displayLabel(session), remainingMs: this.access.remainingMs(grant), durationMs: grant.durationMs
+      }));
+      this.pushPaneState(session.viewId);
+    }
     for (const session of this.registry.sessions.values()) if (session.buffer) session.buffer.prune();
   }
 
@@ -308,12 +331,21 @@ class IntegrationController {
     return grant;
   }
 
-  extend(viewId, termId, durationMs = DEFAULT_GRANT_MS) {
+  // Extend by the duration chosen when sharing, from now. Input keeps its own expiry. When a grant
+  // is named (a notice's Extend action), only that exact grant is extended — never a later re-share.
+  extend(viewId, termId, expect = null) {
     const session = this.sessionFor(viewId, termId);
-    const grant = session && this.access.extend(session.sessionId, durationMs);
+    if (session && expect) {
+      const current = this.access.active(session.sessionId);
+      if (!current || current.grant_id !== expect.grantId || session.sessionId !== expect.sessionId || session.generation !== expect.generation) {
+        this.pushPaneState(viewId);
+        return null;
+      }
+    }
+    const grant = session && this.access.extend(session.sessionId);
     if (grant) {
       this.registry.bump(session);
-      this.audit.record({ event: 'grant_extended', principal: grant.principal, session_id: grant.session_id, generation: grant.generation });
+      this.audit.record({ event: 'grant_extended', principal: grant.principal, session_id: grant.session_id, generation: grant.generation, reason: `${Math.round(grant.durationMs / 60000)}m` });
     }
     this.pushPaneState(viewId);
     return grant;
@@ -353,7 +385,7 @@ class IntegrationController {
     if (!on) {
       this.arbiter.stopAll('PERMISSION_DENIED');
       for (const grant of [...this.access.grants.values()]) {
-        for (const perm of INPUT_PERMISSIONS) grant.permissions.delete(perm);
+        this.access.revokeInput(grant);
         const session = this.registry.sessions.get(grant.session_id);
         if (session) { this.registry.bump(session); this.pushPaneState(session.viewId); }
       }
@@ -366,7 +398,7 @@ class IntegrationController {
     const grant = session && this.access.active(session.sessionId);
     if (!grant) throw new Error('Share this terminal first.');
     if (!this.inputGate().open) throw new Error('Terminal input is not enabled.');
-    for (const perm of INPUT_PERMISSIONS) grant.permissions.add(perm);
+    this.access.grantInput(grant); // own short expiry, never past the read expiry
     this.registry.bump(session);
     this.audit.record({ event: 'input_granted', principal: grant.principal, session_id: session.sessionId, generation: session.generation, permissions: INPUT_PERMISSIONS });
     this.pushPaneState(viewId);
@@ -378,7 +410,7 @@ class IntegrationController {
     const grant = session && this.access.active(session.sessionId);
     if (!grant) return;
     this.arbiter.sessionChanged(session.sessionId, 'GRANT_REVOKED');
-    for (const perm of INPUT_PERMISSIONS) grant.permissions.delete(perm);
+    this.access.revokeInput(grant);
     this.registry.bump(session);
     this.audit.record({ event: 'input_revoked', principal: grant.principal, session_id: session.sessionId, generation: session.generation });
     this.pushPaneState(viewId);
@@ -437,7 +469,10 @@ class IntegrationController {
         id: session.termId,
         shared: !!grant,
         permissions: grant ? [...grant.permissions].sort() : [],
-        expiresAt: grant ? Math.min(grant.expiresAtWall, this.now() + Math.max(0, grant.expiresAtMono - this.access.monotonic())) : null,
+        expiresAt: grant ? this.now() + this.access.remainingMs(grant) : null,
+        durationMs: grant ? grant.durationMs : null,
+        expiringSoon: !!(grant && this.access.remainingMs(grant) <= EXPIRY_WARNING_MS),
+        inputExpiresAt: grant && grant.permissions.has('input:write') ? this.now() + this.access.inputRemainingMs(grant) : null,
         capture: session.capture,
         sessionId: session.sessionId,
         generation: session.generation,
@@ -478,4 +513,4 @@ class IntegrationController {
   }
 }
 
-module.exports = { IntegrationController, isTerminalReport, INPUT_PERMISSIONS };
+module.exports = { IntegrationController, isTerminalReport, INPUT_PERMISSIONS, EXPIRY_WARNING_MS };
