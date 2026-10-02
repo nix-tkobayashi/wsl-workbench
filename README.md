@@ -139,6 +139,7 @@ Lets an MCP client — intended for **dots** via a plugin and Secure MCP Tunnel 
 (stage B). Off by default. Built from the dots integration design handoffs (v1.0 and Stage B
 v1.1, kept outside the repo). Security gate record:
 [`docs/dots-stage-b-security-gate.md`](docs/dots-stage-b-security-gate.md).
+Tunnel / dot setup (Windows, tested): [`docs/dots-adapter-tunnel-setup.md`](docs/dots-adapter-tunnel-setup.md).
 
 ```
 dot -> plugin -> Secure MCP Tunnel -> MCP adapter (stdio) -> user-only named pipe -> Workbench main (broker / input arbiter) -> existing pane PTY
