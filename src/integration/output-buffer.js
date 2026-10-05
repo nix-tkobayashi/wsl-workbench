@@ -170,6 +170,9 @@ class OutputBuffer {
     this.chunkBytes = chunkBytes;
     this.now = now;
     this.epoch = 1;
+    // Bytes ever appended in this epoch and pauses ever made: absolute marks for observation windows.
+    this.appended = 0;
+    this.pauses = 0;
     this.chunks = [];      // { seq, text, bytes, firstAt, lastAt, controlRemoved, replaced, gap }
     this.nextSeq = 1;
     this.totalBytes = 0;
@@ -213,6 +216,7 @@ class OutputBuffer {
       chunk.controlRemoved = chunk.controlRemoved || controlRemoved;
       chunk.replaced = chunk.replaced || replaced;
       this.totalBytes += partBytes;
+      this.appended += partBytes;
       added += partBytes;
       rest = rest.slice(part.length);
     }
@@ -225,7 +229,7 @@ class OutputBuffer {
     this.chunks.push({ seq: this.nextSeq++, text: '', bytes: 0, firstAt: at, lastAt: at, controlRemoved: false, replaced: false, gap: reason, closed: true });
   }
 
-  pause() { this.paused = true; }
+  pause() { this.paused = true; this.pauses++; }
 
   resume() {
     if (!this.paused) return;
@@ -250,6 +254,7 @@ class OutputBuffer {
     this.chunks = [];
     this.totalBytes = 0;
     this.lastDropped = null;
+    this.appended = 0;
     this.epoch++;
   }
 

@@ -370,3 +370,160 @@ test('codex: the same version confirmed by its banner after the user did keeps o
     assert.equal(t.pane().cli.source, 'pane_output');
   } finally { await t.ctl.shutdown(); }
 });
+
+test('review: A gets no reply, B does -> B\'s output never counts for A (window ends at the next input)', posixOnly, async () => {
+  const t = await setup();
+  try {
+    t.banner('2.1.287');
+    t.ctl.selectProfile(1, 1, CLAUDE);
+    t.ctl.grantInput(1, 1);
+    const a = t.send('A');
+    t.approveBoth(a.operation_id);
+    await sleep(700);
+    // A: no output at all. Then B is sent and B gets a busy line and a reply.
+    const b = t.send('B');
+    t.approveBoth(b.operation_id);
+    await sleep(700);
+    t.ctl.ptyData(1, 1, '✻ Working (esc to interrupt)\r\n⏺ answer to B\r\n');
+    const opA = await t.getOp(a.operation_id);
+    const opB = await t.getOp(b.operation_id);
+    assert.deepEqual([opA.observation.cli_acceptance, opA.observation.response], ['not_confirmed', 'unknown']);
+    assert.equal(opA.observation.note, 'window_closed:next_input');
+    assert.deepEqual([opB.observation.cli_acceptance, opB.observation.response], ['observed', 'observed']);
+    assert.deepEqual(t.writes, ['A', '\r', 'B', '\r'], 'nothing re-sent for A');
+  } finally { await t.ctl.shutdown(); }
+});
+
+test('review: a CLI restart, the shell prompt or the user typing also ends the window', posixOnly, async () => {
+  for (const between of [
+    (t) => t.banner('2.1.287'),                                   // the CLI was restarted
+    (t) => t.ctl.ptyData(1, 1, '\x1b]7;file:///w\x07$ '),           // back at the shell prompt
+    (t) => t.ctl.userInput(1, 1, 'hello')                          // the user typed in the pane
+  ]) {
+    const t = await setup();
+    try {
+      t.banner('2.1.287');
+      t.ctl.selectProfile(1, 1, CLAUDE);
+      t.ctl.grantInput(1, 1);
+      const a = t.send('A');
+      t.approveBoth(a.operation_id);
+      await sleep(700);
+      between(t);
+      t.ctl.ptyData(1, 1, '✻ Working (esc to interrupt)\r\n⏺ something else\r\n');
+      // (the shell prompt also turns input OFF, so read the record directly, not via MCP)
+      const op = t.ctl.arbiter.view(t.ctl.arbiter.ops.get(a.operation_id), { full: true });
+      assert.equal(op.observation.cli_acceptance, 'not_confirmed');
+      assert.match(op.observation.note, /^window_closed:/);
+    } finally { await t.ctl.shutdown(); }
+  }
+});
+
+test('review: output A did produce before the next input still counts for A; a paused capture is unknown', posixOnly, async () => {
+  const t = await setup();
+  try {
+    t.banner('2.1.287');
+    t.ctl.selectProfile(1, 1, CLAUDE);
+    t.ctl.grantInput(1, 1);
+    const a = t.send('A');
+    t.approveBoth(a.operation_id);
+    await sleep(700);
+    t.ctl.ptyData(1, 1, '✻ Working (esc to interrupt)\r\n⏺ answer to A\r\n');
+    const b = t.send('B');
+    t.approveBoth(b.operation_id);
+    await sleep(700);
+    const opA = await t.getOp(a.operation_id);
+    assert.deepEqual([opA.observation.cli_acceptance, opA.observation.response], ['observed', 'observed']);
+    const opB = await t.getOp(b.operation_id);
+    assert.equal(opB.observation.cli_acceptance, 'pending', 'A\'s earlier lines never count for B');
+    t.ctl.pause(1, 1);
+    t.ctl.resume(1, 1);
+    assert.equal((await t.getOp(b.operation_id)).observation.cli_acceptance, 'unknown');
+  } finally { await t.ctl.shutdown(); }
+});
+
+test('review: the window end is fixed per operation (many later events, a later pause)', posixOnly, async () => {
+  const t = await setup();
+  try {
+    t.banner('2.1.287');
+    t.ctl.selectProfile(1, 1, CLAUDE);
+    t.ctl.grantInput(1, 1);
+    const a = t.send('A');
+    t.approveBoth(a.operation_id);
+    await sleep(700);
+    t.ctl.userInput(1, 1, 'x'); // ends A's window (and pauses AI input)
+    t.ctl.ptyData(1, 1, '✻ Working (esc to interrupt)\r\n⏺ reply to the user\r\n');
+    for (let i = 0; i < 60; i++) t.ctl.userInput(1, 1, 'y');
+    t.ctl.pause(1, 1);
+    t.ctl.resume(1, 1);
+    const op = t.ctl.arbiter.view(t.ctl.arbiter.ops.get(a.operation_id), { full: true });
+    assert.equal(op.observation.cli_acceptance, 'not_confirmed', 'later events and a later pause do not change it');
+    assert.equal(op.observation.note, 'window_closed:user_input');
+  } finally { await t.ctl.shutdown(); }
+});
+
+test('review: A\'s output earlier in the same chunk as the next banner / prompt still counts for A', posixOnly, async () => {
+  for (const after of [' Claude Code v2.1.287\r\n', '\x1b]7;file:///w\x07$ ']) {
+    const t = await setup();
+    try {
+      t.banner('2.1.287');
+      t.ctl.selectProfile(1, 1, CLAUDE);
+      t.ctl.grantInput(1, 1);
+      const a = t.send('A');
+      t.approveBoth(a.operation_id);
+      await sleep(700);
+      t.ctl.ptyData(1, 1, '✻ Working (esc to interrupt)\r\n⏺ answer to A\r\n' + after + '✻ (esc to interrupt) ⏺ other\r\n');
+      const op = t.ctl.arbiter.view(t.ctl.arbiter.ops.get(a.operation_id), { full: true });
+      assert.deepEqual([op.observation.cli_acceptance, op.observation.response], ['observed', 'observed']);
+      assert.match(op.observation.note, /^window_closed:/);
+    } finally { await t.ctl.shutdown(); }
+  }
+});
+
+test('review: several prompts / banners in one chunk close the window at the earliest one', posixOnly, async () => {
+  for (const chunk of [
+    '\x1b]7;file:///w\x07$ ✻ (esc to interrupt)\r\n⏺ later\r\n\x1b]7;file:///w\x07$ ',
+    ' Claude Code v2.1.287\r\n✻ (esc to interrupt)\r\n⏺ later\r\n\x1b]7;file:///w\x07$ '
+  ]) {
+    const t = await setup();
+    try {
+      t.banner('2.1.287');
+      t.ctl.selectProfile(1, 1, CLAUDE);
+      t.ctl.grantInput(1, 1);
+      const a = t.send('A');
+      t.approveBoth(a.operation_id);
+      await sleep(700);
+      t.ctl.ptyData(1, 1, chunk);
+      const op = t.ctl.arbiter.view(t.ctl.arbiter.ops.get(a.operation_id), { full: true });
+      assert.equal(op.observation.cli_acceptance, 'not_confirmed');
+    } finally { await t.ctl.shutdown(); }
+  }
+});
+
+test('review: Enter sent while capture is paused -> unknown; a closed empty window stays final after eviction', posixOnly, async () => {
+  const t = await setup();
+  try {
+    t.banner('2.1.287');
+    t.ctl.selectProfile(1, 1, CLAUDE);
+    t.ctl.grantInput(1, 1);
+    t.ctl.pause(1, 1);
+    const a = t.send('A');
+    t.approveBoth(a.operation_id);
+    await sleep(700);
+    t.ctl.userInput(1, 1, 'x');
+    t.ctl.resume(1, 1);
+    assert.equal(t.ctl.arbiter.view(t.ctl.arbiter.ops.get(a.operation_id), { full: true }).observation.cli_acceptance, 'unknown');
+  } finally { await t.ctl.shutdown(); }
+  const u = await setup();
+  try {
+    u.banner('2.1.287');
+    u.ctl.selectProfile(1, 1, CLAUDE);
+    u.ctl.grantInput(1, 1);
+    const a = u.send('A');
+    u.approveBoth(a.operation_id);
+    await sleep(700);
+    u.ctl.userInput(1, 1, 'x'); // closes A's window with nothing in it
+    for (let i = 0; i < 120; i++) u.ctl.ptyData(1, 1, 'z'.repeat(10000) + '\r\n'); // evicts A's position
+    const op = u.ctl.arbiter.view(u.ctl.arbiter.ops.get(a.operation_id), { full: true });
+    assert.equal(op.observation.cli_acceptance, 'not_confirmed');
+  } finally { await u.ctl.shutdown(); }
+});

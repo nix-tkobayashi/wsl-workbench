@@ -83,7 +83,8 @@ class IntegrationController {
       autoApprove: (op) => this.autoConfirmApplies(op),
       targetState: (session) => this.cliTarget(session),
       outputMark: (session) => this.outputMark(session),
-      observe: (op) => this.observeOperation(op)
+      observe: (op) => this.observeOperation(op),
+      noteDispatch: (session) => this.observationBoundary(session, 'next_input')
     });
     this.broker.setInput({ arbiter: this.arbiter, gate: () => this.inputGate(), cliStatus: (session) => this.cliTarget(session).status });
   }
@@ -237,6 +238,8 @@ class IntegrationController {
   userInput(viewId, termId, data) {
     this.safe(() => {
       if (isTerminalReport(data)) return;
+      const typed = this.registry.bySlot(viewId, termId);
+      if (typed) this.observationBoundary(typed, 'user_input');
       this.registry.userInput(viewId, termId);
       const session = this.registry.bySlot(viewId, termId);
       if (session) this.arbiter.humanInput(session);
@@ -265,7 +268,11 @@ class IntegrationController {
       this.endGrant(session, 'GRANT_REVOKED', `pty_${event}`);
     } else if (event === 'started') {
       this.pushPaneState(session.viewId); // a new / restarted pane shows its (OFF) state right away
+    } else if (event === 'output_boundary') {
+      // A shell prompt or a CLI start in the pane's output (the earliest one of a chunk).
+      this.observationBoundary(session, 'cli_or_shell', session.eventOffset || 0);
     } else if (event === 'shell_prompt') {
+
       // The shell printed its prompt (OSC 7 cwd report): the CLI that input was approved for has
       // exited (or was never in front). Input must be allowed again for whatever runs next; an
       // Input ON dialog still open for the old target is invalidated too.
@@ -274,6 +281,7 @@ class IntegrationController {
       this.revokeInputFor(session, 'shell_prompt');
       this.pushPaneState(session.viewId);
     } else if (event === 'cli_banner') {
+
       this.cliSeen(session, session.lastBanner);
     } else if (event === 'exited') {
       // The pane's process ended: both switches go OFF (a restarted shell is a new generation).
@@ -508,7 +516,22 @@ class IntegrationController {
   outputMark(session) {
     const buffer = session.buffer;
     if (!buffer || !session.captureId) return null;
-    return { captureId: session.captureId, epoch: buffer.epoch, pos: buffer.endPosition() };
+    return { captureId: session.captureId, epoch: buffer.epoch, pos: buffer.endPosition(), abs: buffer.appended, pauses: buffer.pauses, paused: !!buffer.paused || session.capture !== 'active' };
+  }
+
+  // Something else starts producing output in this pane: the next AI input, the user typing, the
+  // CLI (re)starting, the shell prompt. Output after it never counts for an earlier operation.
+  // The first boundary after an operation's Enter is stored ON the operation (its window end),
+  // so later events can never move it.
+  // offset: bytes of the current, not yet stored chunk that come before the event (banner/prompt).
+  observationBoundary(session, reason, offset = 0) {
+    const buffer = session.buffer;
+    if (!buffer || !session.captureId) return;
+    const at = buffer.appended + (session.capture === 'active' && !buffer.paused ? offset : 0);
+    const end = { captureId: session.captureId, epoch: buffer.epoch, abs: at, pauses: buffer.pauses, reason };
+    for (const op of this.arbiter.ops.values()) {
+      if (op.sessionId === session.sessionId && op.submitMark && !op.windowEnd) op.windowEnd = end;
+    }
   }
 
   // Delivery (text / Enter written) is in op.delivery. This adds what the pane's output showed
@@ -517,20 +540,44 @@ class IntegrationController {
   // something is "not_confirmed", never "not sent".
   observeOperation(op) {
     if (!op.submitAt) return null;
+    if (op.finalObservation) return op.finalObservation; // a closed window's result never changes
+    const result = this.computeObservation(op);
+    if (op.windowEnd && result) op.finalObservation = result;
+    return result;
+  }
+
+  computeObservation(op) {
     const unknown = (why) => ({ basis: 'pane_output_after_enter', advisory: true, cli_acceptance: 'unknown', response: 'unknown', note: why });
     const session = this.registry.sessions.get(op.sessionId);
     const mark = op.submitMark;
+    if (!mark) return unknown('no_capture');
+    if (mark.paused) return unknown('capture_paused'); // capture was not recording when Enter went out
+    // The window ends at the first boundary after this Enter (next input, user typing, CLI restart,
+    // shell prompt): another operation's or another program's output never counts for this one.
+    const end = op.windowEnd && op.windowEnd.captureId === mark.captureId && op.windowEnd.epoch === mark.epoch ? op.windowEnd : null;
+    if (op.windowEnd && !end) return unknown('terminal_changed');
+    // A pause INSIDE the window means output may be missing from it.
+    if (end && end.pauses !== mark.pauses) return unknown('capture_paused');
+    // A closed, empty window: final without needing any retained output.
+    if (end && end.abs === mark.abs) {
+      const p = op.profile;
+      return { basis: 'pane_output_after_enter', advisory: true, cli_acceptance: p.acceptMarker ? 'not_confirmed' : 'unknown', response: 'unknown', note: `window_closed:${end.reason}` };
+    }
     if (!session || session.generation !== op.generation) return unknown('terminal_changed');
-    if (!mark || !session.buffer || session.captureId !== mark.captureId || session.buffer.epoch !== mark.epoch) return unknown('no_capture');
+    if (!session.buffer || session.captureId !== mark.captureId || session.buffer.epoch !== mark.epoch) return unknown('no_capture');
+    if (!end && session.buffer.pauses !== mark.pauses) return unknown('capture_paused');
     const resolved = session.buffer.resolvePosition(mark.pos);
     if (!resolved.ok || resolved.gap) return unknown('output_not_retained');
-    // Everything retained after the mark (the per-pane buffer is bounded), page by page.
+    // The retained output after the mark, page by page, never past the window end (so nothing
+    // after it — a later gap or pause included — can change this operation's result).
+    let budget = end ? Math.max(0, end.abs - mark.abs) : Infinity;
     let text = '';
     let pos = resolved.pos;
-    for (let i = 0; i < 64; i++) {
-      const page = session.buffer.read(pos, 256 * 1024);
+    for (let i = 0; i < 64 && budget > 0; i++) {
+      const page = session.buffer.read(pos, Math.min(256 * 1024, budget));
       if (page.gap) return unknown('output_gap');
       text += page.text;
+      budget -= page.bytes;
       pos = page.pos;
       if (!page.hasMore || !page.bytes) break;
     }
@@ -542,14 +589,14 @@ class IntegrationController {
     let acceptAt = -1;
     if (profile.acceptMarker) {
       acceptAt = text.search(profile.acceptMarker);
-      acceptance = acceptAt >= 0 ? 'observed' : (elapsed < ACCEPT_WINDOW_MS ? 'pending' : 'not_confirmed');
+      acceptance = acceptAt >= 0 ? 'observed' : (!end && elapsed < ACCEPT_WINDOW_MS ? 'pending' : 'not_confirmed');
     }
     let response = 'unknown';
     if (profile.responseMarker && acceptAt >= 0) {
       const found = text.slice(acceptAt).search(profile.responseMarker) >= 0;
-      response = found ? 'observed' : (elapsed < RESPONSE_WINDOW_MS ? 'pending' : 'not_confirmed');
+      response = found ? 'observed' : (!end && elapsed < RESPONSE_WINDOW_MS ? 'pending' : 'not_confirmed');
     }
-    return { basis: 'pane_output_after_enter', advisory: true, cli_acceptance: acceptance, response, note: null };
+    return { basis: 'pane_output_after_enter', advisory: true, cli_acceptance: acceptance, response, note: end ? `window_closed:${end.reason}` : null };
   }
 
   // --- "skip the send confirmation" (per pane, opt-in, OFF by default) ---

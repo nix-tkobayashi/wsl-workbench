@@ -112,10 +112,26 @@ class SessionRegistry {
     // Stream order: a shell prompt (OSC 7) clears the CLI; a banner AFTER the last prompt of the
     // chunk (a CLI started from that prompt) identifies the new one; a banner before it is gone.
     const promptAt = session.promptAt;
+    const firstPromptAt = session.firstPromptAt;
     session.promptAt = null;
+    session.firstPromptAt = null;
     const tail = session.bannerTail || '';
+    // eventOffset: UTF-8 bytes of this chunk's text before the event (where it sits in the stream).
+    const bytesBefore = (i) => Buffer.byteLength(text.slice(0, Math.max(0, Math.min(text.length, i))), 'utf8');
+    // The EARLIEST prompt or banner in this chunk ends observation windows of earlier input: emitted
+    // first, at its position (later output in the same chunk then never counts for them).
+    if (text || firstPromptAt != null) {
+      const banners = text ? detectClis(tail + text) : [];
+      const firstBanner = banners.length ? banners[0].start - tail.length : null;
+      const marks = [firstPromptAt, firstBanner].filter((v) => v != null);
+      if (marks.length) {
+        session.eventOffset = bytesBefore(Math.min(...marks));
+        this.emit('output_boundary', session);
+      }
+    }
     if (promptAt != null) {
       session.bannerTail = '';
+      session.eventOffset = bytesBefore(promptAt);
       this.emit('shell_prompt', session);
     }
     if (text) {
@@ -124,13 +140,16 @@ class SessionRegistry {
       // Every banner, in order: any different CLI / version on the way revokes input, even if a
       // later banner in the same chunk matches the original again.
       const clis = detectClis(scan);
+      const scanStart = promptAt != null ? promptAt : -tail.length; // scan index 0 in this chunk's text
       for (const cli of clis) {
         session.lastBanner = { family: cli.family, version: cli.version };
+        session.eventOffset = bytesBefore(scanStart + cli.start);
         this.emit('cli_banner', session);
       }
       // Keep what follows the last banner: a next, still incomplete banner must not be lost.
       if (clis.length) session.bannerTail = scan.slice(clis[clis.length - 1].end).slice(-160);
     }
+    session.eventOffset = 0;
     if (session.capture !== 'active') return 0; // paused: OSC 7 still tracked, nothing stored
     const added = session.buffer.append(text, { controlRemoved, replaced });
     if (added) this.enforceGlobalLimit();
@@ -197,6 +216,7 @@ class SessionRegistry {
         // foreground is the shell again (a CLI exited). Used to turn input off. Emitted after this
         // chunk's banner scan (ptyData), so a banner earlier in the same chunk cannot outlive it.
         session.promptAt = at; // the last prompt's position in this chunk's normalized text
+        if (session.firstPromptAt == null) session.firstPromptAt = at; // ...and the first one
       }
     });
     session.capture = 'active';

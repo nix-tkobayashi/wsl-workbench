@@ -51,9 +51,12 @@ class InputArbiter {
     // Where the pane's captured output ends right now (observation after Enter), and what was seen
     // after that mark: (session) => mark | null, (op) => observation object.
     outputMark = () => null,
-    observe = () => null
+    observe = () => null,
+    // An input write is about to start for a session: ends the observation window of earlier
+    // operations there (their result must never be judged from this one's output).
+    noteDispatch = () => {}
   }) {
-    Object.assign(this, { registry, access, store, writePty, requestConfirmation, cancelConfirmation, cursorAt, audit, isGateOpen, now, randomUUID, confirmMs, writesPerMinute, onChange, autoApprove, targetState, outputMark, observe });
+    Object.assign(this, { registry, access, store, writePty, requestConfirmation, cancelConfirmation, cursorAt, audit, isGateOpen, now, randomUUID, confirmMs, writesPerMinute, onChange, autoApprove, targetState, outputMark, observe, noteDispatch });
     this.seq = 0; // accept order: auto-approval only applies to operations accepted after it was enabled
     this.ops = new Map();       // op id -> live operation (this process)
     this.pending = new Map();   // session id -> op
@@ -160,7 +163,7 @@ class InputArbiter {
       expiresAt: t + this.store.retentionMs, awaiting: null, confirmDeadline: null, timer: null,
       textWrittenAt: null, outputStart: null, outputEnd: null, version: 0, waiters: new Set(),
       seq: ++this.seq, autoApproved: new Set(), // stages approved by the per-pane setting, not a dialog
-      targetKey: cliTarget.key, submitMark: null, submitAt: null
+      targetKey: cliTarget.key, submitMark: null, submitAt: null, windowEnd: null
     };
     this.ops.set(id, op);
     this.pending.set(session.sessionId, op);
@@ -309,6 +312,7 @@ class InputArbiter {
       this.stop(op, late);
       return;
     }
+    try { const s2 = this.registry.sessions.get(op.sessionId); if (s2) this.noteDispatch(s2); } catch {}
     try {
       if (isKey) {
         if (op.key === 'Enter') this.markSubmit(op);

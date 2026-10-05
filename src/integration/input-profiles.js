@@ -110,13 +110,15 @@ function detectClis(text) {
     let m;
     while ((m = re.exec(text))) found.push({ family: p.cli_family, version: m[1], index: m.index, end: m.index + m[0].length });
   }
-  return found.sort((a, b) => a.index - b.index).map(({ family, version, end }) => ({ family, version, end }));
+  return found.sort((a, b) => a.index - b.index).map(({ family, version, index, end }) => ({ family, version, start: index, end }));
 }
 
 // The last banner (or null).
 function detectCli(text) {
   const all = detectClis(text);
-  return all.length ? all[all.length - 1] : null;
+  if (!all.length) return null;
+  const { family, version, end } = all[all.length - 1];
+  return { family, version, end };
 }
 
 // cli: { family, version, source } | null. approvals: versions the user allowed compat for.
