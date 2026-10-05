@@ -48,3 +48,16 @@ test('preview editor tabs render their label in italics (#87)', () => {
   const body = ruleBody('.editor-tab.preview .editor-tab-label');
   assert.match(body, /font-style:\s*italic/);
 });
+
+// The UI is always dark: every top-level scroll container must opt into dark native scrollbars,
+// or Windows' light app mode draws white scrollbars on it (e.g. the "can't display" file view).
+test('every scrollable container (that shows scrollbars) uses dark native scrollbars', () => {
+  const m = css.match(/\n([^{}\n]+)\{\s*color-scheme:\s*dark;\s*\}/);
+  assert.ok(m, 'a shared color-scheme: dark rule must exist');
+  const dark = new Set(m[1].split(',').map((x) => x.trim()));
+  const scrollers = [...css.matchAll(/\n(#[\w-]+)\s*\{([^}]*)\}/g)]
+    .filter(([, , body]) => /overflow(-[xy])?:\s*(auto|scroll)/.test(body) && !/scrollbar-width:\s*none/.test(body))
+    .map(([, sel]) => sel);
+  assert.ok(scrollers.includes('#unsupportedView'));
+  for (const sel of scrollers) assert.ok(dark.has(sel), `${sel} scrolls but is missing from the color-scheme: dark rule`);
+});
