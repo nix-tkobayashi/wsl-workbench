@@ -61,3 +61,15 @@ test('every scrollable container (that shows scrollbars) uses dark native scroll
   assert.ok(scrollers.includes('#unsupportedView'));
   for (const sel of scrollers) assert.ok(dark.has(sel), `${sel} scrolls but is missing from the color-scheme: dark rule`);
 });
+
+// Long terminal sessions: keep 10,000 lines and a thumb that stays grabbable (min-height minus the
+// 6px eaten by the transparent border must leave at least 40px) on a visible track.
+test('terminal keeps 10k scrollback and an always-visible, grabbable scrollbar thumb', () => {
+  const renderer = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
+  assert.match(renderer, /const TERMINAL_SCROLLBACK = 10000;/);
+  assert.match(renderer, /new Terminal\(\{[^}]*scrollback: TERMINAL_SCROLLBACK/);
+  const thumb = ruleBody('.xterm-viewport::-webkit-scrollbar-thumb');
+  const minH = Number(thumb.match(/min-height:\s*(\d+)px/)[1]);
+  assert.ok(minH - 6 >= 40, `thumb should draw at least 40px, got ${minH - 6}`);
+  assert.doesNotMatch(ruleBody('.xterm-viewport::-webkit-scrollbar-track'), /background:\s*transparent/);
+});

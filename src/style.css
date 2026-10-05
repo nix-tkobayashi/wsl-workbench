@@ -95,11 +95,12 @@ button:disabled { opacity:.45; cursor:not-allowed; }
    scrollbar auto-hides and, with a large scrollback, its thumb shrinks until it vanishes. The
    ::-webkit-scrollbar rules restore a persistent track; customizing the thumb, however, drops
    Chromium's built-in minimum thumb length, so we set min-height explicitly (its 3px transparent
-   border + content-box clip eat 6px, hence 32 not 20) to keep the thumb visible at any scrollback. */
+   border + content-box clip eat 6px, so 46 draws a 40px thumb) to keep it easy to grab even with
+   10,000 lines of scrollback. The faint track shows where the bar is when the thumb is far away. */
 .xterm-viewport::-webkit-scrollbar { width:12px; }
-.xterm-viewport::-webkit-scrollbar-track { background:transparent; }
-.xterm-viewport::-webkit-scrollbar-thumb { background:#4a4a4a; border-radius:6px; border:3px solid transparent; background-clip:content-box; min-height:32px; }
-.xterm-viewport::-webkit-scrollbar-thumb:hover { background:#5c5c5c; background-clip:content-box; }
+.xterm-viewport::-webkit-scrollbar-track { background:rgba(255,255,255,0.04); }
+.xterm-viewport::-webkit-scrollbar-thumb { background:#5a5a5a; border-radius:6px; border:3px solid transparent; background-clip:content-box; min-height:46px; }
+.xterm-viewport::-webkit-scrollbar-thumb:hover { background:#767676; background-clip:content-box; }
 /* Word-wrap mode: soft-wrap long lines instead of horizontal scrolling. The backdrop must wrap
    identically so find-highlight positions keep matching the textarea. Line numbers stay visible:
    renderGutter() measures each logical line's wrapped height via #editorMeasure and pads the gutter
