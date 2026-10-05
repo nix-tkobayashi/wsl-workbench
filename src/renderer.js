@@ -183,6 +183,7 @@ let nextGroupId = 1;
 const MAX_PANES = 8;
 const PANE_MIN_WIDTH = 120; // keep in step with .term-pane { min-width } in style.css
 const DIVIDER_WIDTH = 3;    // keep in step with .term-divider { flex-basis } in style.css
+const TERMINAL_SCROLLBACK = 10000; // lines kept per terminal pane (xterm default is 1000)
 const splitTerminalBtn = document.getElementById('splitTerminalBtn');
 // Declared up here (not with the rest of the dots-integration code below) because pane focus
 // changes call updateShareButton() as soon as the first terminal exists.
@@ -516,7 +517,8 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   group.container.appendChild(host);
   // minimumContrastRatio: AI CLIs pin the current prompt to the top of the viewport in dim grey on
   // grey; xterm lifts any cell below WCAG AA (4.5:1) so that banner stays readable (#65).
-  const term = new Terminal({ cursorBlink: true, fontFamily: 'Consolas, monospace', fontSize: 13, minimumContrastRatio: 4.5 });
+  // scrollback: xterm's default keeps only 1000 lines, which long AI CLI sessions outrun quickly.
+  const term = new Terminal({ cursorBlink: true, fontFamily: 'Consolas, monospace', fontSize: 13, minimumContrastRatio: 4.5, scrollback: TERMINAL_SCROLLBACK });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   // Clickable URLs: the web-links addon underlines http(s) URLs on hover; clicking routes through
