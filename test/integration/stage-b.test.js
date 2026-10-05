@@ -47,7 +47,9 @@ async function setup({ inputOn = true, key = crypto.randomBytes(32), dir = fs.mk
   await ctl.enable();
   ctl.rateLimiter.burst = 1000; // per-principal call limit is covered elsewhere; these tests make many calls
   ctl.rateLimiter.ratePerSec = 1000;
-  if (inputOn) await ctl.setInputEnabled(true);
+  // Enabling the integration turns terminal input on by default (verified transport); the
+  // input-off tests turn it back off.
+  await ctl.setInputEnabled(!!inputOn);
   ctl.ptyStarted(1, 1, { distro: 'Ubuntu', wslPath: '/w' });
   ctl.share(1, 1);
   const session = ctl.registry.bySlot(1, 1);
@@ -73,7 +75,7 @@ async function setup({ inputOn = true, key = crypto.randomBytes(32), dir = fs.mk
   return { ctl, session, P, target, rev, prepare, write, prompt, getOp, writes, confirmations, cancelled, dir, key };
 }
 
-test('B01: input is off by default; read tools only; command execution stays false', posixOnly, async () => {
+test('B01: with terminal input turned off: read tools only; command execution stays false', posixOnly, async () => {
   const t = await setup({ inputOn: false });
   try {
     const caps = t.ctl.broker.handle(t.P, 'workbench_capabilities', {});

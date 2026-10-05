@@ -1859,6 +1859,7 @@ function integrationMenuItems() {
       }
     },
     { label: tr('integration.menuStatus'), enabled: !!integration, click: () => showIntegrationStatus(focusedWindow()) },
+    { label: tr('integration.menuSharePreset'), enabled: !!integration, click: () => chooseSharePreset(focusedWindow()) },
     { type: 'separator' },
     {
       label: tr('integration.menuInput'),
@@ -2083,15 +2084,18 @@ async function confirmApproveCompat(win, viewId, termId) {
 // Only the profile's verified versions are offered; anything else: restart the CLI while sharing.
 async function confirmCliVersion(win, viewId, termId) {
   const pane = integration.paneState(viewId).find((p) => p.id === termId);
-  const { findProfile } = require('./integration/input-profiles');
-  const profile = pane && findProfile(pane.profileId);
-  if (!profile) return;
-  const versions = profile.verified_versions;
+  if (!pane) return;
+  const { verifiedProfiles, findProfile } = require('./integration/input-profiles');
+  // The pane's profile if one is chosen, otherwise every verified CLI (the choice picks the profile).
+  const profiles = pane.profileId ? [findProfile(pane.profileId)].filter(Boolean) : verifiedProfiles();
+  const choices = profiles.flatMap((p) => p.verified_versions.map((v) => ({ profile: p, version: v })));
+  if (!choices.length) return;
   const expect = integration.inputTarget(viewId, termId); // what the dialog is about
-  const opts = { type: 'question', title: tr('integration.paneConfirmCli'), message: tr('integration.confirmCliMessage'), detail: tr('integration.confirmCliDetail').replace('{cli}', profile.cli_name), buttons: [...versions.map((v) => `${profile.cli_name} ${v}`), tr('integration.cancel')], defaultId: versions.length, cancelId: versions.length, noLink: true };
+  const opts = { type: 'question', title: tr('integration.paneConfirmCli'), message: tr('integration.confirmCliMessage'), detail: tr('integration.confirmCliDetail').replace(/\{cli\}/g, profiles.map((p) => p.cli_name).join(' / ')), buttons: [...choices.map((c) => `${c.profile.cli_name} ${c.version}`), tr('integration.cancel')], defaultId: choices.length, cancelId: choices.length, noLink: true };
   const { response } = await dialog.showMessageBox(win, opts);
-  if (response < 0 || response >= versions.length) return;
-  try { integration.confirmCliVersion(viewId, termId, versions[response], expect); } catch (error) { dialog.showErrorBox(tr('integration.paneConfirmCli'), error.message || String(error)); }
+  if (response < 0 || response >= choices.length) return;
+  const c = choices[response];
+  try { integration.confirmCliVersion(viewId, termId, c.version, expect, c.profile.id); } catch (error) { dialog.showErrorBox(tr('integration.paneConfirmCli'), error.message || String(error)); }
 }
 
 // Opt-in per pane: explain once that sends to THIS pane then run without Workbench's confirmation.
@@ -2142,78 +2146,133 @@ ipcMain.on('integration:paneMenu', (event, { id, label = '', x = 0, y = 0 } = {}
   const pane = integration.paneState(viewId).find((p) => p.id === id && integration.sessionFor(viewId, id));
   const items = [];
   if (!integration.enabled) {
-    items.push({ label: tr('integration.paneEnableFirst'), click: async () => { if (await confirmEnableIntegration(win)) confirmShare(win, viewId, id, label); } });
+    items.push({ label: tr('integration.paneEnableFirst'), click: async () => { if (await confirmEnableIntegration(win)) shareOn(win, viewId, id, label); } });
   } else if (!pane) {
     items.push({ label: tr('integration.paneNotRunning'), enabled: false });
   } else {
-    // Two independent switches, both OFF by default and with no time limit. Input needs read ON.
-    items.push({ label: `${tr('integration.paneState')}: ${tr(`integration.state_${pane.state}`)}`, enabled: false });
+    const preset = integration.sharePreset();
+    items.push({ label: `${tr('integration.paneState')}: ${tr(`integration.state_${pane.state}`)}${pane.autoConfirm ? ` · ${tr('integration.stateAuto')}` : ''}`, enabled: false });
     items.push({ type: 'separator' });
+    // The one everyday switch: Sharing ON/OFF with the saved default (read / input / skip confirmation).
     items.push({
-      label: tr('integration.paneReadSwitch'),
+      label: `${tr('integration.paneShareSwitch')}（${presetLabel(preset)}）`,
       type: 'checkbox',
       checked: pane.shared,
-      click: () => { if (pane.shared) integration.stopSharing(viewId, id); else confirmShare(win, viewId, id, label); }
+      click: () => { if (pane.shared) integration.stopSharing(viewId, id); else shareOn(win, viewId, id, label); }
     });
-    const gateOpen = integration.inputGate().open;
-    if (gateOpen || pane.input) {
-      const { verifiedProfiles } = require('./integration/input-profiles');
-      const cliUsable = pane.cliStatus === 'verified' || pane.cliStatus === 'compat_approved';
-      if (pane.shared && pane.profileId) {
-        // Which CLI version input goes to, and how it was established.
-        const cliText = pane.cli ? `${pane.cli.family} ${pane.cli.version}（${tr(`integration.cliSource_${pane.cli.source}`)}）` : tr('integration.cliUnknown');
-        items.push({ label: `CLI: ${cliText} — ${tr(`integration.cliStatus_${pane.cliStatus}`)}`, enabled: false });
-        if (pane.cliStatus === 'compat_pending') {
-          items.push({ label: tr('integration.paneApproveCompat').replace('{v}', pane.cli.version), click: () => confirmApproveCompat(win, viewId, id) });
-        }
-        if (pane.cliStatus === 'unknown' && (!pane.cli || pane.cli.source !== 'pane_output')) {
-          items.push({ label: tr('integration.paneConfirmCli'), click: () => confirmCliVersion(win, viewId, id) });
-        }
+    // Only what needs the user now: an unverified version to allow, or an unknown version to confirm.
+    if (pane.shared && (pane.presetInput || pane.profileId)) {
+      const cliText = pane.cli ? `${pane.cli.family} ${pane.cli.version}（${tr(`integration.cliSource_${pane.cli.source}`)}）` : tr('integration.cliUnknown');
+      items.push({ label: `CLI: ${cliText} — ${tr(`integration.cliStatus_${pane.cliStatus}`)}`, enabled: false });
+      if (pane.cliStatus === 'compat_pending' && pane.cli) {
+        items.push({ label: tr('integration.paneApproveCompat').replace('{v}', pane.cli.version), click: () => confirmApproveCompat(win, viewId, id) });
       }
-      items.push({
-        label: tr('integration.paneInputSwitch'),
-        type: 'checkbox',
-        checked: pane.input,
-        // ON only on top of read sharing, with the gate open, a CLI profile chosen and a usable
-        // (verified or approved-compatible) CLI version; OFF always.
-        enabled: pane.input || (pane.shared && gateOpen && !!pane.profileId && cliUsable),
-        click: () => { if (pane.input) integration.revokeInput(viewId, id); else confirmAllowInput(win, viewId, id); }
-      });
-      items.push({
-        label: tr('integration.paneProfile'),
-        enabled: pane.shared,
-        submenu: [
-          { label: tr('integration.paneProfileNone'), type: 'radio', checked: !pane.profileId, click: () => integration.selectProfile(viewId, id, null) },
-          ...verifiedProfiles().map((p) => ({
-            label: `${p.cli_name} ${p.cli_version} — ${p.mode}${p.multiline ? '' : ' (single-line)'}`,
-            type: 'radio',
-            checked: pane.profileId === p.id,
-            click: () => integration.selectProfile(viewId, id, p.id)
-          }))
-        ]
-      });
-      if (pane.input) {
-        items.push({
-          label: tr('integration.paneAutoConfirm'),
-          type: 'checkbox',
-          checked: !!pane.autoConfirm,
-          click: () => { if (pane.autoConfirm) integration.disableAutoConfirm(viewId, id); else confirmAutoConfirm(win, viewId, id); }
-        });
-        items.push(pane.inputPaused
-          ? { label: tr('integration.paneResumeInput'), click: () => integration.resumeInput(viewId, id) }
-          : { label: tr('integration.paneTakeover'), click: () => integration.takeover(viewId, id) });
+      if (pane.cliStatus === 'unknown' && (!pane.cli || pane.cli.source !== 'pane_output')) {
+        items.push({ label: tr('integration.paneConfirmCli'), click: () => confirmCliVersion(win, viewId, id) });
       }
     }
-    if (pane.shared) {
-      items.push({ type: 'separator' });
-      items.push(pane.capture === 'paused'
-        ? { label: tr('integration.paneResume'), click: () => integration.resume(viewId, id) }
-        : { label: tr('integration.panePause'), click: () => integration.pause(viewId, id) });
-      items.push({ label: tr('integration.paneClear'), click: () => integration.clearBuffer(viewId, id) });
+    if (pane.input) {
+      items.push(pane.inputPaused
+        ? { label: tr('integration.paneResumeInput'), click: () => integration.resumeInput(viewId, id) }
+        : { label: tr('integration.paneTakeover'), click: () => integration.takeover(viewId, id) });
+      items.push({ label: tr('integration.badgeStopInput'), click: () => integration.revokeInput(viewId, id) });
     }
+    items.push({ type: 'separator' }, { label: tr('integration.paneAdvanced'), submenu: advancedPaneItems(win, viewId, id, label, pane) });
   }
-  items.push({ type: 'separator' }, { label: tr('integration.menuStatus'), click: () => showIntegrationStatus(win) });
+  items.push({ type: 'separator' }, { label: tr('integration.menuSharePreset'), enabled: !!integration, click: () => chooseSharePreset(win) });
+  items.push({ label: tr('integration.menuStatus'), click: () => showIntegrationStatus(win) });
   Menu.buildFromTemplate(items).popup({ window: win, x: Math.round(x), y: Math.round(y + TABSTRIP_H) });
 });
+
+function presetLabel(preset) {
+  if (!preset) return tr('integration.presetUnset');
+  if (!preset.input) return tr('integration.presetRead');
+  return preset.skipConfirm ? tr('integration.presetReadInputAuto') : tr('integration.presetReadInput');
+}
+
+// Sharing ON with the saved default. The first time, the default is chosen (and consented to) first.
+async function shareOn(win, viewId, termId, label) {
+  if (!integration.sharePreset() && !(await chooseSharePreset(win))) return;
+  try { integration.shareWithPreset(viewId, termId, { label }); } catch (error) {
+    dialog.showErrorBox(tr('integration.shareTitle'), error.message || String(error));
+  }
+}
+
+// The saved default for "Sharing ON" — chosen once, with the full explanation (consent).
+async function chooseSharePreset(win) {
+  const current = integration.sharePreset();
+  const choices = [
+    { input: false, skipConfirm: false, label: tr('integration.presetRead') },
+    { input: true, skipConfirm: false, label: tr('integration.presetReadInput') },
+    { input: true, skipConfirm: true, label: tr('integration.presetReadInputAuto') }
+  ];
+  const currentIdx = current ? choices.findIndex((c) => c.input === current.input && c.skipConfirm === current.skipConfirm) : 2;
+  const opts = {
+    type: 'warning',
+    title: tr('integration.menuSharePreset'),
+    message: tr('integration.presetMessage'),
+    detail: tr('integration.presetDetail').replace('{principal}', integration.principal || '-'),
+    buttons: [...choices.map((c) => c.label), tr('integration.cancel')],
+    defaultId: currentIdx >= 0 ? currentIdx : 2,
+    cancelId: choices.length,
+    noLink: true
+  };
+  const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+  if (response < 0 || response >= choices.length) return false;
+  integration.setSharePreset(choices[response]);
+  buildAppMenu();
+  return true;
+}
+
+// The individual switches (rarely needed now that "Sharing ON" applies the saved default).
+function advancedPaneItems(win, viewId, id, label, pane) {
+  const items = [];
+  items.push({
+    label: tr('integration.paneReadSwitch'),
+    type: 'checkbox',
+    checked: pane.shared,
+    click: () => { if (pane.shared) integration.stopSharing(viewId, id); else confirmShare(win, viewId, id, label); }
+  });
+  const gateOpen = integration.inputGate().open;
+  if (gateOpen || pane.input) {
+    const { verifiedProfiles } = require('./integration/input-profiles');
+    const cliUsable = pane.cliStatus === 'verified' || pane.cliStatus === 'compat_approved';
+    items.push({
+      label: tr('integration.paneInputSwitch'),
+      type: 'checkbox',
+      checked: pane.input,
+      enabled: pane.input || (pane.shared && gateOpen && !!pane.profileId && cliUsable),
+      click: () => { if (pane.input) integration.revokeInput(viewId, id); else confirmAllowInput(win, viewId, id); }
+    });
+    items.push({
+      label: tr('integration.paneProfile'),
+      enabled: pane.shared,
+      submenu: [
+        { label: tr('integration.paneProfileNone'), type: 'radio', checked: !pane.profileId, click: () => integration.selectProfile(viewId, id, null) },
+        ...verifiedProfiles().map((p) => ({
+          label: `${p.cli_name} — ${p.mode}${p.multiline ? '' : ' (single-line)'}`,
+          type: 'radio',
+          checked: pane.profileId === p.id,
+          click: () => integration.selectProfile(viewId, id, p.id)
+        }))
+      ]
+    });
+    items.push({
+      label: tr('integration.paneAutoConfirm'),
+      type: 'checkbox',
+      checked: !!pane.autoConfirm,
+      enabled: pane.input,
+      click: () => { if (pane.autoConfirm) integration.disableAutoConfirm(viewId, id); else confirmAutoConfirm(win, viewId, id); }
+    });
+  }
+  if (pane.shared) {
+    items.push({ type: 'separator' });
+    items.push(pane.capture === 'paused'
+      ? { label: tr('integration.paneResume'), click: () => integration.resume(viewId, id) }
+      : { label: tr('integration.panePause'), click: () => integration.pause(viewId, id) });
+    items.push({ label: tr('integration.paneClear'), click: () => integration.clearBuffer(viewId, id) });
+  }
+  return items;
+}
 
 ipcMain.handle('integration:paneState', (event) => (integration ? integration.paneState(event.sender.id) : []));

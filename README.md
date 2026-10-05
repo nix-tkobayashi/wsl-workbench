@@ -254,6 +254,25 @@ process, and `taskkill /F` of only the helper each left no tunnel-client / wrapp
 process; restarting right after a forced kill ran exactly one tunnel-client; with a hand-started
 tunnel-client running, the app refused (`already_running`).
 
+### Everyday use: Sharing ON/OFF with a saved default (v0.32.0)
+
+1. **Integration > Enable dots Integration** — terminal input is enabled with it (over the verified
+   pipe; **Allow Terminal Input** turns just input off again).
+2. **Integration > Default for Sharing...** (asked automatically the first time): *Read only* /
+   *Read + input (each send confirmed)* / *Read + input, no confirmation*. Saved with this one
+   consent dialog.
+3. Per pane, **⇪ > Sharing** ON / OFF — nothing else. With input in the default, the CLI started in
+   the pane (Claude Code / Codex, from its own banner) gets input and, if chosen, skip-confirmation;
+   the profile is picked automatically. When the CLI exits (shell prompt) input goes off; when a CLI
+   starts again while the pane is still shared, input follows it.
+
+- Unverified versions stay read-only (badge: *input waits*) until **⇪ > Allow Compatible Behaviour
+  for X.Y.Z...** once; other majors stay read-only. A CLI started before Sharing ON shows *version
+  unknown* (restart it, or **⇪ > Confirm the CLI Version**).
+- Nothing is shared after a restart; **⇪ > Stop input** and typing in the pane stop AI input; the
+  CLIs' own trust / permission prompts are never answered. **⇪ > Individual Switches** keeps the
+  per-switch controls.
+
 ### CLI versions and input profiles (v0.31.0)
 
 A profile describes a CLI family and its input method (one line, text and Enter as separate
