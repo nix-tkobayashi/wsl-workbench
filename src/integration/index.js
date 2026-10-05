@@ -188,6 +188,8 @@ class IntegrationController {
     await this.listen();
     this.saveIntegration({ enabled: true });
     this.audit.record({ event: 'integration_enabled', principal: this.principal });
+    // Terminal input comes with the integration (still per pane, and only over the verified pipe).
+    if (this.transportGate === 'reviewed' && !this.inputEnabled) { try { await this.setInputEnabled(true); } catch {} }
     this.pushAllPaneStates();
     if (this.tunnel) this.tunnel.autoStart();
   }
@@ -295,7 +297,7 @@ class IntegrationController {
   onGrantEnded(grant, code) {
     this.arbiter.sessionChanged(grant.session_id, code);
     const session = this.registry.sessions.get(grant.session_id);
-    if (session) this.clearAutoConfirm(session, 'grant_ended');
+    if (session) { this.clearAutoConfirm(session, 'grant_ended'); session.presetShare = false; }
     if (session && session.generation === grant.generation) this.registry.resetCapture(session);
     this.audit.record({ event: 'grant_ended', principal: grant.principal, session_id: grant.session_id, generation: grant.generation, code, reason: this.endReason || undefined });
     if (session) this.pushPaneState(session.viewId);
@@ -423,7 +425,56 @@ class IntegrationController {
 
   revokeInput(viewId, termId) {
     const session = this.sessionFor(viewId, termId);
-    if (session) this.revokeInputFor(session, 'user_stopped');
+    if (!session) return;
+    // An explicit stop holds for this CLI: the saved default does not turn input back on until a
+    // CLI (re)starts in the pane or sharing is turned on again.
+    session.presetInputStopped = true;
+    this.revokeInputFor(session, 'user_stopped');
+  }
+
+  // --- saved default for sharing: the pane's only switch is "Sharing ON/OFF" ---
+  // integration.sharePreset = { input: bool, skipConfirm: bool, consentedAt } — set once from the
+  // menu with a consent dialog. Sharing ON (presetShare) = read + what the preset says, applied to
+  // the CLI detected in the pane; re-applied whenever a CLI (re)starts there while sharing stays ON.
+  // Nothing is restored after a restart: sharing itself is always turned on by the user.
+
+  sharePreset() {
+    const p = this.settingsIntegration().sharePreset;
+    if (!p || typeof p !== 'object' || !p.consentedAt) return null;
+    return { input: !!p.input, skipConfirm: !!p.input && !!p.skipConfirm };
+  }
+
+  setSharePreset({ input, skipConfirm }) {
+    this.saveIntegration({ sharePreset: { input: !!input, skipConfirm: !!input && !!skipConfirm, consentedAt: this.now() } });
+    this.audit.record({ event: 'share_preset_saved', reason: `input=${!!input} skipConfirm=${!!input && !!skipConfirm}` });
+  }
+
+  shareWithPreset(viewId, termId, { label } = {}) {
+    if (!this.sharePreset()) throw new Error('Set the default for sharing first.');
+    this.share(viewId, termId, { label });
+    const session = this.sessionFor(viewId, termId);
+    session.presetShare = true;
+    session.presetInputStopped = false;
+    this.applyPreset(session);
+    this.pushPaneState(viewId);
+  }
+
+  // Input (+ skip confirmation) per the preset, for the CLI identified in the pane. Read-only (and
+  // shown as waiting) while the CLI / version is unknown, unverified-unapproved or another major.
+  applyPreset(session) {
+    const preset = this.sharePreset();
+    const grant = this.access.active(session.sessionId);
+    if (!preset || !session.presetShare || !grant || !preset.input || session.lifecycle !== 'alive' || session.presetInputStopped) return false;
+    if (!this.inputGate().open || !session.cli) return false;
+    const profile = verifiedProfiles().find((p) => p.cli_family === session.cli.family);
+    if (!profile) return false;
+    if (!session.inputProfile || session.inputProfile.id !== profile.id) this.selectProfile(session.viewId, session.termId, profile.id);
+    if (!this.cliTarget(session).usable) return false;
+    if (!this.access.hasInput(this.access.active(session.sessionId))) this.grantInput(session.viewId, session.termId);
+    if (preset.skipConfirm && !session.autoConfirm) this.enableAutoConfirm(session.viewId, session.termId, null, { fromPreset: true });
+    this.audit.record({ event: 'share_preset_applied', session_id: session.sessionId, generation: session.generation, reason: `${session.cli.family} ${session.cli.version}` });
+    this.pushPaneState(session.viewId);
+    return true;
   }
 
   // --- which CLI / version the pane's input goes to ---
@@ -466,17 +517,29 @@ class IntegrationController {
     const prev = session.cli;
     const changed = !prev || prev.family !== cli.family || prev.version !== cli.version;
     session.cli = { family: cli.family, version: cli.version, source: 'pane_output', at: this.now() };
+    session.presetInputStopped = false; // a CLI (re)started: a new target for the saved default
     if (changed) {
       session.inputEpoch = (session.inputEpoch || 0) + 1;
       this.revokeInputFor(session, 'cli_changed');
       this.audit.record({ event: 'cli_detected', session_id: session.sessionId, generation: session.generation, reason: `${cli.family} ${cli.version}` });
     }
+    this.safe(() => this.applyPreset(session)); // sharing stays ON: follow the new CLI per the preset
     this.pushPaneState(session.viewId);
   }
 
   // The user states which version runs in the pane (when no banner was seen). Never turns input on.
-  confirmCliVersion(viewId, termId, version, expect) {
+  // profileId: when the pane has no profile yet, the CLI the user names picks it.
+  confirmCliVersion(viewId, termId, version, expect, profileId = null) {
     const session = this.sessionFor(viewId, termId);
+    if (session && profileId && (!session.inputProfile || session.inputProfile.id !== profileId)) {
+      const snap = this.inputTarget(viewId, termId);
+      if (!expect || !snap || snap.sessionId !== expect.sessionId || snap.generation !== expect.generation || snap.grantId !== expect.grantId
+        || snap.inputEpoch !== expect.inputEpoch || snap.profileId !== expect.profileId || snap.cliKey !== expect.cliKey) {
+        throw new Error('The terminal changed while the dialog was open. Check the version again.');
+      }
+      this.selectProfile(viewId, termId, profileId);
+      expect = this.inputTarget(viewId, termId); // the profile choice itself is part of this confirmation
+    }
     const st = session && this.cliStatus(session);
     if (!session || !st.profile) throw new Error('Choose a CLI input profile first.');
     // The dialog's snapshot: same pane incarnation, input period, profile and CLI state as shown.
@@ -494,6 +557,7 @@ class IntegrationController {
       this.revokeInputFor(session, 'cli_changed');
     }
     this.audit.record({ event: 'cli_user_confirmed', session_id: session.sessionId, generation: session.generation, reason: `${session.cli.family} ${session.cli.version}` });
+    this.safe(() => this.applyPreset(session));
     this.pushPaneState(viewId);
   }
 
@@ -508,7 +572,11 @@ class IntegrationController {
     all[profileId] = [...new Set([...(Array.isArray(all[profileId]) ? all[profileId] : []), version])].slice(-20);
     this.saveIntegration({ compatApprovals: all });
     this.audit.record({ event: 'compat_approved', reason: `${profileId} ${version}` });
-    for (const s2 of this.registry.sessions.values()) this.pushPaneState(s2.viewId);
+    for (const s2 of this.registry.sessions.values()) {
+      // Only panes that were waiting for exactly this approval.
+      if (s2.cli && s2.cli.family === profile.cli_family && s2.cli.version === version) this.safe(() => this.applyPreset(s2));
+      this.pushPaneState(s2.viewId);
+    }
   }
 
   // --- staged observation after Enter (advisory) ---
@@ -605,7 +673,7 @@ class IntegrationController {
   // delay, idempotency, journaling and human takeover stay. Operations already waiting when it is
   // turned on keep their dialogs.
 
-  enableAutoConfirm(viewId, termId, expect) {
+  enableAutoConfirm(viewId, termId, expect, { fromPreset = false } = {}) {
     const session = this.sessionFor(viewId, termId);
     const grant = session && this.access.active(session.sessionId);
     if (!session || session.lifecycle !== 'alive') throw new Error('This terminal is not running.');
@@ -613,8 +681,10 @@ class IntegrationController {
     if (!this.inputGate().open) throw new Error('Terminal input is not enabled.');
     if (!session.inputProfile) throw new Error('Choose a CLI input profile first.');
     const now = this.inputTarget(viewId, termId);
-    if (!expect || !now || now.sessionId !== expect.sessionId || now.generation !== expect.generation || now.grantId !== expect.grantId
-      || now.inputEpoch !== expect.inputEpoch || now.profileId !== expect.profileId || now.cliKey !== expect.cliKey) {
+    // A dialog's snapshot must still match; the saved default (consented once) applies to the
+    // current state directly.
+    if (!fromPreset && (!expect || !now || now.sessionId !== expect.sessionId || now.generation !== expect.generation || now.grantId !== expect.grantId
+      || now.inputEpoch !== expect.inputEpoch || now.profileId !== expect.profileId || now.cliKey !== expect.cliKey)) {
       throw new Error('The terminal changed while the dialog was open. Turn it on again.');
     }
     session.autoConfirm = {
@@ -739,6 +809,8 @@ class IntegrationController {
         autoConfirm: !!(grant && grant.permissions.has('input:write') && session.autoConfirm),
         cli: session.cli ? { family: session.cli.family, version: session.cli.version, source: session.cli.source } : null,
         cliStatus: this.cliTarget(session).status,
+        presetShare: !!(grant && session.presetShare),
+        presetInput: !!(grant && session.presetShare && this.sharePreset() && this.sharePreset().input),
         integration: this.enabled,
         capture: session.capture,
         sessionId: session.sessionId,
