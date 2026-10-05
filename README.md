@@ -254,6 +254,30 @@ process, and `taskkill /F` of only the helper each left no tunnel-client / wrapp
 process; restarting right after a forced kill ran exactly one tunnel-client; with a hand-started
 tunnel-client running, the app refused (`already_running`).
 
+### CLI updates without chores (v0.33.0)
+
+- **The CLI is known before sharing.** Workbench reads CLI startup banners (and shell prompts) from
+  every pane whether or not it is shared — metadata only: CLI family, version, and a <=160-character
+  in-memory scan window for banners split across chunks. Output text from before sharing is never
+  stored or exposed. The identity expires when the CLI exits (shell prompt), another CLI starts, or
+  the terminal ends. So a Claude Code started before Sharing ON is recognized immediately.
+- **A compatibility policy per major version.** For an unverified version, **⇪ > Allow Claude Code
+  2.x Compatible Behaviour...** explains the risk once and saves the policy: later 2.x updates
+  (2.1.287 → 2.1.289 → 2.4.0) need nothing. A new major (3.x) asks again with a stronger warning;
+  0.x CLIs (Codex) use the minor (0.160.x vs 0.161.x). Verified versions and policy-allowed ones are
+  shown differently ("verified" vs "not verified · allowed by the 2.x policy").
+- **Unknown version, no typing.** If the version cannot be identified, **⇪ > Allow Input with
+  Unknown Version (this run only)...** asks only which CLI is running (Claude Code / Codex). It lasts
+  until the CLI exits, a banner appears, or the terminal ends; it is never "verified". A pane whose
+  output shows another CLI is refused.
+- Approving a policy turns nothing on by itself; a pane already shared with your saved default
+  ("Sharing ON") that was waiting for that version gets the default applied.
+- Limits: a banner is recognized by its logo + "Claude Code vX.Y.Z" (Codex: ">_ OpenAI Codex (vX.Y.Z)");
+  a CLI that changes its banner is "version unknown". The same version repainted is not a new start,
+  but a repaint of an OLDER banner (e.g. scrollback replay) would look like a version change (input
+  stops — the safe direction). A CLI replaced without a shell prompt or banner is not detected.
+  `claude --version` in another process is never used.
+
 ### Everyday use: Sharing ON/OFF with a saved default (v0.32.0)
 
 1. **Integration > Enable dots Integration** — terminal input is enabled with it (over the verified

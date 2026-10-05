@@ -50,7 +50,7 @@ async function setup({ settings = {} } = {}) {
   const pane = (termId = 1, profile = CLAUDE) => {
     ctl.ptyStarted(1, termId, { distro: 'Ubuntu', wslPath: '/w' });
     ctl.share(1, termId);
-    ctl.ptyData(1, termId, profile === CODEX ? '>_ OpenAI Codex (v0.160.0)\r\n' : ' Claude Code v2.1.287\r\n');
+    ctl.ptyData(1, termId, profile === CODEX ? '>_ OpenAI Codex (v0.160.0)\r\n' : ' ▐▛███▜▌ Claude Code v2.1.287\r\n');
     ctl.selectProfile(1, termId, profile);
     ctl.grantInput(1, termId);
     return ctl.registry.bySlot(1, termId);

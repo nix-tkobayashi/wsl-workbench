@@ -46,7 +46,7 @@ async function setup({ settings = {}, preset = { input: true, skipConfirm: true 
   ctl.ptyStarted(1, 1, { distro: 'Ubuntu', wslPath: '/w' });
   const s = ctl.registry.bySlot(1, 1);
   const pane = () => ctl.paneState(1)[0];
-  const claude = (v = '2.1.287') => ctl.ptyData(1, 1, ` Claude Code v${v}\r\n`);
+  const claude = (v = '2.1.287') => ctl.ptyData(1, 1, ` ▐▛███▜▌ Claude Code v${v}\r\n`);
   const prompt = () => ctl.ptyData(1, 1, '\x1b]7;file:///w\x07$ ');
   const send = (text, profile = CLAUDE) => ctl.broker.handle(ctl.principal, 'workbench_write_input', {
     target: ctl.registry.target(s), expected_state_revision: String(s.stateRevision), idempotency_key: `k-${crypto.randomUUID()}`,

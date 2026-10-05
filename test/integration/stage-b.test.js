@@ -532,7 +532,7 @@ test('Claude Code 2.1.287 profile (measured 2026-10-03): text, confirm, Enter af
   const t = await setup();
   const CLAUDE = 'claude-code.2.1.prompt.single-line';
   try {
-    t.ctl.ptyData(1, 1, ' Claude Code v2.1.287\r\n');
+    t.ctl.ptyData(1, 1, ' ▐▛███▜▌ Claude Code v2.1.287\r\n');
     t.ctl.selectProfile(1, 1, CLAUDE);
     t.ctl.grantInput(1, 1);
     const view = t.ctl.broker.handle(t.P, 'workbench_get_session', { target: t.target() });

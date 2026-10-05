@@ -94,8 +94,12 @@ class SessionRegistry {
     session.initialCwd = stripControls(initialCwd || wslPath, 1024);
     session.cwd = { value: null, source: 'unknown', observed_at: null };
     // The CLI running in this pane: { family, version, source: 'pane_output' | 'user_confirmed', at }.
+    // Tracked from the pane's output whether or not it is shared (metadata only, see ptyData).
     session.cli = null;
     session.bannerTail = '';
+    session.promptAt = null;
+    session.firstPromptAt = null;
+    session.normalizer = this.makeNormalizer(session);
     session.startedAt = at;
     this.bump(session);
     this.emit('started', session);
@@ -103,9 +107,12 @@ class SessionRegistry {
   }
 
   // Raw PTY data. Cheap no-op unless capture is active for this session.
+  // Every PTY chunk is normalized to find CLI banners and shell prompts (metadata kept in memory:
+  // family, version, a <=160-character scan tail for banners split across chunks). The TEXT is kept
+  // only while the pane is shared (capture active); before that nothing is stored or exposed.
   ptyData(viewId, termId, data) {
     const session = this.bySlot(viewId, termId);
-    if (!session || session.capture === 'off' || !session.normalizer) return 0;
+    if (!session || !session.normalizer || session.lifecycle !== 'alive') return 0;
     const { text, controlRemoved, replaced } = session.normalizer.push(String(data));
     // A CLI's startup banner in the pane's own output (also while paused): which CLI and version
     // runs in THIS pane. Scanned over a small tail so a banner split across chunks is still seen.
@@ -150,7 +157,7 @@ class SessionRegistry {
       if (clis.length) session.bannerTail = scan.slice(clis[clis.length - 1].end).slice(-160);
     }
     session.eventOffset = 0;
-    if (session.capture !== 'active') return 0; // paused: OSC 7 still tracked, nothing stored
+    if (session.capture !== 'active' || !session.buffer) return 0; // not shared / paused: nothing stored
     const added = session.buffer.append(text, { controlRemoved, replaced });
     if (added) this.enforceGlobalLimit();
     return added;
@@ -160,6 +167,8 @@ class SessionRegistry {
     const session = this.bySlot(viewId, termId);
     if (!session || session.lifecycle !== 'alive') return;
     session.lifecycle = 'exited';
+    session.cli = null; // whatever ran there is gone
+    session.bannerTail = '';
     this.bump(session);
     this.emit('exited', session);
   }
@@ -199,15 +208,10 @@ class SessionRegistry {
     return `${leaf} · ${session.label || `Terminal ${session.termId}`}`;
   }
 
-  // --- capture control (driven by grants) ---
-
-  startCapture(session) {
-    if (session.capture !== 'off') return;
-    session.buffer = new OutputBuffer({ maxBytes: this.limits.sessionBytes, maxAgeMs: this.limits.sessionAgeMs, now: this.now });
-    // Every capture has its own identity; cursors bind to it, so a cursor from an earlier share of
-    // the same session can never be applied to a later capture's positions.
-    session.captureId = this.randomUUID();
-    session.normalizer = new TerminalNormalizer({
+  // One normalizer per pane incarnation, alive whether or not the pane is shared: it is what sees
+  // the CLI banners and shell prompts. Only while sharing is its text kept (in the capture buffer).
+  makeNormalizer(session) {
+    return new TerminalNormalizer({
       onOsc: (code, payload, at) => {
         if (code !== '7') return;
         const cwd = parseOsc7Cwd(payload);
@@ -219,6 +223,16 @@ class SessionRegistry {
         if (session.firstPromptAt == null) session.firstPromptAt = at; // ...and the first one
       }
     });
+  }
+
+  // --- capture control (driven by grants) ---
+
+  startCapture(session) {
+    if (session.capture !== 'off') return;
+    session.buffer = new OutputBuffer({ maxBytes: this.limits.sessionBytes, maxAgeMs: this.limits.sessionAgeMs, now: this.now });
+    // Every capture has its own identity; cursors bind to it, so a cursor from an earlier share of
+    // the same session can never be applied to a later capture's positions.
+    session.captureId = this.randomUUID();
     session.capture = 'active';
     this.bump(session);
   }
@@ -249,14 +263,10 @@ class SessionRegistry {
   // Stop capturing and discard everything retained (grant ended, PTY replaced, slot closed).
   resetCapture(session) {
     const had = session.capture !== 'off';
-    // While not capturing nothing is observed, so the CLI identity can no longer be trusted: the
-    // next share starts with an unknown CLI (until its banner or the user identifies it).
-    session.cli = null;
-    session.bannerTail = '';
-    session.promptAt = null;
+    // The CLI identity is NOT reset here: banners and prompts are tracked whether or not the pane
+    // is shared (metadata only), so a CLI started before sharing is still known after it.
     if (session.buffer) session.buffer.clear();
     session.buffer = null;
-    session.normalizer = null;
     session.captureId = null;
     session.capture = 'off';
     if (had && session.lifecycle !== 'closed') this.bump(session);

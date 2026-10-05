@@ -66,7 +66,10 @@ const PROFILES = [
     // The version must be followed by a non-version character, so a banner split inside its
     // number (".../v2.1.28" + "7") is not taken early; the scan tail then sees it complete.
     // The whole version, prerelease / build suffix included (2.1.287-beta.1 is NOT 2.1.287).
-    banner: /Claude Code\s*v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=[^\w.+-])/,
+    // The startup banner: the logo's block glyphs, then "Claude Code vX.Y.Z" on the same line
+    // (e.g. " ▐▛███▜▌   Claude Code v2.1.287"). A bare "Claude Code v2.1.287" in ordinary output
+    // (a README, an answer) is not a banner.
+    banner: /[▐▛▜▌▝▘▙▟█]{2,}[^\n]{0,24}?Claude Code\s*v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=[^\w.+-])/,
     acceptMarker: /esc to interrupt/i,
     responseMarker: /[⏺●]\s*\S/,
     mode: 'interactive-prompt',
@@ -121,17 +124,26 @@ function detectCli(text) {
   return { family, version, end };
 }
 
-// cli: { family, version, source } | null. approvals: versions the user allowed compat for.
-// status: verified | compat_approved | compat_pending | major_changed | family_mismatch | unknown
-function versionStatus(profile, cli, approvals = []) {
-  if (!profile) return { status: 'unknown', usable: false };
-  if (!cli || !cli.version || !VERSION_RE.test(cli.version)) return { status: 'unknown', usable: false };
-  if (cli.family && cli.family !== profile.cli_family) return { status: 'family_mismatch', usable: false };
-  if (profile.verified_versions.includes(cli.version)) return { status: 'verified', usable: true };
-  const majors = new Set(profile.verified_versions.map(majorOf));
-  if (!majors.has(majorOf(cli.version))) return { status: 'major_changed', usable: false };
-  if (approvals.includes(cli.version)) return { status: 'compat_approved', usable: true };
-  return { status: 'compat_pending', usable: false };
+// cli: { family, version, source, unknownVersionAllowed } | null.
+// approvals: single versions allowed earlier (kept for compatibility); lines: compatibility lines
+// ("2", or "0.160" for 0.x) the user allowed as a policy for this CLI family.
+// status: verified | compat_approved (basis: policy | version) | compat_pending (same line as a
+// verified version, policy not allowed yet) | major_changed (another line: asks again) |
+// unknown_allowed (version unknown, input allowed by the user for this CLI run only) |
+// family_mismatch | unknown. Only verified / compat_approved / unknown_allowed accept input.
+function versionStatus(profile, cli, approvals = [], lines = []) {
+  if (!profile || !cli) return { status: 'unknown', usable: false, line: null };
+  if (cli.family && cli.family !== profile.cli_family) return { status: 'family_mismatch', usable: false, line: null };
+  if (!cli.version) return cli.unknownVersionAllowed ? { status: 'unknown_allowed', usable: true, line: null } : { status: 'unknown', usable: false, line: null };
+  if (!VERSION_RE.test(cli.version)) return { status: 'unknown', usable: false, line: null };
+  const line = majorOf(cli.version);
+  if (profile.verified_versions.includes(cli.version)) return { status: 'verified', usable: true, line };
+  if (lines.includes(line)) return { status: 'compat_approved', usable: true, basis: 'policy', line };
+  const verifiedLines = new Set(profile.verified_versions.map(majorOf));
+  if (!verifiedLines.has(line)) return { status: 'major_changed', usable: false, line };
+  // A single-version approval (earlier releases) only ever counted within a verified line.
+  if (approvals.includes(cli.version)) return { status: 'compat_approved', usable: true, basis: 'version', line };
+  return { status: 'compat_pending', usable: false, line };
 }
 
 function findProfile(id, revision) {
