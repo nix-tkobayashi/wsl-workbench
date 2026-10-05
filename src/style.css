@@ -90,7 +90,7 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 /* The UI is always dark, so force dark native scrollbars on every scrollable pane (otherwise they
    render light when the Windows "app mode" is Light, showing white bars on the dark UI). Scoped to
    the scroll containers so form-control rendering elsewhere is untouched. */
-#editor, .xterm-viewport, #treePane, #editorPreview, #landingRecentList { color-scheme: dark; }
+#editor, .xterm-viewport, #treePane, #editorPreview, #landingRecentList, #unsupportedView, #terminalTabs { color-scheme: dark; }
 /* Force a classic, always-visible scrollbar on the terminal viewport. The native (overlay) dark
    scrollbar auto-hides and, with a large scrollback, its thumb shrinks until it vanishes. The
    ::-webkit-scrollbar rules restore a persistent track; customizing the thumb, however, drops
