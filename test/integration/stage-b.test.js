@@ -8,7 +8,11 @@ const path = require('path');
 const crypto = require('crypto');
 const { IntegrationController } = require('../../src/integration');
 const { OperationStore } = require('../../src/integration/operation-store');
-const { validate, WRITE_INPUT_OUTPUT_SCHEMA, GET_OPERATION_OUTPUT_SCHEMA, listedTools } = require('../../src/mcp/schemas');
+const { validate: validateRaw, WRITE_INPUT_OUTPUT_SCHEMA, GET_OPERATION_OUTPUT_SCHEMA, listedTools } = require('../../src/mcp/schemas');
+// The adapter moves `observation` out of the structured result into the text (server.js), so the
+// published output schemas are checked against what the adapter sends.
+const { structuredFor } = require('../../src/mcp/server');
+const validate = (schema, result) => validateRaw(schema, structuredFor(result));
 
 const posixOnly = { skip: process.platform === 'win32' ? 'uses a Unix socket' : false };
 const PROFILE = 'codex.0.160.composer.single-line';
@@ -51,6 +55,7 @@ async function setup({ inputOn = true, key = crypto.randomBytes(32), dir = fs.mk
   const target = () => ctl.registry.target(session);
   const rev = () => String(session.stateRevision);
   function prepare() {
+    ctl.ptyData(1, 1, '>_ OpenAI Codex (v0.160.0)\r\n'); // the CLI's banner, seen in the pane's own output
     ctl.selectProfile(1, 1, PROFILE);
     ctl.grantInput(1, 1);
   }
@@ -525,6 +530,7 @@ test('Claude Code 2.1.287 profile (measured 2026-10-03): text, confirm, Enter af
   const t = await setup();
   const CLAUDE = 'claude-code.2.1.prompt.single-line';
   try {
+    t.ctl.ptyData(1, 1, ' Claude Code v2.1.287\r\n');
     t.ctl.selectProfile(1, 1, CLAUDE);
     t.ctl.grantInput(1, 1);
     const view = t.ctl.broker.handle(t.P, 'workbench_get_session', { target: t.target() });

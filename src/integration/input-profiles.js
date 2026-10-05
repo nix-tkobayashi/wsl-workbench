@@ -1,9 +1,18 @@
 // Stage B: fixed CLI input profiles and input-text rules.
 //
-// A profile pins how input is encoded for ONE measured CLI / version / input mode. The user picks
-// a profile per pane in Workbench; the name is the user's statement, not proof of what runs in the
+// A profile pins how input is encoded for ONE CLI family and input mode (single line, text and
+// Enter as separate writes, the submit delay). The versions it was actually measured with are kept
+// separately in `verified_versions`; a profile is NOT verified for a whole major version. The user
+// picks a profile per pane; the name is the user's statement, not proof of what runs in the
 // foreground. Profiles are compiled in: nothing over MCP can add or edit one. Only `verified`
-// profiles are selectable or advertised; an unverified profile is documentation of what is missing.
+// profiles (at least one measured version) are selectable or advertised. Profile IDs are stable
+// (the "2.1" / "0.160" in an ID is the first measured version, kept for compatibility).
+//
+// Version policy for the CLI actually running in a pane (see versionStatus):
+//   - a verified version                      -> usable,
+//   - same major, not verified                -> usable only after the user approved compatible
+//                                                behaviour for that exact version (remembered),
+//   - other major, other CLI, or unknown      -> not usable until resolved (no automatic compat).
 //
 // Text is never normalized, trimmed, quoted, escaped, or newline-converted. Raw ESC / bracketed
 // paste / ANSI from callers is rejected; only the profile adds framing and key bytes.
@@ -26,7 +35,14 @@ const PROFILES = [
     id: 'codex.0.160.composer.single-line',
     revision: '1',
     cli_name: 'codex',
-    cli_version: '0.160.0',
+    cli_family: 'codex',
+    cli_version: '0.160.0', // first measured version (kept for compatibility)
+    verified_versions: ['0.160.0'],
+    // Startup banner as it appears in the pane's (normalized) output.
+    banner: /OpenAI Codex\s*\(v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\)/,
+    // Observation after Enter (advisory): the CLI's busy line; no reliable reply marker known.
+    acceptMarker: /esc to interrupt/i,
+    responseMarker: null,
     mode: 'interactive-composer',
     multiline: false,
     paste_mode: 'plain',
@@ -44,7 +60,15 @@ const PROFILES = [
     id: 'claude-code.2.1.prompt.single-line',
     revision: '1',
     cli_name: 'claude-code',
-    cli_version: '2.1.287',
+    cli_family: 'claude-code',
+    cli_version: '2.1.287', // first measured version (kept for compatibility)
+    verified_versions: ['2.1.287'],
+    // The version must be followed by a non-version character, so a banner split inside its
+    // number (".../v2.1.28" + "7") is not taken early; the scan tail then sees it complete.
+    // The whole version, prerelease / build suffix included (2.1.287-beta.1 is NOT 2.1.287).
+    banner: /Claude Code\s*v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=[^\w.+-])/,
+    acceptMarker: /esc to interrupt/i,
+    responseMarker: /[⏺●]\s*\S/,
     mode: 'interactive-prompt',
     multiline: false,
     paste_mode: 'plain',
@@ -64,7 +88,51 @@ const PROFILES = [
   }
 ];
 
-function verifiedProfiles() { return PROFILES.filter((p) => p.verified); }
+function verifiedProfiles() { return PROFILES.filter((p) => p.verified && p.verified_versions.length > 0); }
+
+// X.Y.Z with an optional prerelease / build suffix. Only an exact entry in verified_versions is
+// verified; a suffixed version of a verified one is an unverified version of the same major.
+const VERSION_RE = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+// The compatibility line of a version: its major, or for 0.x the minor too (semver: 0.y changes
+// may break), so codex 0.160 -> 0.161 counts like a major change.
+function majorOf(version) {
+  const m = VERSION_RE.exec(String(version || ''));
+  if (!m) return null;
+  return m[1] === '0' ? `0.${m[2]}` : m[1];
+}
+
+// The CLIs (family + version) seen in a pane's own output: every startup banner in the text, in
+// stream order, with where each ends. Advisory: any program could print the same text.
+function detectClis(text) {
+  const found = [];
+  for (const p of verifiedProfiles()) {
+    const re = new RegExp(p.banner.source, 'g');
+    let m;
+    while ((m = re.exec(text))) found.push({ family: p.cli_family, version: m[1], index: m.index, end: m.index + m[0].length });
+  }
+  return found.sort((a, b) => a.index - b.index).map(({ family, version, index, end }) => ({ family, version, start: index, end }));
+}
+
+// The last banner (or null).
+function detectCli(text) {
+  const all = detectClis(text);
+  if (!all.length) return null;
+  const { family, version, end } = all[all.length - 1];
+  return { family, version, end };
+}
+
+// cli: { family, version, source } | null. approvals: versions the user allowed compat for.
+// status: verified | compat_approved | compat_pending | major_changed | family_mismatch | unknown
+function versionStatus(profile, cli, approvals = []) {
+  if (!profile) return { status: 'unknown', usable: false };
+  if (!cli || !cli.version || !VERSION_RE.test(cli.version)) return { status: 'unknown', usable: false };
+  if (cli.family && cli.family !== profile.cli_family) return { status: 'family_mismatch', usable: false };
+  if (profile.verified_versions.includes(cli.version)) return { status: 'verified', usable: true };
+  const majors = new Set(profile.verified_versions.map(majorOf));
+  if (!majors.has(majorOf(cli.version))) return { status: 'major_changed', usable: false };
+  if (approvals.includes(cli.version)) return { status: 'compat_approved', usable: true };
+  return { status: 'compat_pending', usable: false };
+}
 
 function findProfile(id, revision) {
   return PROFILES.find((p) => p.verified && p.id === id && (revision === undefined || p.revision === revision)) || null;
@@ -74,6 +142,8 @@ function findProfile(id, revision) {
 function publicProfile(p) {
   return {
     id: p.id, revision: p.revision, cli_name: p.cli_name, cli_version: p.cli_version, mode: p.mode,
+    verified_versions: [...p.verified_versions],
+    version_policy: 'verified versions; other versions of the same major only after the user approves compatible behaviour in Workbench',
     multiline: p.multiline, paste_mode: p.paste_mode, submit_key: p.submit_key,
     supported_keys: p.supported_keys.filter((k) => CANDIDATE_KEYS.includes(k))
   };
@@ -110,4 +180,4 @@ function keyBytes(profile, key) {
   return KEY_BYTES[key];
 }
 
-module.exports = { PROFILES, MAX_TEXT_BYTES, CANDIDATE_KEYS, verifiedProfiles, findProfile, publicProfile, checkText, encodeText, keyBytes };
+module.exports = { PROFILES, MAX_TEXT_BYTES, CANDIDATE_KEYS, verifiedProfiles, findProfile, publicProfile, checkText, encodeText, keyBytes, detectCli, detectClis, versionStatus, majorOf };

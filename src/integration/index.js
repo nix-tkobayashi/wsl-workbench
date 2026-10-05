@@ -19,7 +19,7 @@ const { createBrokerServer, principalFor } = require('./local-transport');
 const { createAuditLog } = require('./audit');
 const { OperationStore } = require('./operation-store');
 const { InputArbiter } = require('./input-arbiter');
-const { verifiedProfiles, findProfile } = require('./input-profiles');
+const { verifiedProfiles, findProfile, versionStatus } = require('./input-profiles');
 const { createSecurePipeListener } = require('./pipe-relay');
 const pairing = require('./pairing');
 
@@ -80,9 +80,13 @@ class IntegrationController {
       isGateOpen: () => this.inputGate().open,
       now,
       onChange: (op) => this.pushPaneState(op.viewId),
-      autoApprove: (op) => this.autoConfirmApplies(op)
+      autoApprove: (op) => this.autoConfirmApplies(op),
+      targetState: (session) => this.cliTarget(session),
+      outputMark: (session) => this.outputMark(session),
+      observe: (op) => this.observeOperation(op),
+      noteDispatch: (session) => this.observationBoundary(session, 'next_input')
     });
-    this.broker.setInput({ arbiter: this.arbiter, gate: () => this.inputGate() });
+    this.broker.setInput({ arbiter: this.arbiter, gate: () => this.inputGate(), cliStatus: (session) => this.cliTarget(session).status });
   }
 
   get enabled() { return !!this.server; }
@@ -234,6 +238,8 @@ class IntegrationController {
   userInput(viewId, termId, data) {
     this.safe(() => {
       if (isTerminalReport(data)) return;
+      const typed = this.registry.bySlot(viewId, termId);
+      if (typed) this.observationBoundary(typed, 'user_input');
       this.registry.userInput(viewId, termId);
       const session = this.registry.bySlot(viewId, termId);
       if (session) this.arbiter.humanInput(session);
@@ -262,12 +268,21 @@ class IntegrationController {
       this.endGrant(session, 'GRANT_REVOKED', `pty_${event}`);
     } else if (event === 'started') {
       this.pushPaneState(session.viewId); // a new / restarted pane shows its (OFF) state right away
+    } else if (event === 'output_boundary') {
+      // A shell prompt or a CLI start in the pane's output (the earliest one of a chunk).
+      this.observationBoundary(session, 'cli_or_shell', session.eventOffset || 0);
     } else if (event === 'shell_prompt') {
+
       // The shell printed its prompt (OSC 7 cwd report): the CLI that input was approved for has
       // exited (or was never in front). Input must be allowed again for whatever runs next; an
       // Input ON dialog still open for the old target is invalidated too.
       session.inputEpoch = (session.inputEpoch || 0) + 1;
+      session.cli = null; // the CLI is gone; the next one has to be identified again
       this.revokeInputFor(session, 'shell_prompt');
+      this.pushPaneState(session.viewId);
+    } else if (event === 'cli_banner') {
+
+      this.cliSeen(session, session.lastBanner);
     } else if (event === 'exited') {
       // The pane's process ended: both switches go OFF (a restarted shell is a new generation).
       this.arbiter.sessionChanged(session.sessionId, 'STATE_CONFLICT');
@@ -380,7 +395,7 @@ class IntegrationController {
     const session = this.sessionFor(viewId, termId);
     if (!session) return null;
     const grant = this.access.active(session.sessionId);
-    return { sessionId: session.sessionId, generation: session.generation, grantId: grant ? grant.grant_id : null, inputEpoch: session.inputEpoch || 0, profileId: session.inputProfile ? session.inputProfile.id : null };
+    return { sessionId: session.sessionId, generation: session.generation, grantId: grant ? grant.grant_id : null, inputEpoch: session.inputEpoch || 0, profileId: session.inputProfile ? session.inputProfile.id : null, cliKey: this.cliTarget(session).key };
   }
 
   grantInput(viewId, termId, expect = null) {
@@ -390,10 +405,12 @@ class IntegrationController {
     if (session.lifecycle !== 'alive') throw new Error('This terminal is not running.');
     if (!this.inputGate().open) throw new Error('Terminal input is not enabled.');
     if (!session.inputProfile) throw new Error('Choose a CLI input profile first.');
+    const cliTarget = this.cliTarget(session);
+    if (!cliTarget.usable) throw new Error(cliTarget.message);
     if (expect) {
       const now = this.inputTarget(viewId, termId);
       if (!now || now.sessionId !== expect.sessionId || now.generation !== expect.generation || !expect.grantId || now.grantId !== expect.grantId
-        || now.inputEpoch !== expect.inputEpoch || now.profileId !== expect.profileId) {
+        || now.inputEpoch !== expect.inputEpoch || now.profileId !== expect.profileId || now.cliKey !== expect.cliKey) {
         throw new Error('The terminal changed while the dialog was open (CLI exited, profile changed, or pane restarted). Turn Input ON again.');
       }
     }
@@ -407,6 +424,179 @@ class IntegrationController {
   revokeInput(viewId, termId) {
     const session = this.sessionFor(viewId, termId);
     if (session) this.revokeInputFor(session, 'user_stopped');
+  }
+
+  // --- which CLI / version the pane's input goes to ---
+  // Identified from the pane's OWN output (the CLI's startup banner, source 'pane_output') or by the
+  // user ('user_confirmed'). A version found by running the CLI in another process is never used:
+  // PATH can start a different install than the one in the pane.
+
+  compatApprovals(profileId) {
+    const all = this.settingsIntegration().compatApprovals;
+    const list = all && typeof all === 'object' && Array.isArray(all[profileId]) ? all[profileId] : [];
+    return list.filter((v) => typeof v === 'string');
+  }
+
+  cliStatus(session) {
+    const b = session.inputProfile;
+    const profile = b ? findProfile(b.id, b.revision) : null;
+    const st = versionStatus(profile, session.cli, profile ? this.compatApprovals(profile.id) : []);
+    return { ...st, profile };
+  }
+
+  // For the arbiter: may input go to this pane now, and a key that changes with CLI/version/status.
+  cliTarget(session) {
+    const st = this.cliStatus(session);
+    const cli = session.cli;
+    // Not the evidence source: the same CLI / version confirmed again by its banner is the same target.
+    const key = [st.profile ? st.profile.id : '-', cli ? cli.family : '-', cli ? cli.version : '-', st.status].join('|');
+    const messages = {
+      unknown: 'The CLI version running in this terminal is unknown. Confirm it in Workbench (pane menu), or restart the CLI while Read Sharing is on.',
+      family_mismatch: 'The CLI running in this terminal does not match the selected input profile.',
+      major_changed: 'The CLI in this terminal is a different major version than the verified ones; the input profile has to be measured again.',
+      compat_pending: 'The CLI version in this terminal is not verified; the user has to allow compatible behaviour for it in Workbench.'
+    };
+    return { usable: st.usable, key, message: messages[st.status] || null, status: st.status };
+  }
+
+  // A CLI banner appeared in the pane: a (new) CLI started. A different CLI or version is a new
+  // input target: input (and skipping confirmations) stops until the user turns it on again.
+  cliSeen(session, cli) {
+    if (!cli) return;
+    const prev = session.cli;
+    const changed = !prev || prev.family !== cli.family || prev.version !== cli.version;
+    session.cli = { family: cli.family, version: cli.version, source: 'pane_output', at: this.now() };
+    if (changed) {
+      session.inputEpoch = (session.inputEpoch || 0) + 1;
+      this.revokeInputFor(session, 'cli_changed');
+      this.audit.record({ event: 'cli_detected', session_id: session.sessionId, generation: session.generation, reason: `${cli.family} ${cli.version}` });
+    }
+    this.pushPaneState(session.viewId);
+  }
+
+  // The user states which version runs in the pane (when no banner was seen). Never turns input on.
+  confirmCliVersion(viewId, termId, version, expect) {
+    const session = this.sessionFor(viewId, termId);
+    const st = session && this.cliStatus(session);
+    if (!session || !st.profile) throw new Error('Choose a CLI input profile first.');
+    // The dialog's snapshot: same pane incarnation, input period, profile and CLI state as shown.
+    const now = this.inputTarget(viewId, termId);
+    if (!expect || !now || now.sessionId !== expect.sessionId || now.generation !== expect.generation || !expect.grantId || now.grantId !== expect.grantId
+      || now.inputEpoch !== expect.inputEpoch || now.profileId !== expect.profileId || now.cliKey !== expect.cliKey) {
+      throw new Error('The terminal changed while the dialog was open. Check the version again.');
+    }
+    if (!st.profile.verified_versions.includes(String(version))) throw new Error('Only a verified version can be confirmed by the user.');
+    const prev = session.cli;
+    if (prev && prev.source === 'pane_output') throw new Error('The version was already seen in this pane\'s output.');
+    session.cli = { family: st.profile.cli_family, version: String(version), source: 'user_confirmed', at: this.now() };
+    if (!prev || prev.version !== session.cli.version) {
+      session.inputEpoch = (session.inputEpoch || 0) + 1;
+      this.revokeInputFor(session, 'cli_changed');
+    }
+    this.audit.record({ event: 'cli_user_confirmed', session_id: session.sessionId, generation: session.generation, reason: `${session.cli.family} ${session.cli.version}` });
+    this.pushPaneState(viewId);
+  }
+
+  // Allow compatible behaviour for one unverified version of the same major (remembered, so the same
+  // version is not asked again). Does NOT turn sharing, input or skip-confirmation on.
+  approveCompat(profileId, version) {
+    const profile = findProfile(profileId);
+    if (!profile) throw new Error('Unknown profile.');
+    const st = versionStatus(profile, { family: profile.cli_family, version }, []);
+    if (st.status !== 'compat_pending') throw new Error('Only an unverified version of a verified major version can be allowed.');
+    const all = { ...(this.settingsIntegration().compatApprovals || {}) };
+    all[profileId] = [...new Set([...(Array.isArray(all[profileId]) ? all[profileId] : []), version])].slice(-20);
+    this.saveIntegration({ compatApprovals: all });
+    this.audit.record({ event: 'compat_approved', reason: `${profileId} ${version}` });
+    for (const s2 of this.registry.sessions.values()) this.pushPaneState(s2.viewId);
+  }
+
+  // --- staged observation after Enter (advisory) ---
+
+  outputMark(session) {
+    const buffer = session.buffer;
+    if (!buffer || !session.captureId) return null;
+    return { captureId: session.captureId, epoch: buffer.epoch, pos: buffer.endPosition(), abs: buffer.appended, pauses: buffer.pauses, paused: !!buffer.paused || session.capture !== 'active' };
+  }
+
+  // Something else starts producing output in this pane: the next AI input, the user typing, the
+  // CLI (re)starting, the shell prompt. Output after it never counts for an earlier operation.
+  // The first boundary after an operation's Enter is stored ON the operation (its window end),
+  // so later events can never move it.
+  // offset: bytes of the current, not yet stored chunk that come before the event (banner/prompt).
+  observationBoundary(session, reason, offset = 0) {
+    const buffer = session.buffer;
+    if (!buffer || !session.captureId) return;
+    const at = buffer.appended + (session.capture === 'active' && !buffer.paused ? offset : 0);
+    const end = { captureId: session.captureId, epoch: buffer.epoch, abs: at, pauses: buffer.pauses, reason };
+    for (const op of this.arbiter.ops.values()) {
+      if (op.sessionId === session.sessionId && op.submitMark && !op.windowEnd) op.windowEnd = end;
+    }
+  }
+
+  // Delivery (text / Enter written) is in op.delivery. This adds what the pane's output showed
+  // AFTER the Enter write: the CLI's busy line (acceptance) and then a reply marker (response).
+  // Only output after the mark counts, so earlier screens and earlier operations never do. Not seeing
+  // something is "not_confirmed", never "not sent".
+  observeOperation(op) {
+    if (!op.submitAt) return null;
+    if (op.finalObservation) return op.finalObservation; // a closed window's result never changes
+    const result = this.computeObservation(op);
+    if (op.windowEnd && result) op.finalObservation = result;
+    return result;
+  }
+
+  computeObservation(op) {
+    const unknown = (why) => ({ basis: 'pane_output_after_enter', advisory: true, cli_acceptance: 'unknown', response: 'unknown', note: why });
+    const session = this.registry.sessions.get(op.sessionId);
+    const mark = op.submitMark;
+    if (!mark) return unknown('no_capture');
+    if (mark.paused) return unknown('capture_paused'); // capture was not recording when Enter went out
+    // The window ends at the first boundary after this Enter (next input, user typing, CLI restart,
+    // shell prompt): another operation's or another program's output never counts for this one.
+    const end = op.windowEnd && op.windowEnd.captureId === mark.captureId && op.windowEnd.epoch === mark.epoch ? op.windowEnd : null;
+    if (op.windowEnd && !end) return unknown('terminal_changed');
+    // A pause INSIDE the window means output may be missing from it.
+    if (end && end.pauses !== mark.pauses) return unknown('capture_paused');
+    // A closed, empty window: final without needing any retained output.
+    if (end && end.abs === mark.abs) {
+      const p = op.profile;
+      return { basis: 'pane_output_after_enter', advisory: true, cli_acceptance: p.acceptMarker ? 'not_confirmed' : 'unknown', response: 'unknown', note: `window_closed:${end.reason}` };
+    }
+    if (!session || session.generation !== op.generation) return unknown('terminal_changed');
+    if (!session.buffer || session.captureId !== mark.captureId || session.buffer.epoch !== mark.epoch) return unknown('no_capture');
+    if (!end && session.buffer.pauses !== mark.pauses) return unknown('capture_paused');
+    const resolved = session.buffer.resolvePosition(mark.pos);
+    if (!resolved.ok || resolved.gap) return unknown('output_not_retained');
+    // The retained output after the mark, page by page, never past the window end (so nothing
+    // after it — a later gap or pause included — can change this operation's result).
+    let budget = end ? Math.max(0, end.abs - mark.abs) : Infinity;
+    let text = '';
+    let pos = resolved.pos;
+    for (let i = 0; i < 64 && budget > 0; i++) {
+      const page = session.buffer.read(pos, Math.min(256 * 1024, budget));
+      if (page.gap) return unknown('output_gap');
+      text += page.text;
+      budget -= page.bytes;
+      pos = page.pos;
+      if (!page.hasMore || !page.bytes) break;
+    }
+    const elapsed = this.now() - op.submitAt;
+    const ACCEPT_WINDOW_MS = 15000;
+    const RESPONSE_WINDOW_MS = 180000;
+    const profile = op.profile;
+    let acceptance = 'unknown';
+    let acceptAt = -1;
+    if (profile.acceptMarker) {
+      acceptAt = text.search(profile.acceptMarker);
+      acceptance = acceptAt >= 0 ? 'observed' : (!end && elapsed < ACCEPT_WINDOW_MS ? 'pending' : 'not_confirmed');
+    }
+    let response = 'unknown';
+    if (profile.responseMarker && acceptAt >= 0) {
+      const found = text.slice(acceptAt).search(profile.responseMarker) >= 0;
+      response = found ? 'observed' : (!end && elapsed < RESPONSE_WINDOW_MS ? 'pending' : 'not_confirmed');
+    }
+    return { basis: 'pane_output_after_enter', advisory: true, cli_acceptance: acceptance, response, note: end ? `window_closed:${end.reason}` : null };
   }
 
   // --- "skip the send confirmation" (per pane, opt-in, OFF by default) ---
@@ -424,12 +614,13 @@ class IntegrationController {
     if (!session.inputProfile) throw new Error('Choose a CLI input profile first.');
     const now = this.inputTarget(viewId, termId);
     if (!expect || !now || now.sessionId !== expect.sessionId || now.generation !== expect.generation || now.grantId !== expect.grantId
-      || now.inputEpoch !== expect.inputEpoch || now.profileId !== expect.profileId) {
+      || now.inputEpoch !== expect.inputEpoch || now.profileId !== expect.profileId || now.cliKey !== expect.cliKey) {
       throw new Error('The terminal changed while the dialog was open. Turn it on again.');
     }
     session.autoConfirm = {
       sessionId: session.sessionId, generation: session.generation, grantId: grant.grant_id, inputEpoch: session.inputEpoch || 0,
-      profileId: session.inputProfile.id, profileRevision: session.inputProfile.revision, sinceSeq: this.arbiter.seq
+      profileId: session.inputProfile.id, profileRevision: session.inputProfile.revision, sinceSeq: this.arbiter.seq,
+      cliKey: this.cliTarget(session).key
     };
     // No state_revision bump: an operation already waiting keeps its own dialogs and stays valid.
     this.audit.record({ event: 'auto_confirm_enabled', principal: grant.principal, session_id: session.sessionId, generation: session.generation, reason: session.inputProfile.id });
@@ -465,7 +656,8 @@ class IntegrationController {
       && ac.inputEpoch === (session.inputEpoch || 0)
       && session.inputProfile && ac.profileId === session.inputProfile.id && ac.profileRevision === session.inputProfile.revision
       && op.profile.id === ac.profileId && op.profile.revision === ac.profileRevision
-      && op.seq > ac.sinceSeq);
+      && op.seq > ac.sinceSeq
+      && ac.cliKey === this.cliTarget(session).key && op.targetKey === ac.cliKey);
   }
 
   // Input switch OFF (read stays): pending AI input stops; nothing dispatched is ever re-sent.
@@ -545,6 +737,8 @@ class IntegrationController {
         // 'off' | 'read' | 'read_input' — what the badge shows.
         state: !grant ? 'off' : (grant.permissions.has('input:write') ? 'read_input' : 'read'),
         autoConfirm: !!(grant && grant.permissions.has('input:write') && session.autoConfirm),
+        cli: session.cli ? { family: session.cli.family, version: session.cli.version, source: session.cli.source } : null,
+        cliStatus: this.cliTarget(session).status,
         integration: this.enabled,
         capture: session.capture,
         sessionId: session.sessionId,

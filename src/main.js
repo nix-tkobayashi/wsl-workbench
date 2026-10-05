@@ -2060,6 +2060,40 @@ async function confirmShare(win, viewId, termId, label) {
   }
 }
 
+// Allow compatible behaviour for one unverified version (same major as a verified one). Remembered
+// for that version; turns nothing on.
+async function confirmApproveCompat(win, viewId, termId) {
+  const pane = integration.paneState(viewId).find((p) => p.id === termId);
+  if (!pane || !pane.cli || pane.cliStatus !== 'compat_pending') return;
+  const { findProfile } = require('./integration/input-profiles');
+  const profile = findProfile(pane.profileId);
+  const detail = tr('integration.compatDetail')
+    .replace('{cli}', `${pane.cli.family} ${pane.cli.version}`)
+    .replace('{source}', tr(`integration.cliSource_${pane.cli.source}`))
+    .replace('{verified}', profile ? profile.verified_versions.join(', ') : '-');
+  const opts = { type: 'warning', title: tr('integration.paneApproveCompat').replace('{v}', pane.cli.version), message: tr('integration.compatMessage').replace('{v}', pane.cli.version), detail, buttons: [tr('integration.compatConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
+  const { response } = await dialog.showMessageBox(win, opts);
+  if (response !== 0) return;
+  const now = integration.paneState(viewId).find((p) => p.id === termId);
+  if (!now || !now.cli || now.cli.version !== pane.cli.version || now.profileId !== pane.profileId) return;
+  try { integration.approveCompat(pane.profileId, pane.cli.version); } catch (error) { dialog.showErrorBox(tr('integration.paneInputSwitch'), error.message || String(error)); }
+}
+
+// The CLI started before sharing (no banner seen): the user states which version runs in the pane.
+// Only the profile's verified versions are offered; anything else: restart the CLI while sharing.
+async function confirmCliVersion(win, viewId, termId) {
+  const pane = integration.paneState(viewId).find((p) => p.id === termId);
+  const { findProfile } = require('./integration/input-profiles');
+  const profile = pane && findProfile(pane.profileId);
+  if (!profile) return;
+  const versions = profile.verified_versions;
+  const expect = integration.inputTarget(viewId, termId); // what the dialog is about
+  const opts = { type: 'question', title: tr('integration.paneConfirmCli'), message: tr('integration.confirmCliMessage'), detail: tr('integration.confirmCliDetail').replace('{cli}', profile.cli_name), buttons: [...versions.map((v) => `${profile.cli_name} ${v}`), tr('integration.cancel')], defaultId: versions.length, cancelId: versions.length, noLink: true };
+  const { response } = await dialog.showMessageBox(win, opts);
+  if (response < 0 || response >= versions.length) return;
+  try { integration.confirmCliVersion(viewId, termId, versions[response], expect); } catch (error) { dialog.showErrorBox(tr('integration.paneConfirmCli'), error.message || String(error)); }
+}
+
 // Opt-in per pane: explain once that sends to THIS pane then run without Workbench's confirmation.
 async function confirmAutoConfirm(win, viewId, termId) {
   const session = integration.sessionFor(viewId, termId);
@@ -2124,12 +2158,25 @@ ipcMain.on('integration:paneMenu', (event, { id, label = '', x = 0, y = 0 } = {}
     const gateOpen = integration.inputGate().open;
     if (gateOpen || pane.input) {
       const { verifiedProfiles } = require('./integration/input-profiles');
+      const cliUsable = pane.cliStatus === 'verified' || pane.cliStatus === 'compat_approved';
+      if (pane.shared && pane.profileId) {
+        // Which CLI version input goes to, and how it was established.
+        const cliText = pane.cli ? `${pane.cli.family} ${pane.cli.version}（${tr(`integration.cliSource_${pane.cli.source}`)}）` : tr('integration.cliUnknown');
+        items.push({ label: `CLI: ${cliText} — ${tr(`integration.cliStatus_${pane.cliStatus}`)}`, enabled: false });
+        if (pane.cliStatus === 'compat_pending') {
+          items.push({ label: tr('integration.paneApproveCompat').replace('{v}', pane.cli.version), click: () => confirmApproveCompat(win, viewId, id) });
+        }
+        if (pane.cliStatus === 'unknown' && (!pane.cli || pane.cli.source !== 'pane_output')) {
+          items.push({ label: tr('integration.paneConfirmCli'), click: () => confirmCliVersion(win, viewId, id) });
+        }
+      }
       items.push({
         label: tr('integration.paneInputSwitch'),
         type: 'checkbox',
         checked: pane.input,
-        // ON only on top of read sharing, with the gate open and a CLI profile chosen; OFF always.
-        enabled: pane.input || (pane.shared && gateOpen && !!pane.profileId),
+        // ON only on top of read sharing, with the gate open, a CLI profile chosen and a usable
+        // (verified or approved-compatible) CLI version; OFF always.
+        enabled: pane.input || (pane.shared && gateOpen && !!pane.profileId && cliUsable),
         click: () => { if (pane.input) integration.revokeInput(viewId, id); else confirmAllowInput(win, viewId, id); }
       });
       items.push({

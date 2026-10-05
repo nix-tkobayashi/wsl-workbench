@@ -705,6 +705,7 @@ function renderShareBadges() {
     const auto = state === 'read_input' && !!st.autoConfirm;
     const parts = [t(auto ? 'integration.badge_read_input_auto' : `integration.badge_${state}`)];
     if (state !== 'off' && st.capture === 'paused') parts.push(t('integration.badgeCapturePaused'));
+    if (state === 'read_input' && st.cliStatus === 'compat_approved') parts.push(t('integration.badgeCompat').replace('{v}', st.cli ? st.cli.version : '?'));
     if (state === 'read_input' && st.inputPaused) parts.push(t('integration.badgeInputPaused'));
     if (st.pendingStage) parts.push(t('integration.badgePending'));
     entry.shareBadge.classList.toggle('off', state === 'off');

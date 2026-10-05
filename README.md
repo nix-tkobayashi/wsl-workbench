@@ -254,6 +254,40 @@ process, and `taskkill /F` of only the helper each left no tunnel-client / wrapp
 process; restarting right after a forced kill ran exactly one tunnel-client; with a hand-started
 tunnel-client running, the app refused (`already_running`).
 
+### CLI versions and input profiles (v0.31.0)
+
+A profile describes a CLI family and its input method (one line, text and Enter as separate
+writes, the submit delay). The versions it was actually measured with are listed separately
+(`verified_versions`, also in `capabilities`); a profile is never "verified for all of 2.x".
+Profile IDs are unchanged.
+
+| CLI in the pane | Input |
+| --- | --- |
+| a verified version | allowed as before |
+| same major, not verified (for 0.x: same minor) | blocked until you choose **⇪ > Allow Compatible Behaviour for X.Y.Z...** once; remembered per version |
+| another major / another CLI | blocked (the profile has to be measured again) |
+| unknown | blocked until identified |
+
+- The version is taken only from the pane's own output (the CLI's startup banner, shown as "seen in
+  this pane") or from you (**⇪ > Confirm the CLI Version (yourself)...**, "confirmed by you", verified
+  versions only). Running `claude --version` in another process is never used: PATH can start a
+  different install (an old one was found this way). If the CLI started before sharing, either
+  confirm it yourself or restart it while Read Sharing is on.
+- A new CLI or a different version appearing in the pane (banner) or the shell prompt returning
+  turns Input (and skipping confirmations) OFF; turn it on again for the new target. Approving
+  compatible behaviour never turns sharing, input or skipping confirmations on.
+- `get_session.input_profile.cli_version` = `{ value, source: pane_output | user_confirmed | unknown,
+  status }`.
+
+**Staged result after Enter.** `get_operation` keeps its structured fields (no tool update needed)
+and adds a text line: *Observation (advisory): CLI acceptance = observed / pending / not_confirmed /
+unknown, response = …*. Only output captured after Enter counts (an earlier "esc to interrupt" or
+reply never does); acceptance = the CLI's busy line, response = a reply marker after it (Claude Code
+only; Codex: unknown). `not_confirmed` / `unknown` never mean "not sent"; nothing is re-sent and no
+extra Enter is pressed. Limits: the markers are screen text and can change with a CLI update (then
+`not_confirmed` / `unknown`), hook messages can look like a reply, and a full-screen redraw after
+Enter may repaint old lines.
+
 ### Skipping the send confirmation (per pane, opt-in, v0.30.0)
 
 **⇪ > Skip Send Confirmation (this pane only)...** (only while Input is ON) makes text AND Enter

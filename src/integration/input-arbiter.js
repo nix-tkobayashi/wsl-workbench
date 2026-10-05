@@ -44,9 +44,19 @@ class InputArbiter {
     confirmMs = CONFIRM_MS, writesPerMinute = WRITES_PER_MINUTE, onChange = () => {},
     // Per-pane "skip Workbench's send confirmation" (controller decides): (op, stage) => boolean.
     // Re-asked right before every step and every write; false means the normal dialog.
-    autoApprove = () => false
+    autoApprove = () => false,
+    // Which CLI / version the pane's input goes to, as the controller judges it:
+    // (session) => { usable, key, message }. key changes when the CLI, its version or the status do.
+    targetState = () => ({ usable: true, key: '' }),
+    // Where the pane's captured output ends right now (observation after Enter), and what was seen
+    // after that mark: (session) => mark | null, (op) => observation object.
+    outputMark = () => null,
+    observe = () => null,
+    // An input write is about to start for a session: ends the observation window of earlier
+    // operations there (their result must never be judged from this one's output).
+    noteDispatch = () => {}
   }) {
-    Object.assign(this, { registry, access, store, writePty, requestConfirmation, cancelConfirmation, cursorAt, audit, isGateOpen, now, randomUUID, confirmMs, writesPerMinute, onChange, autoApprove });
+    Object.assign(this, { registry, access, store, writePty, requestConfirmation, cancelConfirmation, cursorAt, audit, isGateOpen, now, randomUUID, confirmMs, writesPerMinute, onChange, autoApprove, targetState, outputMark, observe, noteDispatch });
     this.seq = 0; // accept order: auto-approval only applies to operations accepted after it was enabled
     this.ops = new Map();       // op id -> live operation (this process)
     this.pending = new Map();   // session id -> op
@@ -103,6 +113,8 @@ class InputArbiter {
     if (req.contract === 'actions-v1' && (args.profile_id !== profile.id || args.profile_revision !== profile.revision)) {
       return fail('STATE_CONFLICT', 'profile_id / profile_revision do not match the profile selected in Workbench. Refresh the session.');
     }
+    const cliTarget = this.targetStateOf(session);
+    if (!cliTarget.usable) return fail('STATE_CONFLICT', cliTarget.message || 'The CLI version in this terminal has to be confirmed in Workbench first.');
     let textBytes = 0;
     if (req.kind === 'text' || req.kind === 'text_and_submit') {
       const checked = checkText(req.text, { profile, legacy: req.legacy });
@@ -150,7 +162,8 @@ class InputArbiter {
       reservedRevision: session.stateRevision, stateRevisionAfter: null, error: null,
       expiresAt: t + this.store.retentionMs, awaiting: null, confirmDeadline: null, timer: null,
       textWrittenAt: null, outputStart: null, outputEnd: null, version: 0, waiters: new Set(),
-      seq: ++this.seq, autoApproved: new Set() // stages approved by the per-pane setting, not a dialog
+      seq: ++this.seq, autoApproved: new Set(), // stages approved by the per-pane setting, not a dialog
+      targetKey: cliTarget.key, submitMark: null, submitAt: null, windowEnd: null
     };
     this.ops.set(id, op);
     this.pending.set(session.sessionId, op);
@@ -190,6 +203,17 @@ class InputArbiter {
       return;
     }
     this.showDialog(op, stage);
+  }
+
+  targetStateOf(session) {
+    try { return this.targetState(session) || { usable: false, key: '' }; } catch { return { usable: false, key: '' }; }
+  }
+
+  // Remember where the pane's output stood when Enter was written (observation looks only after it).
+  markSubmit(op) {
+    const session = this.registry.sessions.get(op.sessionId);
+    try { op.submitMark = session ? this.outputMark(session) : null; } catch { op.submitMark = null; }
+    op.submitAt = this.now();
   }
 
   isAutoApproved(op, stage) {
@@ -240,6 +264,9 @@ class InputArbiter {
     if (!binding || binding.id !== op.profile.id || binding.revision !== op.profile.revision) return 'STATE_CONFLICT';
     if (session.inputPaused) return 'USER_INTERVENED';
     if (session.stateRevision !== op.reservedRevision) return 'STATE_CONFLICT';
+    // The CLI / version the operation was accepted for must still be the one in the pane, and usable.
+    const cliTarget = this.targetStateOf(session);
+    if (!cliTarget.usable || cliTarget.key !== op.targetKey) return 'STATE_CONFLICT';
     // A step approved by the per-pane setting (not by a dialog) stops if the setting went away.
     for (const stage of op.autoApproved) if (!this.isAutoApproved(op, stage)) return 'PERMISSION_DENIED';
     return null;
@@ -285,8 +312,10 @@ class InputArbiter {
       this.stop(op, late);
       return;
     }
+    try { const s2 = this.registry.sessions.get(op.sessionId); if (s2) this.noteDispatch(s2); } catch {}
     try {
       if (isKey) {
+        if (op.key === 'Enter') this.markSubmit(op);
         this.write(op, keyBytes(op.profile, op.key));
         op.delivery.key_state = 'library_accepted';
       } else {
@@ -317,6 +346,7 @@ class InputArbiter {
       code = this.now() > submitBy ? 'CONFIRMATION_EXPIRED' : this.revalidate(op);
       if (code) { this.stop(op, code); return; }
       try {
+        this.markSubmit(op);
         this.write(op, keyBytes(op.profile, 'Enter'));
         op.delivery.submit_state = 'library_accepted';
       } catch {
@@ -458,6 +488,11 @@ class InputArbiter {
       error: op.error ? errorObject(op.error.code, op.error.message, op.id, op.status) : null,
       idempotency_expires_at: iso(op.expiresAt)
     };
+    // Staged observation after Enter (advisory; never a reason to resend). The MCP adapter moves it
+    // out of the structured result into the text, so the tool output schema stays unchanged.
+    let observation = null;
+    try { observation = this.observe(op); } catch { observation = null; }
+    if (observation) out.observation = observation;
     if (!full) return out;
     return {
       ...out,
