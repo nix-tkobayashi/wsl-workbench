@@ -52,7 +52,7 @@ async function setup({ settings = {}, clock } = {}) {
   ctl.share(1, 1);
   const s = ctl.registry.bySlot(1, 1);
   const pane = () => ctl.paneState(1)[0];
-  const banner = (v, family = 'claude') => ctl.ptyData(1, 1, family === 'claude' ? `\r\n ✻ Welcome to Claude Code v${v}\r\n` : `>_ OpenAI Codex (v${v})\r\n`);
+  const banner = (v, family = 'claude') => ctl.ptyData(1, 1, family === 'claude' ? `\r\n ✻ Welcome to ▐▛███▜▌ Claude Code v${v}\r\n` : `>_ OpenAI Codex (v${v})\r\n`);
   const send = (text, profile = CLAUDE) => ctl.broker.handle(ctl.principal, 'workbench_write_input', {
     target: ctl.registry.target(s), expected_state_revision: String(s.stateRevision), idempotency_key: `k-${crypto.randomUUID()}`,
     input_contract: 'actions-v1', profile_id: profile, profile_revision: '1', action: { type: 'text_and_submit', text, submit_key: 'Enter' }
@@ -80,10 +80,11 @@ test('versionStatus: verified / same-major unverified / approved / major change 
 });
 
 test('banner detection: last banner wins; split across chunks', posixOnly, async () => {
-  assert.deepEqual(detectCli('Claude Code v2.1.287 ... Claude Code v2.1.300 '), { family: 'claude-code', version: '2.1.300', end: 45 });
+  assert.deepEqual(detectCli('▐▛███▜▌ Claude Code v2.1.287 ... ▐▛███▜▌ Claude Code v2.1.300 '), { family: 'claude-code', version: '2.1.300', end: 61 });
+  assert.equal(detectCli('see Claude Code v2.1.287 in the README '), null, 'a version in ordinary text is not a banner');
   const t = await setup();
   try {
-    t.ctl.ptyData(1, 1, 'Welcome to Claude Co');
+    t.ctl.ptyData(1, 1, '▐▛███▜▌ Welcome to Claude Co');
     t.ctl.ptyData(1, 1, 'de v2.1.287\r\n');
     assert.deepEqual(t.pane().cli, { family: 'claude-code', version: '2.1.287', source: 'pane_output' });
   } finally { await t.ctl.shutdown(); }
@@ -236,7 +237,7 @@ test('observation unknown when output is gone (cleared / capture restarted): nev
     await sleep(100);
     assert.deepEqual(t.writes, ['x', '\r']);
     // A text-only operation (no Enter) has no observation.
-    t.ctl.ptyData(1, 1, ' Claude Code v2.1.287\r\n');
+    t.ctl.ptyData(1, 1, ' ▐▛███▜▌ Claude Code v2.1.287\r\n');
     const k = t.ctl.broker.handle(t.ctl.principal, 'workbench_write_input', {
       target: t.ctl.registry.target(t.s), expected_state_revision: String(t.s.stateRevision), idempotency_key: 'k-text',
       input_contract: 'actions-v1', profile_id: CLAUDE, profile_revision: '1', action: { type: 'text', text: 'y' }
@@ -250,15 +251,17 @@ test('codex: banner + shell prompt in one chunk -> unknown; share OFF/ON forgets
   const t = await setup();
   try {
     t.ctl.selectProfile(1, 1, CLAUDE);
-    t.ctl.ptyData(1, 1, ' Claude Code v2.1.287\r\nbye\r\n\x1b]7;file:///w\x07$ ');
+    t.ctl.ptyData(1, 1, ' ▐▛███▜▌ Claude Code v2.1.287\r\nbye\r\n\x1b]7;file:///w\x07$ ');
     assert.equal(t.pane().cli, null, 'the CLI exited in the same chunk');
     assert.throws(() => t.ctl.grantInput(1, 1), /unknown/);
     t.banner('2.1.287');
     assert.equal(t.pane().cliStatus, 'verified');
     t.ctl.stopSharing(1, 1);
     t.ctl.share(1, 1);
-    assert.equal(t.pane().cli, null, 'nothing was observed while sharing was off');
-    t.ctl.ptyData(1, 1, 'Welcome to Claude Code v2.1.28');
+    assert.equal(t.pane().cli.version, '2.1.287', 'the CLI is still known: banners are tracked while not shared (metadata only)');
+    t.ctl.ptyData(1, 1, '\x1b]7;file:///w\x07$ ');
+    assert.equal(t.pane().cli, null);
+    t.ctl.ptyData(1, 1, '▐▛███▜▌ Welcome to Claude Code v2.1.28');
     assert.equal(t.pane().cli, null, 'not taken before the number is complete');
     t.ctl.ptyData(1, 1, '7\r\n');
     assert.deepEqual(t.pane().cli, { family: 'claude-code', version: '2.1.287', source: 'pane_output' });
@@ -269,7 +272,7 @@ test('codex: a second, still incomplete banner is not lost; a stale version dial
   const t = await setup();
   try {
     t.ctl.selectProfile(1, 1, CLAUDE);
-    t.ctl.ptyData(1, 1, ' Claude Code v2.1.287\r\n Claude Code v3.0.');
+    t.ctl.ptyData(1, 1, ' ▐▛███▜▌ Claude Code v2.1.287\r\n ▐▛███▜▌ Claude Code v3.0.');
     assert.equal(t.pane().cli.version, '2.1.287');
     t.ctl.ptyData(1, 1, '0\r\n');
     assert.equal(t.pane().cli.version, '3.0.0');
@@ -289,9 +292,9 @@ test('codex: stream order — prompt then a CLI started from it (same chunk) ide
   const t = await setup();
   try {
     t.ctl.selectProfile(1, 1, CLAUDE);
-    t.ctl.ptyData(1, 1, '\x1b]7;file:///w\x07$ claude\r\n Claude Code v2.1.287\r\n');
+    t.ctl.ptyData(1, 1, '\x1b]7;file:///w\x07$ claude\r\n ▐▛███▜▌ Claude Code v2.1.287\r\n');
     assert.deepEqual(t.pane().cli, { family: 'claude-code', version: '2.1.287', source: 'pane_output' });
-    t.ctl.ptyData(1, 1, ' Claude Code v2.1.287\r\nbye\r\n\x1b]7;file:///w\x07$ ');
+    t.ctl.ptyData(1, 1, ' ▐▛███▜▌ Claude Code v2.1.287\r\nbye\r\n\x1b]7;file:///w\x07$ ');
     assert.equal(t.pane().cli, null, 'banner then prompt: the CLI exited');
   } finally { await t.ctl.shutdown(); }
 });
@@ -303,7 +306,7 @@ test('codex: every banner in a chunk counts (Codex then Claude again still revok
     t.ctl.selectProfile(1, 1, CLAUDE);
     t.ctl.grantInput(1, 1);
     t.ctl.enableAutoConfirm(1, 1, t.ctl.inputTarget(1, 1));
-    t.ctl.ptyData(1, 1, '>_ OpenAI Codex (v0.160.0)\r\n Claude Code v2.1.287\r\n');
+    t.ctl.ptyData(1, 1, '>_ OpenAI Codex (v0.160.0)\r\n ▐▛███▜▌ Claude Code v2.1.287\r\n');
     assert.equal(t.pane().state, 'read');
     assert.equal(t.pane().autoConfirm, false);
   } finally { await t.ctl.shutdown(); }
@@ -329,19 +332,19 @@ test('codex: a reply after more than one page of output is still observed', posi
 test('codex: a prerelease / build suffix is a different (unverified) version', posixOnly, async () => {
   const c = findProfile(CLAUDE);
   assert.equal(versionStatus(c, { family: 'claude-code', version: '2.1.287-beta.1' }).status, 'compat_pending');
-  assert.deepEqual(detectCli('Claude Code v2.1.287-beta.1 '), { family: 'claude-code', version: '2.1.287-beta.1', end: 27 });
+  assert.deepEqual(detectCli('▐▛███▜▌ Claude Code v2.1.287-beta.1 '), { family: 'claude-code', version: '2.1.287-beta.1', end: 35 });
   assert.equal(detectCli('>_ OpenAI Codex (v0.160.0-alpha.2)').version, '0.160.0-alpha.2');
   const t = await setup();
   try {
     t.ctl.selectProfile(1, 1, CLAUDE);
-    t.ctl.ptyData(1, 1, ' Claude Code v2.1.287-beta.1\r\n');
+    t.ctl.ptyData(1, 1, ' ▐▛███▜▌ Claude Code v2.1.287-beta.1\r\n');
     assert.equal(t.pane().cliStatus, 'compat_pending');
     assert.throws(() => t.ctl.grantInput(1, 1), /not verified/);
   } finally { await t.ctl.shutdown(); }
 });
 
 test('codex: prerelease + build suffix; a version dialog from an earlier share is refused', posixOnly, async () => {
-  assert.equal(detectCli('Claude Code v2.1.287-beta.1+build.5 ').version, '2.1.287-beta.1+build.5');
+  assert.equal(detectCli('▐▛███▜▌ Claude Code v2.1.287-beta.1+build.5 ').version, '2.1.287-beta.1+build.5');
   assert.equal(versionStatus(findProfile(CLAUDE), { family: 'claude-code', version: '2.1.287-beta.1+build.5' }).status, 'compat_pending');
   const t = await setup();
   try {
@@ -462,7 +465,7 @@ test('review: the window end is fixed per operation (many later events, a later 
 });
 
 test('review: A\'s output earlier in the same chunk as the next banner / prompt still counts for A', posixOnly, async () => {
-  for (const after of [' Claude Code v2.1.287\r\n', '\x1b]7;file:///w\x07$ ']) {
+  for (const after of [' ▐▛███▜▌ Claude Code v2.1.287\r\n', '\x1b]7;file:///w\x07$ ']) {
     const t = await setup();
     try {
       t.banner('2.1.287');
@@ -482,7 +485,7 @@ test('review: A\'s output earlier in the same chunk as the next banner / prompt 
 test('review: several prompts / banners in one chunk close the window at the earliest one', posixOnly, async () => {
   for (const chunk of [
     '\x1b]7;file:///w\x07$ ✻ (esc to interrupt)\r\n⏺ later\r\n\x1b]7;file:///w\x07$ ',
-    ' Claude Code v2.1.287\r\n✻ (esc to interrupt)\r\n⏺ later\r\n\x1b]7;file:///w\x07$ '
+    ' ▐▛███▜▌ Claude Code v2.1.287\r\n✻ (esc to interrupt)\r\n⏺ later\r\n\x1b]7;file:///w\x07$ '
   ]) {
     const t = await setup();
     try {

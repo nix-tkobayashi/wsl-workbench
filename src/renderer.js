@@ -706,8 +706,9 @@ function renderShareBadges() {
     const parts = [t(auto ? 'integration.badge_read_input_auto' : `integration.badge_${state}`)];
     if (state !== 'off' && st.capture === 'paused') parts.push(t('integration.badgeCapturePaused'));
     if (state === 'read_input' && st.cliStatus === 'compat_approved') parts.push(t('integration.badgeCompat').replace('{v}', st.cli ? st.cli.version : '?'));
+    if (state === 'read_input' && st.cliStatus === 'unknown_allowed') parts.push(t('integration.badgeUnknownAllowed'));
     // Shared with the saved default but input is waiting for the CLI to be identified / allowed.
-    if (state === 'read' && st.presetInput) parts.push(t(`integration.badgeWaiting_${['unknown', 'compat_pending'].includes(st.cliStatus) ? st.cliStatus : 'blocked'}`));
+    if (state === 'read' && st.presetInput) parts.push(t(`integration.badgeWaiting_${['unknown', 'compat_pending', 'major_changed'].includes(st.cliStatus) ? st.cliStatus : 'blocked'}`));
     if (state === 'read_input' && st.inputPaused) parts.push(t('integration.badgeInputPaused'));
     if (st.pendingStage) parts.push(t('integration.badgePending'));
     entry.shareBadge.classList.toggle('off', state === 'off');

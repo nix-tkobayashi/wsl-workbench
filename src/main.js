@@ -2061,41 +2061,54 @@ async function confirmShare(win, viewId, termId, label) {
   }
 }
 
-// Allow compatible behaviour for one unverified version (same major as a verified one). Remembered
-// for that version; turns nothing on.
+function cliName(family) { return family === 'claude-code' ? 'Claude Code' : family === 'codex' ? 'Codex' : family; }
+
+// "Claude Code 2.1.289（ペインの起動表示）— 未検証・互換方針 2.x で許可" etc.
+function cliLine(pane) {
+  if (!pane.cli) return `${tr('integration.cliUnknown')} — ${tr('integration.cliStatus_unknown')}`;
+  const version = pane.cli.version || tr('integration.cliVersionUnknown');
+  const status = pane.cliStatus === 'compat_approved' && pane.cliBasis === 'policy'
+    ? tr('integration.cliStatus_compat_policy').replace('{line}', pane.cliLine)
+    : tr(`integration.cliStatus_${pane.cliStatus}`);
+  return `${cliName(pane.cli.family)} ${version}（${tr(`integration.cliSource_${pane.cli.source}`)}） — ${status}`;
+}
+
+// Allow compatible behaviour for a whole compatibility line (major; 0.x: minor) of the CLI in this
+// pane — risk explained here once. Turns nothing on by itself (only an already-shared pane with the
+// saved default gets that default).
 async function confirmApproveCompat(win, viewId, termId) {
   const pane = integration.paneState(viewId).find((p) => p.id === termId);
-  if (!pane || !pane.cli || pane.cliStatus !== 'compat_pending') return;
+  if (!pane || !pane.cli || !pane.cliLine || !['compat_pending', 'major_changed'].includes(pane.cliStatus)) return;
   const { findProfile } = require('./integration/input-profiles');
   const profile = findProfile(pane.profileId);
-  const detail = tr('integration.compatDetail')
-    .replace('{cli}', `${pane.cli.family} ${pane.cli.version}`)
-    .replace('{source}', tr(`integration.cliSource_${pane.cli.source}`))
+  const major = pane.cliStatus === 'major_changed';
+  const detail = tr(major ? 'integration.compatMajorDetail' : 'integration.compatLineDetail')
+    .replace(/\{cli\}/g, cliName(pane.cli.family))
+    .replace(/\{line\}/g, pane.cliLine)
+    .replace('{version}', pane.cli.version)
     .replace('{verified}', profile ? profile.verified_versions.join(', ') : '-');
-  const opts = { type: 'warning', title: tr('integration.paneApproveCompat').replace('{v}', pane.cli.version), message: tr('integration.compatMessage').replace('{v}', pane.cli.version), detail, buttons: [tr('integration.compatConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
+  const title = tr(major ? 'integration.paneApproveMajor' : 'integration.paneApproveLine').replace('{cli}', cliName(pane.cli.family)).replace('{line}', pane.cliLine);
+  const opts = { type: 'warning', title, message: title, detail, buttons: [tr('integration.compatConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
   const { response } = await dialog.showMessageBox(win, opts);
   if (response !== 0) return;
   const now = integration.paneState(viewId).find((p) => p.id === termId);
-  if (!now || !now.cli || now.cli.version !== pane.cli.version || now.profileId !== pane.profileId) return;
-  try { integration.approveCompat(pane.profileId, pane.cli.version); } catch (error) { dialog.showErrorBox(tr('integration.paneInputSwitch'), error.message || String(error)); }
+  if (!now || !now.cli || now.cli.family !== pane.cli.family || now.cliLine !== pane.cliLine) return;
+  try { integration.approveCompatLine(pane.cli.family, pane.cliLine); } catch (error) { dialog.showErrorBox(title, error.message || String(error)); }
 }
 
-// The CLI started before sharing (no banner seen): the user states which version runs in the pane.
-// Only the profile's verified versions are offered; anything else: restart the CLI while sharing.
-async function confirmCliVersion(win, viewId, termId) {
+// The CLI's version is unknown (started before Workbench saw it, or its banner changed): the user
+// confirms which CLI is running in the pane; input is then allowed for THIS run only.
+async function confirmAllowUnknownVersion(win, viewId, termId) {
   const pane = integration.paneState(viewId).find((p) => p.id === termId);
   if (!pane) return;
-  const { verifiedProfiles, findProfile } = require('./integration/input-profiles');
-  // The pane's profile if one is chosen, otherwise every verified CLI (the choice picks the profile).
-  const profiles = pane.profileId ? [findProfile(pane.profileId)].filter(Boolean) : verifiedProfiles();
-  const choices = profiles.flatMap((p) => p.verified_versions.map((v) => ({ profile: p, version: v })));
-  if (!choices.length) return;
-  const expect = integration.inputTarget(viewId, termId); // what the dialog is about
-  const opts = { type: 'question', title: tr('integration.paneConfirmCli'), message: tr('integration.confirmCliMessage'), detail: tr('integration.confirmCliDetail').replace(/\{cli\}/g, profiles.map((p) => p.cli_name).join(' / ')), buttons: [...choices.map((c) => `${c.profile.cli_name} ${c.version}`), tr('integration.cancel')], defaultId: choices.length, cancelId: choices.length, noLink: true };
+  const { verifiedProfiles } = require('./integration/input-profiles');
+  const families = [...new Set(verifiedProfiles().map((p) => p.cli_family))].filter((f) => !pane.cli || !pane.cli.family || pane.cli.family === f);
+  if (!families.length) return;
+  const expect = integration.inputTarget(viewId, termId);
+  const opts = { type: 'warning', title: tr('integration.paneAllowUnknown'), message: tr('integration.allowUnknownMessage'), detail: tr('integration.allowUnknownDetail'), buttons: [...families.map((f) => tr('integration.allowUnknownButton').replace('{cli}', cliName(f))), tr('integration.cancel')], defaultId: families.length, cancelId: families.length, noLink: true };
   const { response } = await dialog.showMessageBox(win, opts);
-  if (response < 0 || response >= choices.length) return;
-  const c = choices[response];
-  try { integration.confirmCliVersion(viewId, termId, c.version, expect, c.profile.id); } catch (error) { dialog.showErrorBox(tr('integration.paneConfirmCli'), error.message || String(error)); }
+  if (response < 0 || response >= families.length) return;
+  try { integration.allowUnknownVersion(viewId, termId, families[response], expect); } catch (error) { dialog.showErrorBox(tr('integration.paneAllowUnknown'), error.message || String(error)); }
 }
 
 // Opt-in per pane: explain once that sends to THIS pane then run without Workbench's confirmation.
@@ -2162,13 +2175,13 @@ ipcMain.on('integration:paneMenu', (event, { id, label = '', x = 0, y = 0 } = {}
     });
     // Only what needs the user now: an unverified version to allow, or an unknown version to confirm.
     if (pane.shared && (pane.presetInput || pane.profileId)) {
-      const cliText = pane.cli ? `${pane.cli.family} ${pane.cli.version}（${tr(`integration.cliSource_${pane.cli.source}`)}）` : tr('integration.cliUnknown');
-      items.push({ label: `CLI: ${cliText} — ${tr(`integration.cliStatus_${pane.cliStatus}`)}`, enabled: false });
-      if (pane.cliStatus === 'compat_pending' && pane.cli) {
-        items.push({ label: tr('integration.paneApproveCompat').replace('{v}', pane.cli.version), click: () => confirmApproveCompat(win, viewId, id) });
+      items.push({ label: `CLI: ${cliLine(pane)}`, enabled: false });
+      if ((pane.cliStatus === 'compat_pending' || pane.cliStatus === 'major_changed') && pane.cli && pane.cliLine) {
+        const key = pane.cliStatus === 'major_changed' ? 'integration.paneApproveMajor' : 'integration.paneApproveLine';
+        items.push({ label: tr(key).replace('{cli}', cliName(pane.cli.family)).replace('{line}', pane.cliLine), click: () => confirmApproveCompat(win, viewId, id) });
       }
-      if (pane.cliStatus === 'unknown' && (!pane.cli || pane.cli.source !== 'pane_output')) {
-        items.push({ label: tr('integration.paneConfirmCli'), click: () => confirmCliVersion(win, viewId, id) });
+      if (pane.cliStatus === 'unknown' && (!pane.cli || !pane.cli.version)) {
+        items.push({ label: tr('integration.paneAllowUnknown'), click: () => confirmAllowUnknownVersion(win, viewId, id) });
       }
     }
     if (pane.input) {

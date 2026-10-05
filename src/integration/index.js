@@ -488,11 +488,65 @@ class IntegrationController {
     return list.filter((v) => typeof v === 'string');
   }
 
+  // Compatibility lines ("2", or "0.160" for 0.x) the user allowed as a policy per CLI family:
+  // integration.compatPolicy = { 'claude-code': ['2'], ... }.
+  compatLines(family) {
+    const all = this.settingsIntegration().compatPolicy;
+    const list = all && typeof all === 'object' && Array.isArray(all[family]) ? all[family] : [];
+    return list.filter((v) => typeof v === 'string');
+  }
+
   cliStatus(session) {
     const b = session.inputProfile;
     const profile = b ? findProfile(b.id, b.revision) : null;
-    const st = versionStatus(profile, session.cli, profile ? this.compatApprovals(profile.id) : []);
+    const st = versionStatus(profile, session.cli, profile ? this.compatApprovals(profile.id) : [], profile ? this.compatLines(profile.cli_family) : []);
     return { ...st, profile };
+  }
+
+  // Allow compatible behaviour for a whole compatibility line of a CLI family (risk explained once
+  // in the dialog). Later versions in that line need no new approval; another major (for 0.x
+  // another minor) asks again. Turns nothing on by itself: only panes already shared with the
+  // user's saved default (and waiting for exactly this line) get that default applied.
+  approveCompatLine(family, line) {
+    const profile = verifiedProfiles().find((p) => p.cli_family === family);
+    if (!profile) throw new Error('Unknown CLI.');
+    if (!/^(\d+|0\.\d+)$/.test(String(line))) throw new Error('Invalid version line.');
+    // Panes WAITING for exactly this policy, decided before saving it (others are left alone).
+    const waiting = [...this.registry.sessions.values()].filter((s2) => {
+      const st = this.cliStatus(s2);
+      return s2.cli && s2.cli.family === family && st.line === String(line) && (st.status === 'compat_pending' || st.status === 'major_changed');
+    });
+    const all = { ...(this.settingsIntegration().compatPolicy || {}) };
+    all[family] = [...new Set([...(Array.isArray(all[family]) ? all[family] : []), String(line)])].slice(-20);
+    this.saveIntegration({ compatPolicy: all });
+    this.audit.record({ event: 'compat_policy_approved', reason: `${family} ${line}.x` });
+    for (const s2 of waiting) this.safe(() => this.applyPreset(s2));
+    for (const s2 of this.registry.sessions.values()) this.pushPaneState(s2.viewId);
+  }
+
+  // The version cannot be identified (the CLI started before Workbench could see its banner, or the
+  // banner changed): the user confirms WHICH CLI runs in the pane and allows input with an unknown
+  // version. Valid only for this CLI run: the shell prompt, a banner, the pane ending clear it. Not
+  // "verified". Refused if the pane's own output shows another CLI.
+  allowUnknownVersion(viewId, termId, family, expect) {
+    const session = this.sessionFor(viewId, termId);
+    if (!session || session.lifecycle !== 'alive') throw new Error('This terminal is not running.');
+    const profile = verifiedProfiles().find((p) => p.cli_family === family);
+    if (!profile) throw new Error('Unknown CLI.');
+    if (session.cli && session.cli.version) throw new Error('The version is known; this is only for an unknown version.');
+    if (session.cli && session.cli.family && session.cli.family !== family) throw new Error('Another CLI was seen in this pane.');
+    const now = this.inputTarget(viewId, termId);
+    if (!expect || !now || now.sessionId !== expect.sessionId || now.generation !== expect.generation || now.grantId !== expect.grantId
+      || now.inputEpoch !== expect.inputEpoch || now.profileId !== expect.profileId || now.cliKey !== expect.cliKey) {
+      throw new Error('The terminal changed while the dialog was open. Check again.');
+    }
+    if (!session.inputProfile || session.inputProfile.id !== profile.id) this.selectProfile(viewId, termId, profile.id);
+    session.cli = { family, version: null, source: 'user_confirmed', unknownVersionAllowed: true, at: this.now() };
+    session.inputEpoch = (session.inputEpoch || 0) + 1;
+    this.revokeInputFor(session, 'cli_changed');
+    this.audit.record({ event: 'cli_unknown_version_allowed', session_id: session.sessionId, generation: session.generation, reason: family });
+    this.safe(() => this.applyPreset(session));
+    this.pushPaneState(viewId);
   }
 
   // For the arbiter: may input go to this pane now, and a key that changes with CLI/version/status.
@@ -504,8 +558,8 @@ class IntegrationController {
     const messages = {
       unknown: 'The CLI version running in this terminal is unknown. Confirm it in Workbench (pane menu), or restart the CLI while Read Sharing is on.',
       family_mismatch: 'The CLI running in this terminal does not match the selected input profile.',
-      major_changed: 'The CLI in this terminal is a different major version than the verified ones; the input profile has to be measured again.',
-      compat_pending: 'The CLI version in this terminal is not verified; the user has to allow compatible behaviour for it in Workbench.'
+      major_changed: 'The CLI in this terminal is a different major version than the verified ones; the user has to confirm compatible behaviour for that major version in Workbench.',
+      compat_pending: 'The CLI version in this terminal is not verified; the user has to allow compatible behaviour for its major version in Workbench.'
     };
     return { usable: st.usable, key, message: messages[st.status] || null, status: st.status };
   }
@@ -568,13 +622,14 @@ class IntegrationController {
     if (!profile) throw new Error('Unknown profile.');
     const st = versionStatus(profile, { family: profile.cli_family, version }, []);
     if (st.status !== 'compat_pending') throw new Error('Only an unverified version of a verified major version can be allowed.');
+    const waitingIds = new Set([...this.registry.sessions.values()].filter((s2) => this.cliStatus(s2).status === 'compat_pending').map((s2) => s2.sessionId));
     const all = { ...(this.settingsIntegration().compatApprovals || {}) };
     all[profileId] = [...new Set([...(Array.isArray(all[profileId]) ? all[profileId] : []), version])].slice(-20);
     this.saveIntegration({ compatApprovals: all });
     this.audit.record({ event: 'compat_approved', reason: `${profileId} ${version}` });
     for (const s2 of this.registry.sessions.values()) {
       // Only panes that were waiting for exactly this approval.
-      if (s2.cli && s2.cli.family === profile.cli_family && s2.cli.version === version) this.safe(() => this.applyPreset(s2));
+      if (s2.cli && s2.cli.family === profile.cli_family && s2.cli.version === version && waitingIds.has(s2.sessionId)) this.safe(() => this.applyPreset(s2));
       this.pushPaneState(s2.viewId);
     }
   }
@@ -809,6 +864,8 @@ class IntegrationController {
         autoConfirm: !!(grant && grant.permissions.has('input:write') && session.autoConfirm),
         cli: session.cli ? { family: session.cli.family, version: session.cli.version, source: session.cli.source } : null,
         cliStatus: this.cliTarget(session).status,
+        cliBasis: this.cliStatus(session).basis || null,
+        cliLine: this.cliStatus(session).line || null,
         presetShare: !!(grant && session.presetShare),
         presetInput: !!(grant && session.presetShare && this.sharePreset() && this.sharePreset().input),
         integration: this.enabled,
