@@ -719,8 +719,13 @@ async function checkForUpdatesInBackground(reason = 'startup') {
   try { latest = await fetchLatestRelease(); } catch { latest = null; } finally {
     updateCheck = { lastCheckAt: Date.now(), inFlight: false };
   }
-  if (!latest || !latest.version || !isNewer(latest.version, app.getVersion())) return;
-  if (startupUpdate && !isNewer(latest.version, startupUpdate.version)) return; // already announced
+  announceUpdate(latest);
+}
+
+// Light the toolbar update button for a newer release, whoever found it (background check or the
+// About dialog), unless that release was already announced.
+function announceUpdate(latest) {
+  if (!latest || !updateSchedule.shouldAnnounce({ latest: latest.version, current: app.getVersion(), announced: startupUpdate && startupUpdate.version })) return;
   startupUpdate = latest;
   // The update button lives in the workspace toolbar, so notify every open view (not shells).
   for (const state of viewState.values()) {
@@ -770,6 +775,7 @@ ipcMain.handle('update:install', (event) => {
 async function showAboutDialog(win) {
   const current = app.getVersion();
   const latest = await fetchLatestRelease();
+  announceUpdate(latest); // a newer release found here also shows the toolbar button right away
 
   const lines = [`${tr('about.currentVersion')}: ${current}`];
   // Buttons and a parallel list of click actions (null = just dismiss). Index 0 is the default.
