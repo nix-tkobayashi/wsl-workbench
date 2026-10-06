@@ -186,8 +186,9 @@ const DIVIDER_WIDTH = 3;    // keep in step with .term-divider { flex-basis } in
 const TERMINAL_SCROLLBACK = 10000; // lines kept per terminal pane (xterm default is 1000)
 const splitTerminalBtn = document.getElementById('splitTerminalBtn');
 // Declared up here (not with the rest of the dots-integration code below) because pane focus
-// changes call updateShareButton() as soon as the first terminal exists.
+// changes call renderShareBadges() as soon as the first terminal exists.
 const shareTerminalBtn = document.getElementById('shareTerminalBtn');
+const termShareBadge = document.getElementById('termShareBadge');
 let paneShareState = new Map(); // pane id -> { state, shared, input, capture, ... } (pushed by main)
 
 function splitAvailabilityFor(group) {
@@ -229,7 +230,7 @@ function activateTerminal(groupId) {
     g.tab.classList.toggle('active', on);
   }
   updateSplitButton();
-  updateShareButton();
+  renderShareBadges();
   setTimeout(() => {
     fitGroupPanes(group);
     const focus = terminals.get(group.activePaneId);
@@ -275,7 +276,7 @@ function setActivePane(group, paneId) {
   group.activePaneId = paneId;
   refreshPaneChrome(group);
   refreshTabSegmentFocus(group);
-  updateShareButton();
+  renderShareBadges(); // the tab-strip badge follows the focused pane
 }
 
 // Every PANE has its own name (Cursor-style): custom when set, else localized "Terminal <pane id>".
@@ -327,6 +328,7 @@ function renderTermTab(group) {
     });
     label.appendChild(el);
   });
+  renderShareBadges(); // rebuilt segments lose their sharing marks
 }
 
 // Double-click a tab segment to rename that pane (empty input restores the default name).
@@ -509,7 +511,7 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   const id = nextTermId++;
   const host = document.createElement('div');
   host.className = 'term-pane';
-  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null, shareBadge: null };
+  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null };
   if (group.paneIds.length > 0) {
     entry.divider = makeTermDivider(group);
     group.container.appendChild(entry.divider);
@@ -547,12 +549,6 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   host.appendChild(closeBtn);
   // Track which pane holds focus (xterm's textarea focus bubbles as focusin).
   host.addEventListener('focusin', () => setActivePane(group, id));
-  // dots integration: "shared" badge, shown only while main reports a live grant for this pane.
-  const shareBadge = document.createElement('div');
-  shareBadge.className = 'term-share-badge';
-  shareBadge.hidden = true;
-  host.appendChild(shareBadge);
-  entry.shareBadge = shareBadge;
   terminals.set(id, entry);
   wireTerminal(entry);
   group.paneIds.push(id);
@@ -671,6 +667,7 @@ function disposeAllTerminals() {
   terminals.clear();
   termGroups.clear();
   activeGroupId = null;
+  renderShareBadges();
 }
 
 window.api.onTerminalData(({ id, data }) => {
@@ -694,39 +691,41 @@ document.getElementById('splitTerminalBtn').addEventListener('click', () => spli
 // --- dots integration: the main process owns sharing (grants, confirmation dialogs, expiry). The
 // renderer only opens main's per-pane menu for the focused pane and mirrors the state it pushes. ---
 
-// One badge per pane, always naming the current state of the two switches: "共有OFF" /
-// "読取ON・入力OFF" / "読取ON・入力ON" (plus capture paused / AI input paused / confirm pending).
+// One badge at the right end of the terminal tab strip, always naming the focused pane's two
+// switches: "共有OFF" / "読取ON・入力OFF" / "読取ON・入力ON" (plus capture paused / AI input paused /
+// confirm pending). It used to overlay each pane's top-right corner and hid terminal text. Shared
+// panes that aren't focused keep a coloured mark on their tab segment instead.
 function renderShareBadges() {
-  for (const entry of terminals.values()) {
-    if (!entry.shareBadge) continue;
-    const st = paneShareState.get(entry.id);
-    const show = !!(st && st.integration);
-    entry.shareBadge.hidden = !show;
-    if (!show) continue;
-    const state = st.state || 'off';
-    const auto = state === 'read_input' && !!st.autoConfirm;
-    const parts = [t(auto ? 'integration.badge_read_input_auto' : `integration.badge_${state}`)];
-    if (state !== 'off' && st.capture === 'paused') parts.push(t('integration.badgeCapturePaused'));
-    if (state === 'read_input' && st.cliStatus === 'compat_approved') parts.push(t('integration.badgeCompat').replace('{v}', st.cli ? st.cli.version : '?'));
-    if (state === 'read_input' && st.cliStatus === 'unknown_allowed') parts.push(t('integration.badgeUnknownAllowed'));
-    // Shared with the saved default but input is waiting for the CLI to be identified / allowed.
-    if (state === 'read' && st.presetInput) parts.push(t(`integration.badgeWaiting_${['unknown', 'compat_pending', 'major_changed'].includes(st.cliStatus) ? st.cliStatus : 'blocked'}`));
-    if (state === 'read_input' && st.inputPaused) parts.push(t('integration.badgeInputPaused'));
-    if (st.pendingStage) parts.push(t('integration.badgePending'));
-    entry.shareBadge.classList.toggle('off', state === 'off');
-    entry.shareBadge.classList.toggle('paused', state !== 'off' && st.capture === 'paused');
-    entry.shareBadge.classList.toggle('input', state === 'read_input');
-    entry.shareBadge.classList.toggle('pending', !!st.pendingStage);
-    entry.shareBadge.classList.toggle('auto', auto);
-    entry.shareBadge.textContent = parts.join(' · ');
-    if (auto) {
+  for (const group of termGroups.values()) {
+    const label = group.tab && group.tab.querySelector('.term-tab-label');
+    if (!label) continue;
+    for (const el of label.querySelectorAll('.term-tab-seg')) {
+      const mark = window.terminalActions.shareSegmentMark(paneShareState.get(Number(el.dataset.paneId)));
+      el.classList.toggle('share-read', mark === 'read');
+      el.classList.toggle('share-input', mark === 'input');
+      el.classList.toggle('share-auto', mark === 'auto');
+    }
+  }
+  const entry = activeTerminal();
+  const model = entry ? window.terminalActions.shareBadgeModel(paneShareState.get(entry.id)) : null;
+  termShareBadge.hidden = !model;
+  termShareBadge.textContent = '';
+  if (model) {
+    for (const cls of ['off', 'paused', 'input', 'pending', 'auto']) termShareBadge.classList.toggle(cls, model[cls]);
+    const text = document.createElement('span');
+    text.className = 'term-share-text';
+    text.textContent = model.parts.map((p) => t(p.key).replace('{v}', p.v == null ? '' : p.v)).join(' · ');
+    termShareBadge.title = text.textContent;
+    termShareBadge.appendChild(text);
+    if (model.auto) {
       // Sends run without Workbench's confirmation: one click turns input OFF for this pane.
       const stop = document.createElement('button');
       stop.type = 'button';
       stop.className = 'term-share-stop';
       stop.textContent = t('integration.badgeStopInput');
-      stop.addEventListener('click', (event) => { event.stopPropagation(); window.api.integrationStopInput({ id: entry.id }); });
-      entry.shareBadge.appendChild(stop);
+      const id = entry.id;
+      stop.addEventListener('click', (event) => { event.stopPropagation(); window.api.integrationStopInput({ id }); });
+      termShareBadge.appendChild(stop);
     }
   }
   updateShareButton();

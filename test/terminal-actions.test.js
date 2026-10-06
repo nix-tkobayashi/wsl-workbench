@@ -185,3 +185,40 @@ test('splitAvailability: pane cap and available width both gate splitting (#84)'
   assert.equal(splitAvailability({ count: 1, width: 250, paneMinWidth: 100, dividerWidth: 50 }), 'ok');
   assert.equal(splitAvailability({ count: 1, width: 249, paneMinWidth: 100, dividerWidth: 50 }), 'room');
 });
+
+// dots sharing badge (moved from a per-pane overlay to the terminal tab strip so it no longer
+// hides terminal text).
+const { shareBadgeModel, shareSegmentMark } = require('../src/terminal-actions.js');
+
+test('shareBadgeModel: no integration → no badge', () => {
+  assert.equal(shareBadgeModel(null), null);
+  assert.equal(shareBadgeModel({ state: 'read' }), null);
+});
+
+test('shareBadgeModel: auto-confirm input names the state and flags auto', () => {
+  const m = shareBadgeModel({ integration: true, state: 'read_input', autoConfirm: true, cliStatus: 'unknown_allowed', inputPaused: true });
+  assert.deepEqual(m.parts.map((p) => p.key), ['integration.badge_read_input_auto', 'integration.badgeUnknownAllowed', 'integration.badgeInputPaused']);
+  assert.equal(m.auto, true);
+  assert.equal(m.input, true);
+  assert.equal(m.off, false);
+});
+
+test('shareBadgeModel: compat version, waiting, pending and paused parts', () => {
+  assert.deepEqual(shareBadgeModel({ integration: true, state: 'read_input', cliStatus: 'compat_approved', cli: { version: '2.1.289' } }).parts[1], { key: 'integration.badgeCompat', v: '2.1.289' });
+  assert.equal(shareBadgeModel({ integration: true, state: 'read', presetInput: true, cliStatus: 'weird' }).parts[1].key, 'integration.badgeWaiting_blocked');
+  const m = shareBadgeModel({ integration: true, state: 'read', capture: 'paused', pendingStage: 'x' });
+  assert.deepEqual(m.parts.map((p) => p.key), ['integration.badge_read', 'integration.badgeCapturePaused', 'integration.badgePending']);
+  assert.equal(m.paused, true);
+  assert.equal(m.pending, true);
+  const off = shareBadgeModel({ integration: true, state: 'off', capture: 'paused' });
+  assert.equal(off.off, true);
+  assert.equal(off.paused, false);
+});
+
+test('shareSegmentMark marks only shared panes, auto above input above read', () => {
+  assert.equal(shareSegmentMark(undefined), null);
+  assert.equal(shareSegmentMark({ integration: true, state: 'off' }), null);
+  assert.equal(shareSegmentMark({ integration: true, state: 'read' }), 'read');
+  assert.equal(shareSegmentMark({ integration: true, state: 'read_input' }), 'input');
+  assert.equal(shareSegmentMark({ integration: true, state: 'read_input', autoConfirm: true }), 'auto');
+});

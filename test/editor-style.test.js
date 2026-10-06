@@ -73,3 +73,17 @@ test('terminal keeps 10k scrollback and an always-visible, grabbable scrollbar t
   assert.ok(minH - 6 >= 40, `thumb should draw at least 40px, got ${minH - 6}`);
   assert.doesNotMatch(ruleBody('.xterm-viewport::-webkit-scrollbar-track'), /background:\s*transparent/);
 });
+
+// The dots badge used to be absolutely positioned over each pane's top-right corner and hid
+// terminal text; it now lives in the terminal tab strip, after the share button.
+test('dots share badge sits in the terminal tab strip, not over the terminal', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.html'), 'utf8');
+  const strip = html.match(/<div id="terminalTabs">([\s\S]*?)<\/div>\s*<div id="terminalHost">/);
+  assert.ok(strip, 'index.html should have #terminalTabs followed by #terminalHost');
+  assert.match(strip[1], /id="shareTerminalBtn"[\s\S]*id="termShareBadge"/);
+  const body = ruleBody('.term-share-badge');
+  assert.doesNotMatch(body, /position:\s*absolute/);
+  assert.match(body, /margin-left:\s*auto/);
+  const js = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
+  assert.doesNotMatch(js, /host\.appendChild\(shareBadge\)/);
+});
