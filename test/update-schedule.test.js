@@ -20,3 +20,14 @@ test('focus re-checks at most every 15 minutes; the hourly timer re-checks every
 test('a clock moved back does not postpone the next check', () => {
   assert.equal(shouldCheck({ now: 10, lastCheckAt: 1_000_000, inFlight: false, reason: 'focus' }), true);
 });
+
+const { shouldAnnounce } = require('../src/update-schedule');
+
+test('shouldAnnounce: only a release newer than both the app and the last announcement', () => {
+  assert.equal(shouldAnnounce({ latest: '0.35.0', current: '0.34.0', announced: null }), true);
+  assert.equal(shouldAnnounce({ latest: 'v0.35.0', current: '0.34.0', announced: undefined }), true);
+  assert.equal(shouldAnnounce({ latest: '0.34.0', current: '0.34.0', announced: null }), false);
+  assert.equal(shouldAnnounce({ latest: '0.35.0', current: '0.34.0', announced: '0.35.0' }), false); // About after the timer found it
+  assert.equal(shouldAnnounce({ latest: '0.36.0', current: '0.34.0', announced: '0.35.0' }), true);
+  assert.equal(shouldAnnounce({ latest: null, current: '0.34.0', announced: null }), false);
+});
