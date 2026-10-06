@@ -191,17 +191,26 @@ body.resizing iframe { pointer-events:none; }
 #splitTerminalBtn:disabled { opacity:.4; cursor:default; }
 #splitTerminalBtn:disabled:hover { background:transparent; color:var(--muted); }
 #splitTerminalBtn { font-size:13px; }
-/* dots integration: share button (acts on the focused pane) and the per-pane sharing badge. */
+/* The dots badge shrinks (ellipsis) on a narrow strip; the tabs and buttons keep their size. */
+#terminalTabList, #newTerminalBtn, #splitTerminalBtn, #shareTerminalBtn { flex-shrink:0; }
+/* dots integration: share button and the sharing badge (both act on the focused pane), at the right end of the tab strip. */
 #shareTerminalBtn { background:transparent; border:0; color:var(--muted); font-size:13px; line-height:1; padding:2px 8px; border-radius:4px; cursor:pointer; }
 #shareTerminalBtn:hover { background:var(--hover); color:var(--text); }
 #shareTerminalBtn.shared { color:#e8a33d; }
-.term-share-badge { position:absolute; top:2px; right:36px; z-index:20; padding:1px 6px; border-radius:4px; background:rgba(120,72,0,.9); color:#fff; font-size:11px; line-height:16px; pointer-events:none; white-space:nowrap; }
+.term-share-badge { display:flex; align-items:center; flex-shrink:1; min-width:0; margin-left:auto; padding:1px 6px; border-radius:4px; background:rgba(120,72,0,.9); color:#fff; font-size:11px; line-height:16px; white-space:nowrap; }
+.term-share-badge[hidden] { display:none; }
+.term-share-text { overflow:hidden; text-overflow:ellipsis; min-width:0; }
 .term-share-badge.paused { background:rgba(80,80,80,.9); }
 .term-share-badge.input { background:rgba(150,40,40,.92); }
-.term-share-badge.pending { outline:2px solid #ffd479; }
+.term-share-badge.pending { outline:2px solid #ffd479; outline-offset:-2px; }
 .term-share-badge.off { background:rgba(60,60,60,.75); color:#bbb; }
-.term-share-badge.auto { background:#c0181f; outline:2px solid #ffd479; font-weight:600; }
-.term-share-stop { pointer-events:auto; margin-left:6px; padding:0 6px; font:inherit; font-size:11px; line-height:14px; border:1px solid #fff; border-radius:3px; background:#fff; color:#c0181f; font-weight:700; cursor:pointer; }
+.term-share-badge.auto { background:#c0181f; outline:2px solid #ffd479; outline-offset:-2px; font-weight:600; }
+/* Shared panes keep a mark on their tab segment, so sharing stays visible when another pane or tab is focused. */
+.term-tab-seg.share-read::before, .term-tab-seg.share-input::before, .term-tab-seg.share-auto::before { content:''; display:inline-block; width:7px; height:7px; margin-right:4px; border-radius:50%; vertical-align:middle; }
+.term-tab-seg.share-read::before { background:#e8a33d; }
+.term-tab-seg.share-input::before { background:#e05050; }
+.term-tab-seg.share-auto::before { background:#ff2a2a; box-shadow:0 0 0 2px #ffd479; }
+.term-share-stop { flex-shrink:0; margin-left:6px; padding:0 6px; font:inherit; font-size:11px; line-height:14px; border:1px solid #fff; border-radius:3px; background:#fff; color:#c0181f; font-weight:700; cursor:pointer; }
 .term-share-stop:hover { background:#ffd479; }
 #terminalHost { position:relative; flex:1; min-height:0; }
 /* Each tab is a GROUP of 1..N side-by-side panes in a flex row. Inset rather than padding: the

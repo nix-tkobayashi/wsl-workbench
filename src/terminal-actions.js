@@ -82,7 +82,41 @@
     return next * paneMinWidth + (next - 1) * dividerWidth <= width ? 'ok' : 'room';
   }
 
-  const terminalActions = { splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments };
+  // dots sharing badge for one pane, from the state main pushes: null when the pane has no
+  // integration, else the i18n parts (joined with " · ") and the style flags. The badge sits at the
+  // right end of the terminal tab strip and describes the FOCUSED pane of the active tab.
+  function shareBadgeModel(st) {
+    if (!st || !st.integration) return null;
+    const state = st.state || 'off';
+    const auto = state === 'read_input' && !!st.autoConfirm;
+    const parts = [{ key: auto ? 'integration.badge_read_input_auto' : `integration.badge_${state}` }];
+    if (state !== 'off' && st.capture === 'paused') parts.push({ key: 'integration.badgeCapturePaused' });
+    if (state === 'read_input' && st.cliStatus === 'compat_approved') parts.push({ key: 'integration.badgeCompat', v: st.cli ? st.cli.version : '?' });
+    if (state === 'read_input' && st.cliStatus === 'unknown_allowed') parts.push({ key: 'integration.badgeUnknownAllowed' });
+    // Shared with the saved default but input is waiting for the CLI to be identified / allowed.
+    if (state === 'read' && st.presetInput) parts.push({ key: `integration.badgeWaiting_${['unknown', 'compat_pending', 'major_changed'].includes(st.cliStatus) ? st.cliStatus : 'blocked'}` });
+    if (state === 'read_input' && st.inputPaused) parts.push({ key: 'integration.badgeInputPaused' });
+    if (st.pendingStage) parts.push({ key: 'integration.badgePending' });
+    return {
+      parts,
+      auto,
+      off: state === 'off',
+      paused: state !== 'off' && st.capture === 'paused',
+      input: state === 'read_input',
+      pending: !!st.pendingStage
+    };
+  }
+
+  // Per-pane mark on the tab segments, so a shared pane that isn't focused (another split pane or
+  // another tab) still shows it is shared: 'auto' (input without confirmation), 'input', 'read', or
+  // null when the pane isn't shared.
+  function shareSegmentMark(st) {
+    const model = shareBadgeModel(st);
+    if (!model || model.off) return null;
+    return model.auto ? 'auto' : model.input ? 'input' : 'read';
+  }
+
+  const terminalActions = { shareBadgeModel, shareSegmentMark, splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = terminalActions;
   }
