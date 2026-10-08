@@ -40,6 +40,32 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 #cwd.paste-target { box-shadow: inset 2px 0 0 var(--accent); color:var(--text); }
 #treePane.drag-over { outline:2px dashed var(--accent); outline-offset:-2px; }
 #cwd:empty { display:none; }
+.cwd-iconbtn { flex:0 0 auto; padding:1px 4px; background:transparent; border:0; border-radius:4px; font-size:12px; line-height:1; opacity:.6; cursor:pointer; }
+.cwd-iconbtn:hover:not(:disabled) { background:var(--hover); opacity:1; }
+.cwd-iconbtn.active { opacity:1; background:#2b2b2b; }
+/* Workspace secrets panel: pinned to the bottom of the tree pane (sticky inside its scroller),
+   with its own scrolling list so a long tree never pushes it out of view. */
+#secretsPanel { position:sticky; bottom:-8px; margin:8px -8px -8px; padding:6px 8px 8px; background:var(--panel); border-top:1px solid var(--border); display:flex; flex-direction:column; gap:4px; max-height:45vh; z-index:5; }
+#secretsPanel.hidden { display:none; }
+.secrets-head { display:flex; align-items:center; justify-content:space-between; color:var(--muted); font-size:12px; }
+.secrets-title { font-weight:600; }
+.secrets-notice { color:#e5a050; font-size:12px; }
+.secrets-notice.hidden, .secrets-import.hidden { display:none; }
+.secrets-import { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text); background:#2a2a1e; border:1px solid #4a4a2e; border-radius:4px; padding:4px 6px; }
+.secrets-import span { flex:1 1 auto; min-width:0; }
+.secrets-import button { padding:2px 8px; font-size:12px; }
+#secretsList { min-height:0; overflow-y:auto; }
+.secrets-empty { color:var(--muted); font-size:12px; padding:2px 4px; }
+.secret-row { display:flex; align-items:center; gap:2px; padding:2px 4px; border-radius:4px; }
+.secret-row:hover, .secret-row.revealed { background:var(--hover); }
+.secret-key { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:Consolas, "Cascadia Mono", monospace; font-size:12px; }
+.secret-mask { flex:1 1 auto; min-width:0; overflow:hidden; color:var(--muted); font-size:11px; padding:0 6px; letter-spacing:1px; white-space:nowrap; }
+.secret-btn { flex:0 0 auto; padding:1px 5px; background:transparent; border:0; border-radius:4px; color:var(--muted); font-size:12px; line-height:1.2; cursor:pointer; }
+.secret-btn:hover:not(:disabled) { background:#3a3a3a; color:var(--text); }
+.secret-btn.danger:hover:not(:disabled) { color:#ff7b7b; }
+.secret-reveal { margin:0 4px 4px; padding:6px 8px; max-height:160px; overflow:auto; background:#181818; border:1px solid var(--border); border-radius:4px; font-family:Consolas, "Cascadia Mono", monospace; font-size:12px; white-space:pre-wrap; word-break:break-all; color:var(--text); }
+.secrets-add { align-self:flex-start; padding:2px 8px; font-size:12px; background:transparent; border:1px dashed #555; color:var(--muted); }
+.secrets-add:hover:not(:disabled) { color:var(--text); }
 #rightPane { display:grid; grid-template-rows: 38% 1px 1fr; min-width:0; min-height:0; }
 #editorPane { min-height:120px; overflow:hidden; display:flex; flex-direction:column; position:relative; }
 /* Find & replace widget, floated over the top-right of the editor (VS Code style). */
@@ -90,7 +116,7 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 /* The UI is always dark, so force dark native scrollbars on every scrollable pane (otherwise they
    render light when the Windows "app mode" is Light, showing white bars on the dark UI). Scoped to
    the scroll containers so form-control rendering elsewhere is untouched. */
-#editor, .xterm-viewport, #treePane, #editorPreview, #landingRecentList, #unsupportedView, #terminalTabs { color-scheme: dark; }
+#editor, .xterm-viewport, #treePane, #editorPreview, #landingRecentList, #unsupportedView, #terminalTabs, #secretsList, .secret-reveal, #secretValueInput { color-scheme: dark; }
 /* Force a classic, always-visible scrollbar on the terminal viewport. The native (overlay) dark
    scrollbar auto-hides and, with a large scrollback, its thumb shrinks until it vanishes. The
    ::-webkit-scrollbar rules restore a persistent track; customizing the thumb, however, drops
@@ -186,8 +212,9 @@ body.resizing iframe { pointer-events:none; }
 .term-tab-sep { opacity:.55; }
 .term-tab .term-tab-close { width:14px; text-align:center; border-radius:3px; color:var(--muted); }
 .term-tab .term-tab-close:hover { background:#555; color:#fff; }
-#newTerminalBtn, #splitTerminalBtn { background:transparent; border:0; color:var(--muted); font-size:16px; line-height:1; padding:2px 8px; border-radius:4px; cursor:pointer; }
-#newTerminalBtn:hover, #splitTerminalBtn:hover { background:var(--hover); color:var(--text); }
+#newTerminalBtn, #splitTerminalBtn, #secretsTerminalBtn { background:transparent; border:0; color:var(--muted); font-size:16px; line-height:1; padding:2px 8px; border-radius:4px; cursor:pointer; }
+#newTerminalBtn:hover, #splitTerminalBtn:hover, #secretsTerminalBtn:hover { background:var(--hover); color:var(--text); }
+#secretsTerminalBtn { font-size:12px; padding:3px 6px; }
 #splitTerminalBtn:disabled { opacity:.4; cursor:default; }
 #splitTerminalBtn:disabled:hover { background:transparent; color:var(--muted); }
 #splitTerminalBtn { font-size:13px; }
@@ -312,6 +339,12 @@ body.resizing iframe { pointer-events:none; }
 .modal-message { color:var(--text); font-size:13px; margin-bottom:10px; }
 #promptInput { width:100%; box-sizing:border-box; background:#181818; color:var(--text); border:1px solid #444; border-radius:6px; padding:8px 10px; font-size:13px; font-family: Consolas, "Cascadia Mono", monospace; outline:none; }
 #promptInput:focus { border-color:var(--accent); }
+.secret-modal-box { width:520px; }
+.secret-field { display:flex; flex-direction:column; gap:4px; margin-bottom:10px; color:var(--muted); font-size:12px; }
+#secretKeyInput, #secretValueInput { width:100%; box-sizing:border-box; background:#181818; color:var(--text); border:1px solid #444; border-radius:6px; padding:8px 10px; font-size:13px; font-family: Consolas, "Cascadia Mono", monospace; outline:none; }
+#secretValueInput { resize:vertical; min-height:120px; overflow:auto; }
+#secretKeyInput:focus, #secretValueInput:focus { border-color:var(--accent); }
+.secret-error { min-height:16px; color:#ff7b7b; font-size:12px; }
 .modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }
 .modal-actions button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
 .modal-actions button.primary:hover:not(:disabled) { background:#739bff; }

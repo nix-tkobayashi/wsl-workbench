@@ -914,6 +914,8 @@ function buildAppMenu() {
     {
       label: tr('menu.view'),
       submenu: [
+        { label: tr('menu.toggleSecrets'), accelerator: 'CmdOrCtrl+Shift+K', click: () => sendToFocusedWindow('menu:toggleSecrets') },
+        { type: 'separator' },
         { role: 'reload', label: tr('menu.reload') },
         { role: 'forceReload', label: tr('menu.forceReload') },
         { role: 'toggleDevTools', label: tr('menu.toggleDevTools') },
@@ -1601,6 +1603,290 @@ ipcMain.on('terminal:close', (event, { id }) => {
   if (integration) integration.ptyClosed(event.sender.id, id);
 });
 
+// --- Workspace secrets (src/secrets.js): stored encrypted under userData, handed to the terminal
+// as the path of a tmpfs copy in WSL. The renderer only ever names a key; the workspace is always
+// the sender view's own, so one view can't reach another workspace's secrets. ---
+const secretsLib = require('./secrets');
+let secretStore = null;
+function getSecretStore() {
+  if (!secretStore) {
+    secretStore = new secretsLib.SecretStore({
+      dir: path.join(app.getPath('userData'), 'secrets'),
+      encrypt: (s) => safeStorage.encryptString(s),
+      decrypt: (b) => safeStorage.decryptString(b),
+      available: () => safeStorage.isEncryptionAvailable()
+    });
+  }
+  return secretStore;
+}
+const secretDistros = new Set();      // distros holding copies written this session (removed at quit)
+const secretPaths = new Map();        // `${workspaceId}/${key}` -> WSL path of its copy
+const restoredSecretWorkspaces = new Set(); // workspace ids whose copies were re-created this session
+const secretPathKey = (ws, key) => `${secretsLib.workspaceId(ws)}/${key}`;
+const pendingSecretWrites = new Set(); // in-flight copy writes (quit waits for them before cleanup)
+let secretsClosing = false;           // set at quit: no new copies are written after cleanup starts
+
+function runWsl(args, input, timeout = 15000) {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let done = false;
+    const finish = (res) => { if (!done) { done = true; clearTimeout(timer); resolve(res); } };
+    const child = require('child_process').spawn('wsl.exe', args, { windowsHide: true });
+    const timer = setTimeout(() => { try { child.kill(); } catch {} finish({ code: -1, stdout, error: 'timeout' }); }, timeout);
+    child.stdout.on('data', (d) => { stdout += d.toString('utf8'); });
+    child.stderr.on('data', () => {});
+    child.on('error', (error) => finish({ code: -1, stdout, error: error.message || String(error) }));
+    child.on('close', (code) => finish({ code, stdout }));
+    child.stdin.on('error', () => {});
+    child.stdin.end(input || '');
+  });
+}
+
+// The sender view's workspace. When the renderer says which workspace an action was started in
+// (`expected`, e.g. the edit dialog), a mismatch — the view switched workspaces meanwhile — is
+// refused, so one workspace's value is never saved into another.
+function secretsWorkspaceFor(sender, expected = null) {
+  const state = viewState.get(sender.id);
+  const ws = state && state.workspace ? state.workspace : null;
+  if (!ws) return null;
+  if (expected && (expected.distro !== ws.distro || expected.wslPath !== ws.wslPath)) return null;
+  return ws;
+}
+
+// Secret operations on one workspace run one at a time: a delete or edit must not overtake a copy
+// still being written into WSL (which would leave a stale or deleted value readable there).
+const secretLocks = new Map(); // workspace id -> tail of its operation chain
+function withSecretLock(ws, fn) {
+  const id = secretsLib.workspaceId(ws);
+  const run = (secretLocks.get(id) || Promise.resolve()).then(fn, fn);
+  const tail = run.catch(() => {});
+  secretLocks.set(id, tail);
+  tail.then(() => { if (secretLocks.get(id) === tail) secretLocks.delete(id); });
+  return run;
+}
+
+async function materializeSecret(ws, key) {
+  const store = getSecretStore();
+  let value;
+  try { value = store.get(ws, key); } catch { return { ok: false, error: 'decrypt' }; }
+  if (value == null) return { ok: false, error: 'not-found' };
+  if (secretsClosing) return { ok: false, error: 'closing' };
+  const slug = secretsLib.workspaceSlug(ws);
+  secretDistros.add(ws.distro);
+  const write = runWsl(secretsLib.materializeArgs(ws.distro, slug, key), value);
+  pendingSecretWrites.add(write);
+  const res = await write;
+  pendingSecretWrites.delete(write);
+  const p = res.code === 0 ? secretsLib.parseMaterializedPath(res.stdout, slug, key) : null;
+  if (!p) return { ok: false, error: res.error || `exit-${res.code}` };
+  store.setMaterialized(ws, key, true);
+  secretPaths.set(secretPathKey(ws, key), p);
+  return { ok: true, path: p };
+}
+
+// True once the copy is gone (or never existed); false when WSL couldn't confirm the removal.
+async function removeSecretCopy(ws, key) {
+  const res = await runWsl(secretsLib.removeArgs(ws.distro, secretsLib.workspaceSlug(ws), key), '');
+  if (res.code !== 0) return false;
+  secretPaths.delete(secretPathKey(ws, key));
+  return true;
+}
+
+// Files in the workspace's legacy `.credentials/` directory that could be imported.
+async function importableCredentials(ws, existingKeys) {
+  const dir = wslPathToWindowsFsPath(ws.distro, path.posix.join(ws.wslPath, '.credentials'));
+  try {
+    const entries = await withTimeout(fs.promises.readdir(dir, { withFileTypes: true }), WSL_FS_TIMEOUT_MS, 'timeout');
+    const described = [];
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      const st = safeStat(path.join(dir, e.name));
+      if (st) described.push({ name: e.name, isFile: st.isFile(), size: st.size });
+    }
+    return { dir, names: secretsLib.importableEntries(described, existingKeys) };
+  } catch {
+    return { dir, names: [] };
+  }
+}
+
+ipcMain.handle('secrets:list', async (event) => {
+  const ws = secretsWorkspaceFor(event.sender);
+  if (!ws) return { available: false, items: [], importable: [] };
+  return withSecretLock(ws, () => listSecrets(ws));
+});
+
+async function listSecrets(ws) {
+  const store = getSecretStore();
+  const id = secretsLib.workspaceId(ws);
+  // First open of this workspace in this app session: re-create the copies that were handed out
+  // before, at the same fixed paths, so a path given to a CLI earlier keeps working.
+  if (!restoredSecretWorkspaces.has(id)) {
+    restoredSecretWorkspaces.add(id);
+    for (const item of store.list(ws)) {
+      if (item.materialized) await materializeSecret(ws, item.key);
+    }
+  }
+  const items = store.list(ws).map((i) => ({ key: i.key, path: secretPaths.get(secretPathKey(ws, i.key)) || null }));
+  const { names } = await importableCredentials(ws, items.map((i) => i.key));
+  return { available: safeStorage.isEncryptionAvailable(), items, importable: names };
+}
+
+ipcMain.handle('secrets:get', (event, { key, workspace = null } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  if (!ws || !secretsLib.isValidKey(key)) return { ok: false, error: 'not-found' };
+  try {
+    const value = getSecretStore().get(ws, key);
+    return value == null ? { ok: false, error: 'not-found' } : { ok: true, value };
+  } catch {
+    return { ok: false, error: 'decrypt' };
+  }
+});
+
+ipcMain.handle('secrets:set', async (event, { key, value, previousKey = null, workspace = null } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  if (!ws) return { ok: false, error: 'no-workspace' };
+  return withSecretLock(ws, () => setSecret(ws, { key, value, previousKey }));
+});
+
+async function setSecret(ws, { key, value, previousKey }) {
+  const store = getSecretStore();
+  const prev = secretsLib.isValidKey(previousKey) ? previousKey : null;
+  // A rename of a handed-out secret removes the old copy BEFORE the entry changes: if WSL can't
+  // remove it, nothing is renamed, so no plaintext copy is left without an entry managing it.
+  if (prev && prev !== key && store.list(ws).some((i) => i.key === prev && i.materialized)) {
+    const check = store.validate(ws, { key, value, previousKey: prev });
+    if (!check.ok) return check;
+    if (!(await removeSecretCopy(ws, prev))) return { ok: false, error: 'remove-failed' };
+  }
+  const res = store.set(ws, { key, value, previousKey: prev });
+  if (!res.ok) return res;
+  // A copy already handed out follows the edit (a renamed one appears at its new path).
+  if (res.materialized) {
+    const m = await materializeSecret(ws, key);
+    if (!m.ok) return { ok: true, warning: m.error };
+  }
+  return { ok: true };
+}
+
+ipcMain.handle('secrets:delete', async (event, { key, workspace = null } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  if (!ws || !secretsLib.isValidKey(key)) return { ok: false };
+  return withSecretLock(ws, async () => {
+    // The copy goes first (a copy may exist from an earlier session too): if WSL can't remove it,
+    // the entry is kept so the plaintext copy is never left behind unmanaged.
+    if (!(await removeSecretCopy(ws, key))) return { ok: false, error: 'remove-failed' };
+    getSecretStore().remove(ws, key);
+    return { ok: true };
+  });
+});
+
+ipcMain.handle('secrets:insertPath', async (event, { key, workspace = null } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  if (!ws || !secretsLib.isValidKey(key)) return { ok: false, error: 'not-found' };
+  return withSecretLock(ws, () => materializeSecret(ws, key));
+});
+
+// Pasting the VALUE puts it into the terminal (and so into whatever the CLI sends on, plus the
+// scrollback) — a deliberate, confirmed choice; the path is the default.
+ipcMain.handle('secrets:pasteValue', async (event, { key, workspace = null } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  const win = windowForSender(event.sender);
+  if (!ws || !win || !secretsLib.isValidKey(key)) return { ok: false };
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'warning',
+    buttons: [tr('secrets.pasteValueConfirm'), tr('prompt.cancel')],
+    defaultId: 1,
+    cancelId: 1,
+    message: tr('secrets.pasteValueTitle').replace('{key}', key),
+    detail: tr('secrets.pasteValueDetail')
+  });
+  if (response !== 0) return { ok: false };
+  try {
+    const value = getSecretStore().get(ws, key);
+    return value == null ? { ok: false } : { ok: true, value };
+  } catch {
+    return { ok: false };
+  }
+});
+
+// Import the workspace's `.credentials/` files, then ask whether to delete the plaintext originals.
+ipcMain.handle('secrets:import', async (event) => {
+  const ws = secretsWorkspaceFor(event.sender);
+  const win = windowForSender(event.sender);
+  if (!ws || !win) return { ok: false };
+  const store = getSecretStore();
+  if (!safeStorage.isEncryptionAvailable()) return { ok: false, error: 'unavailable' };
+  const { dir, imported: importedItems } = await withSecretLock(ws, async () => {
+    const found = await importableCredentials(ws, store.list(ws).map((i) => i.key));
+    const done = [];
+    for (const name of found.names) {
+      try {
+        // Text only: a file that isn't valid UTF-8 is skipped (decoding would alter its bytes).
+        const bytes = fs.readFileSync(path.join(found.dir, name));
+        const value = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+        if (store.set(ws, { key: name, value }).ok) done.push({ name, bytes });
+      } catch {}
+    }
+    return { dir: found.dir, imported: done };
+  });
+  const imported = importedItems.map((i) => i.name);
+  if (!imported.length) return { ok: true, imported: [], deleted: false };
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'question',
+    buttons: [tr('secrets.importDelete'), tr('secrets.importKeep')],
+    defaultId: 0,
+    cancelId: 1,
+    message: tr('secrets.importDone').replace('{n}', String(imported.length)),
+    detail: `${tr('secrets.importDeleteDetail')}\n\n${imported.map((n) => `.credentials/${n}`).join('\n')}`
+  });
+  let deleted = false;
+  if (response === 0) {
+    // Only an original that still holds exactly what was imported is deleted (one edited while the
+    // dialog was open keeps its newer value on disk).
+    for (const { name, bytes } of importedItems) {
+      try {
+        const file = path.join(dir, name);
+        if (fs.readFileSync(file).equals(bytes)) fs.unlinkSync(file);
+      } catch {}
+    }
+    try { fs.rmdirSync(dir); } catch {} // only when it is now empty
+    deleted = true;
+  }
+  return { ok: true, imported, deleted };
+});
+
+// The terminal strip's key button: insert a secret's path (or, confirmed, its value) into the
+// focused pane. Clicking sends the choice back; the renderer then calls insertPath / pasteValue.
+ipcMain.on('secrets:terminalMenu', (event, { x = 0, y = 0 } = {}) => {
+  const win = windowForSender(event.sender);
+  const ws = secretsWorkspaceFor(event.sender);
+  if (!win || !ws) return;
+  const wc = event.sender;
+  const send = (payload) => { if (!wc.isDestroyed()) wc.send('secrets:insert', payload); };
+  const keys = getSecretStore().list(ws).map((i) => i.key);
+  const items = [{ label: tr('secrets.menuInsertPath'), enabled: false }];
+  if (keys.length) {
+    for (const key of keys) items.push({ label: `  ${key}`, click: () => send({ key, mode: 'path' }) });
+    items.push({ type: 'separator' }, {
+      label: tr('secrets.menuPasteValue'),
+      submenu: keys.map((key) => ({ label: key, click: () => send({ key, mode: 'value' }) }))
+    });
+  } else {
+    items.push({ label: `  ${tr('secrets.empty')}`, enabled: false });
+  }
+  items.push({ type: 'separator' }, { label: tr('menu.toggleSecrets'), accelerator: 'CmdOrCtrl+Shift+K', click: () => { if (!wc.isDestroyed()) wc.send('menu:toggleSecrets'); } });
+  Menu.buildFromTemplate(items).popup({ window: win, x: Math.round(x), y: Math.round(y + TABSTRIP_H) });
+});
+
+// Remove every tmpfs copy this session wrote (the encrypted store itself stays).
+function removeAllSecretCopies() {
+  for (const distro of secretDistros) {
+    try {
+      require('child_process').spawnSync('wsl.exe', secretsLib.removeAllArgs(distro), { timeout: 5000, windowsHide: true });
+    } catch {}
+  }
+}
+
 // --- dots integration (stage A, read-only). Everything that grants access happens here, from an
 // explicit user action with a confirmation dialog; nothing a tool call or terminal output says can
 // share a pane, extend a grant, or turn the integration on. ---
@@ -1753,8 +2039,19 @@ async function showInputConfirmation(req) {
 }
 
 let appQuitting = false;
-app.on('will-quit', () => {
+app.on('will-quit', (event) => {
+  // Secret copies still being written must finish before the cleanup, or a late writer would
+  // leave a plaintext copy behind after exit: hold the quit until they settle, then quit again
+  // (this handler re-runs with nothing pending and cleans up below).
+  secretsClosing = true;
+  if (pendingSecretWrites.size) {
+    // Each write settles within runWsl's own timeout, so this wait is bounded.
+    event.preventDefault();
+    Promise.allSettled([...pendingSecretWrites]).then(() => app.quit());
+    return;
+  }
   appQuitting = true;
+  removeAllSecretCopies();
   if (integration) integration.shutdown();
   else if (tunnel) tunnel.stop('app_exit');
 });

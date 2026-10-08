@@ -132,6 +132,18 @@ npm start
 
 Opening a folder from another WSL distro (e.g. `Ubuntu-22.04`) is supported — the distro is taken from the selected path.
 
+## Workspace secrets (v0.36.0)
+
+Keep credentials (AWS keys, tokens…) per workspace without putting a file in the repository.
+
+- **Open the panel**: the 🔑 button in the tree header, **View > Secrets Panel**, or `Ctrl+Shift+K`. It sits at the bottom of the tree pane; whether it is shown is remembered per workspace.
+- **Key = file name, value = file contents.** Keys use letters, digits, `.`, `_`, `-` (1–64 chars). Each row has `→` (insert path), 👁 (show the value for 10 s), ✎ (edit), 🗑 (delete); `+ Add` creates one.
+- **Storage**: values are encrypted by Windows (DPAPI, via Electron `safeStorage`) under `%APPDATA%\wsl-workbench\secrets\` — nothing is written into the workspace.
+- **Handing a secret to a CLI**: `→` (or double-click the row, or the 🔑 button in the terminal tab strip) writes a plaintext copy to WSL tmpfs — `/run/user/<uid>/wb-secrets/<folder>-<id>/<key>` (`/dev/shm/wslwb-<uid>/…` when `/run/user/<uid>` is missing), mode `0600` in `0700` directories — and types its path into the focused terminal without Enter. Ask the CLI to "use this file".
+- The copies are removed when the app quits. The path is fixed per workspace and key, and the copies handed out before are re-created when the workspace is opened again, so a path given to a CLI earlier keeps working after a restart.
+- **Paste value…** (terminal 🔑 menu) types the value itself after a warning — it becomes input to the running program and stays in the scrollback; the path is usually enough.
+- **Import**: if the workspace has a `.credentials/` folder, the panel offers to import its files (UTF-8 text) and then asks whether to delete the plaintext originals.
+
 ## dots integration (preview)
 
 Lets an MCP client — intended for **dots** via a plugin and Secure MCP Tunnel — read terminals you
