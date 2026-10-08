@@ -22,8 +22,21 @@
   </div>
   <div id="layout">
     <aside id="treePane" tabindex="0">
-      <div id="cwd" title=""><span id="cwdDistro" class="hidden"></span><span id="cwdPath"></span><span id="gitBranch" class="hidden"></span><button id="gitRemoteLink" class="hidden" title=""><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></button></div>
+      <div id="cwd" title=""><span id="cwdDistro" class="hidden"></span><span id="cwdPath"></span><span id="gitBranch" class="hidden"></span><button id="gitRemoteLink" class="hidden" title=""><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></button><button id="secretsToggle" class="cwd-iconbtn" data-i18n-title="secrets.toggle" title="Secrets (Ctrl+Shift+K)">&#x1F511;</button></div>
       <div id="tree"></div>
+      <section id="secretsPanel" class="hidden">
+        <div class="secrets-head">
+          <span class="secrets-title" data-i18n="secrets.title">Secrets</span>
+          <button id="secretsClose" class="secret-btn" data-i18n-title="secrets.close" title="Hide">&#x2715;</button>
+        </div>
+        <div id="secretsNotice" class="secrets-notice hidden"></div>
+        <div id="secretsImport" class="secrets-import hidden">
+          <span id="secretsImportText"></span>
+          <button id="secretsImportBtn" data-i18n="secrets.import">Import</button>
+        </div>
+        <div id="secretsList"></div>
+        <button id="secretsAdd" class="secrets-add" data-i18n="secrets.add">+ Add</button>
+      </section>
     </aside>
     <div id="verticalResizer" class="resizer vertical" data-i18n-title="ui.dragToResize" title="Drag to resize"></div>
     <main id="rightPane">
@@ -71,6 +84,7 @@
           <div id="terminalTabList"></div>
           <button id="newTerminalBtn" data-i18n-title="terminal.newTab" title="New Terminal">+</button>
           <button id="splitTerminalBtn" data-i18n-title="terminal.split" title="Split Terminal">◫</button>
+          <button id="secretsTerminalBtn" data-i18n-title="secrets.terminalButton" title="Insert a secret">&#x1F511;</button>
           <button id="shareTerminalBtn" data-i18n-title="integration.shareButton" title="Share with dots">⇪</button>
           <div id="termShareBadge" class="term-share-badge" hidden></div>
         </div>
@@ -125,6 +139,22 @@
       </div>
     </div>
   </div>
+  <div id="secretModal" class="modal hidden">
+    <div class="modal-box secret-modal-box">
+      <div class="modal-message" id="secretModalTitle"></div>
+      <label class="secret-field"><span data-i18n="secrets.key">Key</span>
+        <input type="text" id="secretKeyInput" spellcheck="false" autocomplete="off" maxlength="64" />
+      </label>
+      <label class="secret-field"><span data-i18n="secrets.value">Value</span>
+        <textarea id="secretValueInput" spellcheck="false" autocomplete="off" rows="8"></textarea>
+      </label>
+      <div id="secretModalError" class="secret-error"></div>
+      <div class="modal-actions">
+        <button id="secretCancel" data-i18n="prompt.cancel">Cancel</button>
+        <button id="secretSave" class="primary" data-i18n="secrets.save">Save</button>
+      </div>
+    </div>
+  </div>
   <script src="./i18n.js"></script>
   <script src="./file-types.js"></script>
   <script src="./markdown.js"></script>
@@ -133,6 +163,7 @@
   <script src="./editor-tab-rules.js"></script>
   <script src="./tree-selection.js"></script>
   <script src="./recent-filter.js"></script>
+  <script src="./secret-keys.js"></script>
   <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>

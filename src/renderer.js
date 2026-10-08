@@ -137,6 +137,7 @@ function applyLanguage() {
   refreshEditorTabs(); // the read-only tooltip on force-opened tabs is localized
   refreshUpdateBtn(); // its tooltip is built manually (has a {version} slot), not via data-i18n
   renderShareBadges();
+  if (!secretsPanel.classList.contains('hidden')) renderSecrets();
 }
 
 // Promise-based replacement for the unsupported window.prompt() in Electron.
@@ -2377,6 +2378,7 @@ async function applyWorkspace(nextConfig) {
   disposeAllEditorTabs(); // close the previous workspace's editor tabs
   disposeAllTerminals();  // close the previous workspace's terminals, open one fresh
   createTerminal();
+  applySecretsForWorkspace();
   restoreEditorSession(); // reopen the files that were open here last time (async, best-effort)
 }
 
@@ -2779,6 +2781,248 @@ async function pollTreeChanges() {
   }
 }
 
+// --- Workspace secrets panel (main: src/secrets.js + the secrets:* IPC). The panel lists key
+// names only; a value reaches this renderer just for the eye button, the edit dialog, and a
+// confirmed "paste value". Visibility is remembered per workspace. ---
+const secretsPanel = document.getElementById('secretsPanel');
+const secretsList = document.getElementById('secretsList');
+const secretsNotice = document.getElementById('secretsNotice');
+const secretsImport = document.getElementById('secretsImport');
+const secretModal = document.getElementById('secretModal');
+const secretKeyInput = document.getElementById('secretKeyInput');
+const secretValueInput = document.getElementById('secretValueInput');
+const secretModalError = document.getElementById('secretModalError');
+const SECRET_REVEAL_MS = 10000;
+let secretsState = { available: true, items: [], importable: [] };
+let secretRevealTimer = null;
+let secretsLoadGen = 0;
+let closeSecretDialog = null; // cancels the open edit dialog (a workspace switch closes it)
+
+// The workspace a secret action starts in; main refuses the action if the view has switched since.
+function secretsWs() { return config ? { distro: config.distro, wslPath: config.wslPath } : null; }
+function sameSecretsWs(ws) { return !!ws && !!config && ws.distro === config.distro && ws.wslPath === config.wslPath; }
+
+function secretsVisibilityKey() { return config ? `secretsPanel:${config.distro}:${config.wslPath}` : null; }
+function readSecretsVisible() {
+  const k = secretsVisibilityKey();
+  try { return !!k && localStorage.getItem(k) === '1'; } catch { return false; }
+}
+function setSecretsVisible(on) {
+  if (!config) return;
+  secretsPanel.classList.toggle('hidden', !on);
+  document.getElementById('secretsToggle').classList.toggle('active', on);
+  try { localStorage.setItem(secretsVisibilityKey(), on ? '1' : '0'); } catch {}
+  if (on) refreshSecrets();
+}
+function toggleSecretsPanel() { setSecretsVisible(secretsPanel.classList.contains('hidden')); }
+
+function secretErrorText(error) {
+  const known = ['remove-failed', 'unavailable', 'invalid-key', 'duplicate', 'too-large', 'decrypt', 'not-found'];
+  return known.includes(error) ? t(`secrets.error_${error}`) : `${t('secrets.error_failed')} (${error || '?'})`;
+}
+
+function hideSecretReveal() {
+  clearTimeout(secretRevealTimer);
+  secretRevealTimer = null;
+  for (const el of secretsList.querySelectorAll('.secret-reveal')) el.remove();
+  for (const el of secretsList.querySelectorAll('.secret-row.revealed')) el.classList.remove('revealed');
+}
+
+async function revealSecret(row, key) {
+  const wasOpen = row.classList.contains('revealed');
+  hideSecretReveal();
+  if (wasOpen) return;
+  const ws = secretsWs();
+  const res = await window.api.secretsGet(key, ws);
+  if (!res.ok || !sameSecretsWs(ws) || !row.isConnected) { if (!res.ok) alert(secretErrorText(res.error)); return; }
+  const pre = document.createElement('pre');
+  pre.className = 'secret-reveal';
+  pre.textContent = res.value;
+  row.after(pre);
+  row.classList.add('revealed');
+  secretRevealTimer = setTimeout(hideSecretReveal, SECRET_REVEAL_MS);
+}
+
+function secretButton(glyph, titleKey, onClick, extra = '') {
+  const b = document.createElement('button');
+  b.className = `secret-btn ${extra}`.trim();
+  b.textContent = glyph;
+  b.title = t(titleKey);
+  b.addEventListener('click', (event) => { event.stopPropagation(); onClick(); });
+  return b;
+}
+
+function renderSecrets() {
+  hideSecretReveal();
+  secretsList.textContent = '';
+  secretsNotice.classList.toggle('hidden', secretsState.available);
+  secretsNotice.textContent = secretsState.available ? '' : t('secrets.error_unavailable');
+  const n = secretsState.importable.length;
+  secretsImport.classList.toggle('hidden', !n || !secretsState.available);
+  document.getElementById('secretsImportText').textContent = t('secrets.importFound').replace('{n}', String(n));
+  if (!secretsState.items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'secrets-empty';
+    empty.textContent = t('secrets.empty');
+    secretsList.appendChild(empty);
+  }
+  for (const item of secretsState.items) {
+    const row = document.createElement('div');
+    row.className = 'secret-row';
+    row.title = item.path ? `${item.key}\n${item.path}` : item.key;
+    const name = document.createElement('span');
+    name.className = 'secret-key';
+    name.textContent = item.key;
+    const mask = document.createElement('span');
+    mask.className = 'secret-mask';
+    mask.textContent = '••••••••';
+    row.append(name, mask,
+      secretButton('→', 'secrets.insertPath', () => insertSecret(item.key, 'path')),
+      secretButton('👁', 'secrets.reveal', () => revealSecret(row, item.key)),
+      secretButton('✎', 'secrets.edit', () => editSecret(item.key)),
+      secretButton('🗑', 'secrets.delete', () => deleteSecret(item.key), 'danger'));
+    row.addEventListener('dblclick', () => insertSecret(item.key, 'path'));
+    secretsList.appendChild(row);
+  }
+}
+
+async function refreshSecrets() {
+  if (!config || secretsPanel.classList.contains('hidden')) return;
+  const gen = ++secretsLoadGen;
+  const ws = secretsWs();
+  let res;
+  try { res = await window.api.secretsList(); } catch { return; }
+  if (gen !== secretsLoadGen || !sameSecretsWs(ws)) return;
+  secretsState = { available: !!res.available, items: res.items || [], importable: res.importable || [] };
+  renderSecrets();
+}
+
+// Put a secret into the focused terminal pane, without Enter: by default the path of its tmpfs
+// copy (the CLI reads the file); 'value' pastes the value itself after main's confirmation.
+async function insertSecret(key, mode) {
+  const entry = activeTerminal();
+  const ws = secretsWs();
+  if (!entry || entry.exited || !ws) return;
+  if (mode === 'value') {
+    const res = await window.api.secretsPasteValue(key, ws);
+    if (res.ok && sameSecretsWs(ws) && !entry.exited) { entry.term.paste(res.value); entry.term.focus(); }
+    return;
+  }
+  const res = await window.api.secretsInsertPath(key, ws);
+  if (!res.ok) { alert(secretErrorText(res.error)); return; }
+  if (!sameSecretsWs(ws) || entry.exited) return;
+  entry.term.paste(shellQuotePath(res.path));
+  entry.term.focus();
+  if (!secretsPanel.classList.contains('hidden')) refreshSecrets(); // the row tooltip shows the path now
+}
+
+// Add (key null) or edit a secret in the modal. Resolves once the dialog closes.
+function openSecretDialog({ key = '', value = '', workspace = secretsWs() } = {}) {
+  // The workspace the dialog belongs to; main refuses the save if the view has switched since.
+  // The modal is shared: an older dialog still open is cancelled first, so only one set of
+  // handlers is ever attached to it.
+  if (closeSecretDialog) closeSecretDialog();
+  return new Promise((resolve) => {
+    if (!sameSecretsWs(workspace)) { resolve(false); return; }
+    document.getElementById('secretModalTitle').textContent = t(key ? 'secrets.editTitle' : 'secrets.addTitle');
+    secretKeyInput.value = key;
+    secretValueInput.value = value;
+    secretModalError.textContent = '';
+    secretModal.classList.remove('hidden');
+    (key ? secretValueInput : secretKeyInput).focus();
+    const saveBtn = document.getElementById('secretSave');
+    const cancelBtn = document.getElementById('secretCancel');
+    let closed = false;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      secretModal.classList.add('hidden');
+      secretValueInput.value = ''; // don't leave the value in the DOM
+      saveBtn.removeEventListener('click', onSave);
+      cancelBtn.removeEventListener('click', onCancel);
+      secretModal.removeEventListener('keydown', onKey);
+      closeSecretDialog = null;
+    };
+    const onSave = async () => {
+      const nextKey = secretKeyInput.value.trim();
+      if (saveBtn.disabled) return; // a save is already in flight (e.g. Ctrl+Enter twice)
+      if (!window.secretKeys.isValidKey(nextKey)) { secretModalError.textContent = t('secrets.error_invalid-key'); return; }
+      saveBtn.disabled = true;
+      const res = await window.api.secretsSet({ key: nextKey, value: secretValueInput.value, previousKey: key || null, workspace });
+      saveBtn.disabled = false;
+      if (closed) return; // cancelled (or closed by a workspace switch) while saving
+      if (!res.ok) { secretModalError.textContent = secretErrorText(res.error); return; }
+      cleanup();
+      if (res.warning) alert(`${t('secrets.copyUpdateFailed')} (${res.warning})`);
+      resolve(true);
+    };
+    const onCancel = () => { cleanup(); resolve(false); };
+    // Enter in the value textarea is a newline; Ctrl+Enter saves anywhere, Escape cancels.
+    const onKey = (event) => {
+      event.stopPropagation();
+      if (event.key === 'Escape') { event.preventDefault(); onCancel(); }
+      else if (event.key === 'Enter' && (event.ctrlKey || event.target === secretKeyInput)) { event.preventDefault(); onSave(); }
+    };
+    saveBtn.addEventListener('click', onSave);
+    cancelBtn.addEventListener('click', onCancel);
+    secretModal.addEventListener('keydown', onKey);
+    closeSecretDialog = onCancel;
+  });
+}
+
+async function editSecret(key) {
+  hideSecretReveal();
+  const workspace = secretsWs();
+  const res = await window.api.secretsGet(key, workspace);
+  if (!res.ok) { alert(secretErrorText(res.error)); return; }
+  if (await openSecretDialog({ key, value: res.value, workspace })) refreshSecrets();
+}
+
+async function deleteSecret(key) {
+  const workspace = secretsWs();
+  if (!workspace || !confirm(t('secrets.confirmDelete').replace('{key}', key))) return;
+  const res = await window.api.secretsDelete(key, workspace);
+  if (res && !res.ok && res.error) alert(secretErrorText(res.error));
+  refreshSecrets();
+}
+
+function initSecrets() {
+  document.getElementById('secretsToggle').addEventListener('click', (event) => { event.stopPropagation(); toggleSecretsPanel(); });
+  document.getElementById('secretsClose').addEventListener('click', () => setSecretsVisible(false));
+  document.getElementById('secretsAdd').addEventListener('click', async () => {
+    if (await openSecretDialog()) refreshSecrets();
+  });
+  document.getElementById('secretsImportBtn').addEventListener('click', async () => {
+    const res = await window.api.secretsImport();
+    if (!res.ok && res.error) alert(secretErrorText(res.error));
+    refreshSecrets();
+  });
+  // The panel lives inside #treePane: keep its clicks/keys from reaching the tree's handlers
+  // (a click there resets the tree paste target; Delete there deletes the selected tree items).
+  for (const type of ['click', 'keydown', 'paste']) secretsPanel.addEventListener(type, (event) => event.stopPropagation());
+  document.getElementById('secretsTerminalBtn').addEventListener('click', (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    window.api.secretsTerminalMenu({ x: rect.left, y: rect.bottom });
+  });
+  window.api.onSecretsInsert(({ key, mode } = {}) => insertSecret(key, mode));
+  window.api.onMenuToggleSecrets(() => toggleSecretsPanel());
+}
+
+// After a workspace is applied: restore this workspace's panel visibility and re-create the copies
+// handed out before (main does that on the first list per app session, panel open or not).
+function applySecretsForWorkspace() {
+  if (closeSecretDialog) closeSecretDialog();
+  secretsLoadGen++; // a list still in flight for the previous workspace must not land here
+  secretsState = { available: true, items: [], importable: [] };
+  hideSecretReveal();
+  secretsList.textContent = '';
+  const on = readSecretsVisible();
+  secretsPanel.classList.toggle('hidden', !on);
+  document.getElementById('secretsToggle').classList.toggle('active', on);
+  if (on) refreshSecrets();
+  else window.api.secretsList().catch(() => {});
+}
+
 window.api.onMenuRefreshTree(() => renderTree());
 window.api.onMenuRestartTerminal(() => restartTerminal(activeTerminal()));
 window.api.onLangChanged((lang) => {
@@ -2852,6 +3096,7 @@ updateBtn.addEventListener('click', () => {
   initMenubar();
   initEditorPreview();
   initGitRemoteLink();
+  initSecrets();
   setInterval(pollTreeChanges, 1500);
   setInterval(checkExternalChanges, 2000); // reload open files edited on disk (e.g. by the AI CLI)
   setInterval(updateGitBranch, 4000);      // keep the tree-header branch badge current
@@ -2885,5 +3130,6 @@ updateBtn.addEventListener('click', () => {
     return;
   }
   createTerminal();
+  applySecretsForWorkspace();
   restoreEditorSession(); // reopen this workspace's files from the last session
 })();

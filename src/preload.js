@@ -47,6 +47,18 @@ contextBridge.exposeInMainWorld('api', {
   integrationPaneState: () => ipcRenderer.invoke('integration:paneState'),
   integrationStopInput: (payload) => ipcRenderer.send('integration:stopInput', payload),
   onIntegrationPaneState: (cb) => ipcRenderer.on('integration:paneState', (_event, panes) => cb(panes)),
+  // Workspace secrets: only key names cross from here; main resolves the workspace from the sender
+  // (`workspace`, when given, is the one the action started in — main refuses it after a switch).
+  secretsList: () => ipcRenderer.invoke('secrets:list'),
+  secretsGet: (key, workspace) => ipcRenderer.invoke('secrets:get', { key, workspace }),
+  secretsSet: (args) => ipcRenderer.invoke('secrets:set', args),
+  secretsDelete: (key, workspace) => ipcRenderer.invoke('secrets:delete', { key, workspace }),
+  secretsInsertPath: (key, workspace) => ipcRenderer.invoke('secrets:insertPath', { key, workspace }),
+  secretsPasteValue: (key, workspace) => ipcRenderer.invoke('secrets:pasteValue', { key, workspace }),
+  secretsImport: () => ipcRenderer.invoke('secrets:import'),
+  secretsTerminalMenu: (pos) => ipcRenderer.send('secrets:terminalMenu', pos),
+  onSecretsInsert: (cb) => ipcRenderer.on('secrets:insert', (_event, payload) => cb(payload)),
+  onMenuToggleSecrets: (cb) => ipcRenderer.on('menu:toggleSecrets', () => cb()),
   onWorkspaceChanged: (cb) => ipcRenderer.on('workspace:changed', (_event, data) => cb(data)),
   onMenuRefreshTree: (cb) => ipcRenderer.on('menu:refreshTree', () => cb()),
   onMenuRestartTerminal: (cb) => ipcRenderer.on('menu:restartTerminal', () => cb()),
