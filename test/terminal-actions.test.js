@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments } = require('../src/terminal-actions');
+const { splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, loadWebglRenderer } = require('../src/terminal-actions');
 
 // Build a mock io that records calls and lets the test control selection/clipboard.
 function makeIO({ selection = '', clipboard = '' } = {}) {
@@ -221,4 +221,48 @@ test('shareSegmentMark marks only shared panes, auto above input above read', ()
   assert.equal(shareSegmentMark({ integration: true, state: 'read' }), 'read');
   assert.equal(shareSegmentMark({ integration: true, state: 'read_input' }), 'input');
   assert.equal(shareSegmentMark({ integration: true, state: 'read_input', autoConfirm: true }), 'auto');
+});
+
+// --- loadWebglRenderer -------------------------------------------------------------------------
+
+function fakeWebgl({ throwOnLoad = false } = {}) {
+  const made = [];
+  class FakeWebglAddon {
+    constructor() { this.disposed = 0; this.lossHandler = null; made.push(this); }
+    onContextLoss(fn) { this.lossHandler = fn; }
+    dispose() { this.disposed++; }
+  }
+  const term = { loaded: [], loadAddon(a) { if (throwOnLoad) throw new Error('no webgl2'); this.loaded.push(a); } };
+  return { FakeWebglAddon, made, term };
+}
+
+test('loadWebglRenderer: loads the addon into the terminal and returns it', () => {
+  const { FakeWebglAddon, term } = fakeWebgl();
+  const addon = loadWebglRenderer(term, FakeWebglAddon);
+  assert.ok(addon instanceof FakeWebglAddon);
+  assert.deepEqual(term.loaded, [addon]);
+  assert.equal(addon.disposed, 0);
+});
+
+test('loadWebglRenderer: no addon class (script missing) keeps the DOM renderer', () => {
+  const { term } = fakeWebgl();
+  assert.equal(loadWebglRenderer(term, undefined), null);
+  assert.deepEqual(term.loaded, []);
+});
+
+test('loadWebglRenderer: WebGL unavailable (loadAddon throws) disposes the addon and reports fallback', () => {
+  const { FakeWebglAddon, made, term } = fakeWebgl({ throwOnLoad: true });
+  const errors = [];
+  assert.equal(loadWebglRenderer(term, FakeWebglAddon, (e) => errors.push(e)), null);
+  assert.equal(made[0].disposed, 1);
+  assert.equal(errors.length, 1);
+});
+
+test('loadWebglRenderer: context loss disposes the addon so the pane falls back to DOM', () => {
+  const { FakeWebglAddon, term } = fakeWebgl();
+  const errors = [];
+  const addon = loadWebglRenderer(term, FakeWebglAddon, (e) => errors.push(e));
+  addon.lossHandler();
+  assert.equal(addon.disposed, 1);
+  assert.equal(errors.length, 1);
 });

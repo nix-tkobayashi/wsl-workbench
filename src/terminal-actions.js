@@ -116,7 +116,32 @@
     return model.auto ? 'auto' : model.input ? 'input' : 'read';
   }
 
-  const terminalActions = { shareBadgeModel, shareSegmentMark, splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments };
+  // GPU renderer for a pane: xterm's WebGL addon draws block elements (▛▜▌▐ — Claude Code's
+  // mascot) and box-drawing chars itself, edge to edge, instead of using the font's glyphs. Consolas
+  // has no quadrant blocks, so the default DOM renderer falls back to another font whose glyphs don't
+  // fill the cell and the mascot shows gaps between cells. Must run after term.open(). Returns the
+  // addon, or null when WebGL is unavailable (the pane keeps the DOM renderer). On GPU context loss
+  // (driver reset, or Chromium dropping the oldest of too many contexts) the addon is disposed so the
+  // pane falls back to the DOM renderer instead of going blank.
+  function loadWebglRenderer(term, WebglAddon, onFallback) {
+    if (typeof WebglAddon !== 'function') return null;
+    let addon;
+    try {
+      addon = new WebglAddon();
+      term.loadAddon(addon);
+    } catch (err) {
+      try { if (addon) addon.dispose(); } catch { /* already torn down */ }
+      if (onFallback) onFallback(err);
+      return null;
+    }
+    addon.onContextLoss(() => {
+      addon.dispose();
+      if (onFallback) onFallback(new Error('WebGL context lost'));
+    });
+    return addon;
+  }
+
+  const terminalActions = { loadWebglRenderer, shareBadgeModel, shareSegmentMark, splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = terminalActions;
   }

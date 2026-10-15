@@ -531,6 +531,9 @@ function createPane(group, { command = '', cwd = '' } = {}) {
     if (/^https?:\/\//i.test(uri)) window.api.openExternal(uri);
   }));
   term.open(host);
+  // WebGL draws block/box glyphs pixel-exact (Claude Code's mascot had gaps on the DOM renderer).
+  window.terminalActions.loadWebglRenderer(term, window.WebglAddon && window.WebglAddon.WebglAddon,
+    (err) => console.warn('terminal: WebGL renderer unavailable, using DOM renderer', err));
   entry.term = term;
   entry.fit = fit;
   // The shell reports its cwd on every prompt via OSC 7 (PROMPT_COMMAND set by the main process);
