@@ -35,6 +35,8 @@ const WSL_FS_TIMEOUT_MS = Math.max(1000, Number(process.env.WSLWB_FS_TIMEOUT_MS)
 const { WORKSPACE_EXT } = require('./workspace-args'); // single source for the extension + argv parsing
 const { shellCdCommand } = require('./terminal-actions'); // inherited-cwd `cd` for terminal:start
 const { findRemoteTerminal, remoteTerminalArgs } = require('./remote-terminal');
+const { remoteHostOf, isRemoteDistro, remoteDistro, parseRemoteSpec, agentSshArgs, RemoteAgentPool } = require('./remote-workspace');
+const remoteFs = require('./remote-fs');
 const { tabTitleForWorkspace, classifyTabDrop, nextActiveTab, shellWindowTitle } = require('./tab-shell');
 const { IntegrationController } = require('./integration');
 const { TunnelRunner } = require('./integration/tunnel-runner');
@@ -126,6 +128,25 @@ function normalizeWorkspace(next = {}, fallback = defaultWorkspace()) {
   };
 }
 
+// --- Remote (ssh) workspaces: distro `ssh:<host>` (see remote-workspace.js). ssh runs inside a
+// local distro — settings `remoteSshDistro`, else the default — so its ~/.ssh/config applies. ---
+function remoteSshDistro() {
+  const d = readSettings().remoteSshDistro;
+  return typeof d === 'string' && d && !isRemoteDistro(d) ? d : DEFAULT_DISTRO;
+}
+const remoteAgents = new RemoteAgentPool((host) =>
+  require('child_process').spawn('wsl.exe', agentSshArgs(remoteSshDistro(), host), { windowsHide: true }));
+// The agent for a remote workspace's distro, or null for a local one. A malformed `ssh:` distro is
+// refused rather than treated as a (nonexistent) local distro.
+function remoteAgentFor(distro) {
+  if (!isRemoteDistro(distro)) return null;
+  const host = remoteHostOf(distro);
+  if (!host) throw new Error(`Invalid remote workspace: ${distro}`);
+  return remoteAgents.get(host);
+}
+// The local distro whose Windows paths a dialog should start in (a remote workspace has none).
+function localDistroOf(distro) { return isRemoteDistro(distro) ? DEFAULT_DISTRO : distro; }
+
 // Per-view state for an IPC sender (a workspace view's webContents). `win` is the view's CURRENT
 // owner window — resolved through our own registry, not BrowserWindow.fromWebContents, because a
 // tear-off re-parents the view and the registry is what tracks that.
@@ -190,7 +211,7 @@ function setCurrentWorkspaceForView(state, next) {
   if (win) pushTabsState(win); // the tab label follows the workspace
 }
 
-const { wslPathToWindowsFsPath, parseSelectedPath, isNtfsAdsPath, isZoneIdentifierName } = require('./wsl-paths');
+const { wslPathToWindowsFsPath, parseSelectedPath, isNtfsAdsPath, isHiddenTreeName } = require('./wsl-paths');
 const { copyFileContentsSync } = require('./fs-copy');
 
 
@@ -284,7 +305,7 @@ function copyRecursiveSafeSync(source, destination, result) {
 // Only regular files are hidden: such a name on a directory is a real one the user made, since
 // the stream residue is always a plain file.
 function isHiddenTreeEntry(entry) {
-  return entry.name.startsWith('.git') || (entry.isFile() && isZoneIdentifierName(entry.name));
+  return isHiddenTreeName(entry.name, entry.isFile());
 }
 
 async function readDirTree({ distro = DEFAULT_DISTRO, wslPath = DEFAULT_WSL_PATH }) {
@@ -525,7 +546,7 @@ async function openWorkspaceDialog(win, state) {
   if (!win || !state) return;
   const result = await dialog.showOpenDialog(win, {
     title: tr('dialog.openWorkspace'),
-    defaultPath: getDefaultOpenWorkspacePath(state.workspace.distro),
+    defaultPath: getDefaultOpenWorkspacePath(localDistroOf(state.workspace.distro)),
     properties: ['openDirectory']
   });
   if (result.canceled || !result.filePaths[0]) return;
@@ -533,7 +554,7 @@ async function openWorkspaceDialog(win, state) {
   setCurrentWorkspaceForView(state, {
     // Use the distro from the selected path (supports non-default distros like Ubuntu-22.04);
     // fall back to the current distro for drive (/mnt) selections.
-    distro: parsed.distro || state.workspace.distro,
+    distro: parsed.distro || localDistroOf(state.workspace.distro),
     wslPath: parsed.wslPath
   });
 }
@@ -847,6 +868,10 @@ function buildAppMenu() {
           }
         },
         {
+          label: tr('menu.openRemoteWorkspace'),
+          click: () => sendToFocusedWindow('menu:openRemote')
+        },
+        {
           label: tr('menu.openWorkspaceFile'),
           accelerator: 'CmdOrCtrl+Shift+O',
           click: () => {
@@ -1100,6 +1125,18 @@ ipcMain.handle('workspace:openRecent', (event, { distro = DEFAULT_DISTRO, wslPat
   return { ok: true };
 });
 
+// Open a directory on an ssh host ("host:/path", "host:~/dir", or just "host" for its home) as the
+// workspace. The agent resolves it (~, symlinks) and checks it is a directory before switching, so
+// a typo or an unreachable host is reported here instead of as a failed tree load.
+ipcMain.handle('workspace:openRemote', async (event, { spec } = {}) => {
+  const { state } = getStateForWebContents(event.sender);
+  const parsed = parseRemoteSpec(spec);
+  if (!parsed) throw new Error(tr('remote.invalidSpec'));
+  const wslPath = await remoteAgents.get(parsed.host).request('realdir', { path: parsed.path });
+  setCurrentWorkspaceForView(state, { distro: remoteDistro(parsed.host), wslPath });
+  return { ok: true };
+});
+
 // --- Editor session persistence: which files were open per workspace, restored on reopen. ---
 const SESSION_TABS_MAX = 15;
 const SESSION_KEYS_MAX = 20;
@@ -1162,9 +1199,20 @@ ipcMain.handle('clipboard:writeImage', (_event, dataUrl) => {
 // its Wayland server is unreachable, we can still fall through to xclip on the same bytes. stdout/
 // stderr go to /dev/null so the daemon wl-copy/xclip forks doesn't hold spawnSync's pipes open.
 // Returns { ok }; the renderer reports failure to the user (it does not write a file).
-ipcMain.handle('clipboard:pushImageToWsl', (_event, { distro = DEFAULT_DISTRO } = {}) => {
+ipcMain.handle('clipboard:pushImageToWsl', async (_event, { distro = DEFAULT_DISTRO } = {}) => {
   const image = clipboard.readImage();
   if (image.isEmpty()) return { ok: false, reason: 'no-image' };
+  // Remote workspace: the CLI runs on the host, where no clipboard is reachable. Upload the PNG to a
+  // private file there instead; the renderer types its path (CLIs like Claude Code take image paths).
+  const agent = remoteAgentFor(distro);
+  if (agent) {
+    try {
+      const p = await agent.request('tempfile', { name: `pasted-image-${Date.now()}.png`, b64: image.toPNG().toString('base64') });
+      return { ok: true, path: p };
+    } catch (error) {
+      return { ok: false, reason: String(error.message || error) };
+    }
+  }
   const script = `${WSLG_WAYLAND_FIX}; ` +
     'tmp=$(mktemp --suffix=.png) || exit 4; cat > "$tmp"; rc=3; ' +
     'if command -v wl-copy >/dev/null 2>&1; then wl-copy --type image/png < "$tmp" >/dev/null 2>&1 && rc=0; fi; ' +
@@ -1274,12 +1322,17 @@ ipcMain.on('tabs:drop', (event, { id, screenX = 0, screenY = 0, toIndex = -1 } =
   }
 });
 
-ipcMain.handle('tree:read', (_event, args) => readDirTree(args));
+ipcMain.handle('tree:read', (_event, args = {}) => {
+  const agent = remoteAgentFor(args.distro);
+  return agent ? remoteFs.readDirTree(agent, args.wslPath) : readDirTree(args);
+});
 
 // Cheap fingerprint of the given directories' entries, used by the renderer to detect
 // changes made outside the app (e.g. files created from the terminal) and refresh the tree.
 // fs.watch does not work over \\wsl.localhost UNC paths, so the renderer polls this instead.
 ipcMain.handle('tree:signature', async (_event, { distro = DEFAULT_DISTRO, paths = [] }) => {
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.treeSignature(agent, paths);
   const parts = [];
   for (const wslPath of paths) {
     const fullPath = wslPathToWindowsFsPath(distro, wslPath);
@@ -1303,6 +1356,8 @@ ipcMain.handle('tree:signature', async (_event, { distro = DEFAULT_DISTRO, paths
 // Anyway") skips the sniff and decodes the raw bytes as UTF-8 regardless. Files over 1MB are not
 // read at all: `tooLarge` carries a placeholder the renderer shows read-only (never saveable).
 ipcMain.handle('file:read', (_event, { distro = DEFAULT_DISTRO, wslPath, force = false }) => {
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.readText(agent, wslPath, force);
   const fullPath = wslPathToWindowsFsPath(distro, wslPath);
   const stat = safeStat(fullPath);
   if (!stat || !stat.isFile()) return { text: '', unsupported: false, tooLarge: false };
@@ -1316,12 +1371,16 @@ ipcMain.handle('file:read', (_event, { distro = DEFAULT_DISTRO, wslPath, force =
 // editor file was changed on disk (e.g. by an AI CLI in the terminal) so it can reload it.
 ipcMain.handle('file:stat', (_event, { distro = DEFAULT_DISTRO, wslPath } = {}) => {
   if (!wslPath) return null;
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.statFile(agent, wslPath);
   const stat = safeStat(wslPathToWindowsFsPath(distro, wslPath));
   return stat && stat.isFile() ? { mtimeMs: stat.mtimeMs, size: stat.size } : null;
 });
 
 // Read an image file as a data: URL for the renderer's <img> preview.
 ipcMain.handle('file:readImage', (_event, { distro = DEFAULT_DISTRO, wslPath }) => {
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.readDataUrl(agent, wslPath, 16 * 1024 * 1024, imageMimeForPath(wslPath), 'Image is larger than 16MB.');
   const fullPath = wslPathToWindowsFsPath(distro, wslPath);
   const stat = safeStat(fullPath);
   if (!stat || !stat.isFile()) throw new Error(`File not found: ${wslPath}`);
@@ -1332,6 +1391,8 @@ ipcMain.handle('file:readImage', (_event, { distro = DEFAULT_DISTRO, wslPath }) 
 
 // Read a PDF as a data: URL for the renderer's PDF preview iframe (Chromium's built-in viewer).
 ipcMain.handle('file:readPdf', (_event, { distro = DEFAULT_DISTRO, wslPath }) => {
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.readDataUrl(agent, wslPath, 50 * 1024 * 1024, 'application/pdf', 'PDF is larger than 50MB.');
   const fullPath = wslPathToWindowsFsPath(distro, wslPath);
   const stat = safeStat(fullPath);
   if (!stat || !stat.isFile()) throw new Error(`File not found: ${wslPath}`);
@@ -1342,6 +1403,8 @@ ipcMain.handle('file:readPdf', (_event, { distro = DEFAULT_DISTRO, wslPath }) =>
 
 ipcMain.handle('file:write', (_event, { distro = DEFAULT_DISTRO, wslPath, content }) => {
   if (!wslPath) throw new Error('wslPath is required.');
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.writeText(agent, wslPath, content);
   const fullPath = wslPathToWindowsFsPath(distro, wslPath);
   const stat = safeStat(fullPath);
   if (!stat || !stat.isFile()) throw new Error(`File not found: ${wslPath}`);
@@ -1363,9 +1426,7 @@ ipcMain.handle('shell:openExternal', (_event, url) => {
 // the tree-header badge AND the tree's per-file git coloring. One spawn serves both. Returns null
 // when the workspace isn't a git repo or git is unavailable.
 const { parseGitInfoOutput } = require('./git-status');
-ipcMain.handle('git:info', (_event, { distro = DEFAULT_DISTRO, wslPath } = {}) => {
-  if (!wslPath) return null;
-  const script =
+const GIT_INFO_SCRIPT =
     'b=$(git branch --show-current 2>/dev/null); ' +
     '[ -z "$b" ] && b=$(git rev-parse --short HEAD 2>/dev/null); ' +
     '[ -z "$b" ] && exit 0; ' +
@@ -1375,8 +1436,12 @@ ipcMain.handle('git:info', (_event, { distro = DEFAULT_DISTRO, wslPath } = {}) =
     'git remote get-url origin 2>/dev/null || git remote get-url "$(git remote 2>/dev/null | head -n1)" 2>/dev/null || echo; ' +
     // quotepath=false keeps UTF-8 names (e.g. Japanese) unescaped so tree paths match.
     'git -c core.quotepath=false status --porcelain 2>/dev/null';
+ipcMain.handle('git:info', (_event, { distro = DEFAULT_DISTRO, wslPath } = {}) => {
+  if (!wslPath) return null;
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.gitInfo(agent, wslPath, GIT_INFO_SCRIPT);
   const res = require('child_process').spawnSync(
-    'wsl.exe', ['-d', distro, '--cd', wslPath, '--exec', 'bash', '-lc', script],
+    'wsl.exe', ['-d', distro, '--cd', wslPath, '--exec', 'bash', '-lc', GIT_INFO_SCRIPT],
     { encoding: 'utf8', timeout: 10000, maxBuffer: 10 * 1024 * 1024 }
   );
   if (res.error || res.status !== 0) return null;
@@ -1388,6 +1453,8 @@ ipcMain.handle('git:info', (_event, { distro = DEFAULT_DISTRO, wslPath } = {}) =
 });
 
 ipcMain.handle('fs:move', (_event, { distro = DEFAULT_DISTRO, sourcePath, targetDirPath }) => {
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.move(agent, sourcePath, targetDirPath);
   if (!sourcePath || !targetDirPath) throw new Error('sourcePath and targetDirPath are required.');
   if (sourcePath === targetDirPath || targetDirPath.startsWith(sourcePath + '/')) {
     throw new Error('Cannot move a directory into itself.');
@@ -1401,6 +1468,8 @@ ipcMain.handle('fs:move', (_event, { distro = DEFAULT_DISTRO, sourcePath, target
 });
 
 ipcMain.handle('fs:create', (_event, { distro = DEFAULT_DISTRO, parentDirPath, name, type = 'file' }) => {
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.create(agent, parentDirPath, name, type);
   if (!parentDirPath || !name) throw new Error('parentDirPath and name are required.');
   if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') throw new Error('Invalid name.');
   const target = wslPathToWindowsFsPath(distro, path.posix.join(parentDirPath, name));
@@ -1414,6 +1483,8 @@ ipcMain.handle('fs:create', (_event, { distro = DEFAULT_DISTRO, parentDirPath, n
 });
 
 ipcMain.handle('fs:rename', (_event, { distro = DEFAULT_DISTRO, sourcePath, newName }) => {
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.rename(agent, sourcePath, newName);
   if (!sourcePath || !newName) throw new Error('sourcePath and newName are required.');
   if (newName.includes('/') || newName.includes('\\') || newName === '.' || newName === '..') throw new Error('Invalid name.');
   const src = wslPathToWindowsFsPath(distro, sourcePath);
@@ -1426,6 +1497,8 @@ ipcMain.handle('fs:rename', (_event, { distro = DEFAULT_DISTRO, sourcePath, newN
 });
 
 ipcMain.handle('fs:delete', (_event, { distro = DEFAULT_DISTRO, targetPath }) => {
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.remove(agent, targetPath);
   if (!targetPath) throw new Error('targetPath is required.');
   const target = wslPathToWindowsFsPath(distro, targetPath);
   if (!safeStat(target)) throw new Error(`Target not found: ${targetPath}`);
@@ -1435,6 +1508,7 @@ ipcMain.handle('fs:delete', (_event, { distro = DEFAULT_DISTRO, targetPath }) =>
 
 ipcMain.handle('fs:reveal', async (_event, { distro = DEFAULT_DISTRO, targetPath }) => {
   if (!targetPath) throw new Error('targetPath is required.');
+  if (isRemoteDistro(distro)) throw new Error(tr('remote.revealUnsupported'));
   const target = wslPathToWindowsFsPath(distro, targetPath);
   if (!safeStat(target)) throw new Error(`Target not found: ${targetPath}`);
   shell.showItemInFolder(target);
@@ -1451,14 +1525,16 @@ ipcMain.handle('fs:saveClipboardImage', (_event, { distro = DEFAULT_DISTRO, targ
   if (!targetDirPath) throw new Error('targetDirPath is required.');
   const image = clipboard.readImage();
   if (image.isEmpty()) throw new Error('No image in clipboard.');
-  const targetDir = wslPathToWindowsFsPath(distro, targetDirPath);
-  const targetStat = safeStat(targetDir);
-  if (!targetStat || !targetStat.isDirectory()) throw new Error(`Target directory not found: ${targetDirPath}`);
-
   const now = new Date();
   const stamp = `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}-${pad2(now.getHours())}${pad2(now.getMinutes())}${pad2(now.getSeconds())}`;
   const base = `pasted-image-${stamp}`;
   const png = image.toPNG();
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.saveImage(agent, targetDirPath, png, base);
+  const targetDir = wslPathToWindowsFsPath(distro, targetDirPath);
+  const targetStat = safeStat(targetDir);
+  if (!targetStat || !targetStat.isDirectory()) throw new Error(`Target directory not found: ${targetDirPath}`);
+
   // Exclusive create ('wx') so a name collision (or a symlink planted between check and write) can't
   // clobber an existing file; on EEXIST, try the next suffix.
   let name = `${base}.png`;
@@ -1475,6 +1551,8 @@ ipcMain.handle('fs:saveClipboardImage', (_event, { distro = DEFAULT_DISTRO, targ
 });
 
 ipcMain.handle('fs:copyExternal', (_event, { distro = DEFAULT_DISTRO, sourcePaths = [], targetDirPath }) => {
+  const agent = remoteAgentFor(distro);
+  if (agent) return remoteFs.copyExternal(agent, sourcePaths, targetDirPath, { shouldSkip: shouldSkipExternalPath, isAds: isNtfsAdsPath });
   if (!Array.isArray(sourcePaths) || sourcePaths.length === 0) throw new Error('sourcePaths are required.');
   if (!targetDirPath) throw new Error('targetDirPath is required.');
   const targetDir = wslPathToWindowsFsPath(distro, targetDirPath);
@@ -1509,13 +1587,13 @@ ipcMain.handle('folder:pick', async (event) => {
   const { win, state } = getStateForWebContents(event.sender);
   const result = await dialog.showOpenDialog(win, {
     title: tr('dialog.openWorkspace'),
-    defaultPath: getDefaultOpenWorkspacePath(state.workspace.distro),
+    defaultPath: getDefaultOpenWorkspacePath(localDistroOf(state.workspace.distro)),
     properties: ['openDirectory']
   });
   if (result.canceled || !result.filePaths[0]) return null;
   const selected = result.filePaths[0];
   const parsed = parseSelectedPath(selected);
-  return { windowsPath: selected, wslPath: parsed.wslPath, distro: parsed.distro || state.workspace.distro };
+  return { windowsPath: selected, wslPath: parsed.wslPath, distro: parsed.distro || localDistroOf(state.workspace.distro) };
 });
 
 // Fire-and-forget terminal channels resolve their view state leniently: closing a window tears
@@ -1544,16 +1622,26 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = 
   // best-effort `cd` on top of the workspace-root --cd, so a bad path lands at the root, not in an
   // error. The workspace itself is NOT changed by an inherited cwd.
   const launch = command ? `${command}; exec bash` : 'exec bash';
-  // A workspace mapped in settings `remoteTerminals` runs its shell over ssh instead (prototype; see
-  // remote-terminal.js). The WSLg fix is local-only; cwd reporting and the inherited cd work the
+  // A remote workspace (distro `ssh:<host>`) runs its shell on the host in the workspace directory.
+  // A local workspace mapped in settings `remoteTerminals` also runs its shell over ssh (prototype;
+  // see remote-terminal.js). The WSLg fix is local-only; cwd reporting and the inherited cd work the
   // same remotely (the tracked cwd is then a remote path).
-  const remote = findRemoteTerminal(readSettings().remoteTerminals, workspace);
+  let remote = null;
+  let sshDistro = workspace.distro;
+  if (isRemoteDistro(workspace.distro)) {
+    const host = remoteHostOf(workspace.distro);
+    if (!host) return;
+    remote = { host, dir: workspace.wslPath };
+    sshDistro = remoteSshDistro();
+  } else {
+    remote = findRemoteTerminal(readSettings().remoteTerminals, workspace);
+  }
   const parts = remote ? [CWD_PROMPT_EXPORT] : [WSLG_WAYLAND_FIX, CWD_PROMPT_EXPORT];
   const cd = shellCdCommand(cwd);
   if (cd) parts.push(cd);
   parts.push(launch);
   const args = remote
-    ? remoteTerminalArgs(workspace.distro, remote, parts.join('; '))
+    ? remoteTerminalArgs(sshDistro, remote, parts.join('; '))
     : ['-d', workspace.distro, '--cd', workspace.wslPath, '--exec', 'bash', '-lc', parts.join('; ')];
   if (remote) wc.send('terminal:data', { id, data: `\x1b[90m[remote] ssh ${remote.host}${remote.dir ? `:${remote.dir}` : ''}\x1b[0m\r\n` });
   const ptyProc = pty.spawn('wsl.exe', args, {
@@ -1674,6 +1762,8 @@ function withSecretLock(ws, fn) {
 }
 
 async function materializeSecret(ws, key) {
+  // Copies are written into a local distro's tmpfs; a remote (ssh) workspace has none to write to.
+  if (isRemoteDistro(ws.distro)) return { ok: false, error: 'remote' };
   const store = getSecretStore();
   let value;
   try { value = store.get(ws, key); } catch { return { ok: false, error: 'decrypt' }; }
@@ -2059,6 +2149,7 @@ app.on('will-quit', (event) => {
     return;
   }
   appQuitting = true;
+  remoteAgents.disposeAll();
   removeAllSecretCopies();
   if (integration) integration.shutdown();
   else if (tunnel) tunnel.stop('app_exit');

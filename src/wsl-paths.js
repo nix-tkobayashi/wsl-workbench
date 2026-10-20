@@ -74,6 +74,12 @@ function isZoneIdentifierName(name) {
   return /[:\uF03A]Zone\.Identifier$/i.test(String(name || ''));
 }
 
+// Entries the tree never shows (see isHiddenTreeEntry in main.js): Git internals, and regular files
+// left behind as `name:Zone.Identifier` stream residue. Shared by local and remote workspaces.
+function isHiddenTreeName(name, isFile) {
+  return String(name).startsWith('.git') || (!!isFile && isZoneIdentifierName(name));
+}
+
 // Back-compat wrapper: convert a selected path to a WSL path. The `distro` argument is no longer
 // used for matching (the distro is read from the path itself); callers that need the distro should
 // use parseSelectedPath instead.
@@ -81,4 +87,4 @@ function uncToWsl(_distro, inputPath) {
   return parseSelectedPath(inputPath).wslPath;
 }
 
-module.exports = { wslToUnc, wslPathToWindowsFsPath, windowsDrivePathToWsl, uncToWsl, parseSelectedPath, isNtfsAdsPath, isZoneIdentifierName };
+module.exports = { wslToUnc, wslPathToWindowsFsPath, windowsDrivePathToWsl, uncToWsl, parseSelectedPath, isNtfsAdsPath, isZoneIdentifierName, isHiddenTreeName };

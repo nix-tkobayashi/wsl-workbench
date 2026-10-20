@@ -373,6 +373,12 @@ async function pasteImageToTerminal(entry) {
     alert(error.message || String(error));
     return;
   }
+  // Remote workspace: main uploaded the PNG to a private file on the host; type its path instead.
+  if (res && res.ok && res.path) {
+    writeUserInput(entry, res.path);
+    entry.term.focus();
+    return;
+  }
   if (res && res.ok) {
     writeUserInput(entry, '\x16'); // Ctrl+V: the CLI reads the WSL clipboard
     entry.term.focus();
@@ -2524,6 +2530,7 @@ function initLanding() {
   document.getElementById('landingOpenWorkspace').addEventListener('click', () => window.api.openWorkspace());
   document.getElementById('landingOpenFile').addEventListener('click', () => window.api.openWorkspaceFile());
   document.getElementById('landingClone').addEventListener('click', cloneRepoFlow);
+  document.getElementById('landingRemote').addEventListener('click', openRemoteFlow);
 }
 
 // Populate the landing screen's recent-workspaces list (hidden when there are none).
@@ -2598,6 +2605,30 @@ async function cloneRepoFlow() {
   buttons.forEach((b) => { b.disabled = true; });
   try {
     await window.api.cloneRepo({ distro: folder.distro, parentDirPath: folder.wslPath, url: url.trim() });
+  } catch (error) {
+    alert(error.message || String(error));
+  } finally {
+    if (subtitle) subtitle.textContent = prevSubtitle;
+    buttons.forEach((b) => { b.disabled = false; });
+  }
+}
+
+// Open a directory on an ssh host as the workspace ("host:/path"). Main connects and resolves the
+// path first, then broadcasts workspace:changed like the other open flows. The last spec is offered
+// again, since reopening the same host with a different directory is the common case.
+let lastRemoteSpec = '';
+async function openRemoteFlow() {
+  const initial = lastRemoteSpec || (config && config.distro.startsWith('ssh:') ? `${config.distro.slice(4)}:${config.wslPath}` : '');
+  const spec = await askPrompt(t('prompt.remoteSpec'), initial);
+  if (!spec || !spec.trim()) return;
+  lastRemoteSpec = spec.trim();
+  const subtitle = document.querySelector('#landing .landing-subtitle');
+  const buttons = document.querySelectorAll('#landing .landing-actions button');
+  const prevSubtitle = subtitle ? subtitle.textContent : '';
+  if (subtitle) subtitle.textContent = t('landing.connecting');
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    await window.api.openRemoteWorkspace({ spec: lastRemoteSpec });
   } catch (error) {
     alert(error.message || String(error));
   } finally {
@@ -2820,7 +2851,7 @@ function setSecretsVisible(on) {
 function toggleSecretsPanel() { setSecretsVisible(secretsPanel.classList.contains('hidden')); }
 
 function secretErrorText(error) {
-  const known = ['remove-failed', 'unavailable', 'invalid-key', 'duplicate', 'too-large', 'decrypt', 'not-found'];
+  const known = ['remove-failed', 'unavailable', 'invalid-key', 'duplicate', 'too-large', 'decrypt', 'not-found', 'remote'];
   return known.includes(error) ? t(`secrets.error_${error}`) : `${t('secrets.error_failed')} (${error || '?'})`;
 }
 
@@ -3027,6 +3058,7 @@ function applySecretsForWorkspace() {
 }
 
 window.api.onMenuRefreshTree(() => renderTree());
+window.api.onMenuOpenRemote(() => openRemoteFlow());
 window.api.onMenuRestartTerminal(() => restartTerminal(activeTerminal()));
 window.api.onLangChanged((lang) => {
   currentLang = window.i18n.normalizeLang(lang);

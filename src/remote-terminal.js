@@ -53,4 +53,4 @@ function remoteTerminalArgs(distro, remote, script) {
   ];
 }
 
-module.exports = { findRemoteTerminal, remoteTerminalArgs };
+module.exports = { findRemoteTerminal, remoteTerminalArgs, validHost };

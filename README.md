@@ -144,6 +144,26 @@ Keep credentials (AWS keys, tokens…) per workspace without putting a file in t
 - **Paste value…** (terminal 🔑 menu) types the value itself after a warning — it becomes input to the running program and stays in the scrollback; the path is usually enough.
 - **Import**: if the workspace has a `.credentials/` folder, the panel offers to import its files (UTF-8 text) and then asks whether to delete the plaintext originals.
 
+## Remote workspaces over ssh (v0.38.0)
+
+Open a directory on another host (e.g. an EC2 instance) as the workspace: the file tree, editor,
+git badge **and** terminals all work on that host (like VS Code Remote-SSH), so AI CLIs run there
+with your subscription login on that host.
+
+- **Workspace > Open Remote Workspace (SSH)...** or **Open Remote (SSH)…** on the landing screen,
+  then enter `host:/path` — `host` is a `Host` from `~/.ssh/config` in WSL (keys, agent, SSM
+  `ProxyCommand` all apply), the path may be absolute, `~/dir`, or omitted (home).
+- The workspace shows as `ssh:<host>` (badge, recent list, sessions). Terminals are `ssh -t <host>`
+  started in the workspace directory.
+- The host needs `python3` (stdlib only). Workbench starts a small agent there over one ssh
+  connection per host (`src/remote-agent.py`, sent on each connect — nothing is installed) and does
+  file and git operations through it. ssh runs in batch mode, so the host key must already be
+  known and auth must not prompt: run `ssh <host>` once in a terminal first.
+- ssh runs inside the default distro (`Ubuntu`, or settings `"remoteSshDistro": "<distro>"`).
+- Dropping Windows files on the tree uploads them (100MB per file). Pasting an image into a remote
+  terminal uploads it to `~/.cache/wsl-workbench/paste/` (0600) and types its path.
+- Not available remotely yet: Reveal in Explorer, workspace secrets, clone from the landing screen.
+
 ## Remote terminal over ssh (prototype, v0.37.0)
 
 Run a workspace's terminal on another host (e.g. an EC2 instance, so AI CLIs run there) while the
