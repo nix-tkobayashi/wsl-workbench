@@ -34,6 +34,7 @@ const WSL_FS_TIMEOUT_MS = Math.max(1000, Number(process.env.WSLWB_FS_TIMEOUT_MS)
 
 const { WORKSPACE_EXT } = require('./workspace-args'); // single source for the extension + argv parsing
 const { shellCdCommand } = require('./terminal-actions'); // inherited-cwd `cd` for terminal:start
+const { findRemoteTerminal, remoteTerminalArgs } = require('./remote-terminal');
 const { tabTitleForWorkspace, classifyTabDrop, nextActiveTab, shellWindowTitle } = require('./tab-shell');
 const { IntegrationController } = require('./integration');
 const { TunnelRunner } = require('./integration/tunnel-runner');
@@ -1543,11 +1544,18 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = 
   // best-effort `cd` on top of the workspace-root --cd, so a bad path lands at the root, not in an
   // error. The workspace itself is NOT changed by an inherited cwd.
   const launch = command ? `${command}; exec bash` : 'exec bash';
-  const parts = [WSLG_WAYLAND_FIX, CWD_PROMPT_EXPORT];
+  // A workspace mapped in settings `remoteTerminals` runs its shell over ssh instead (prototype; see
+  // remote-terminal.js). The WSLg fix is local-only; cwd reporting and the inherited cd work the
+  // same remotely (the tracked cwd is then a remote path).
+  const remote = findRemoteTerminal(readSettings().remoteTerminals, workspace);
+  const parts = remote ? [CWD_PROMPT_EXPORT] : [WSLG_WAYLAND_FIX, CWD_PROMPT_EXPORT];
   const cd = shellCdCommand(cwd);
   if (cd) parts.push(cd);
   parts.push(launch);
-  const args = ['-d', workspace.distro, '--cd', workspace.wslPath, '--exec', 'bash', '-lc', parts.join('; ')];
+  const args = remote
+    ? remoteTerminalArgs(workspace.distro, remote, parts.join('; '))
+    : ['-d', workspace.distro, '--cd', workspace.wslPath, '--exec', 'bash', '-lc', parts.join('; ')];
+  if (remote) wc.send('terminal:data', { id, data: `\x1b[90m[remote] ssh ${remote.host}${remote.dir ? `:${remote.dir}` : ''}\x1b[0m\r\n` });
   const ptyProc = pty.spawn('wsl.exe', args, {
     name: 'xterm-256color',
     cols: 100,
