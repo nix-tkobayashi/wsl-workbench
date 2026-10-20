@@ -144,6 +144,23 @@ Keep credentials (AWS keys, tokens…) per workspace without putting a file in t
 - **Paste value…** (terminal 🔑 menu) types the value itself after a warning — it becomes input to the running program and stays in the scrollback; the path is usually enough.
 - **Import**: if the workspace has a `.credentials/` folder, the panel offers to import its files (UTF-8 text) and then asks whether to delete the plaintext originals.
 
+## Remote terminal over ssh (prototype, v0.37.0)
+
+Run a workspace's terminal on another host (e.g. an EC2 instance, so AI CLIs run there) while the
+UI stays the same. Only the terminal moves: the file tree, editor, and git badge still show the
+local workspace. There is no UI yet — add the mapping to `%APPDATA%\wsl-workbench\settings.json`:
+
+```json
+"remoteTerminals": [
+  { "wslPath": "/home/me/projects/app", "host": "ec2-dev", "dir": "/home/ec2-user/app" }
+]
+```
+
+- A workspace whose path equals `wslPath` (optional `distro` narrows the match) opens every terminal — new tabs, splits, restarts — as `ssh -t <host>` run **inside that distro**, so its `~/.ssh/config` (keys, agent, SSM `ProxyCommand`) applies. `dir` (optional, absolute) is the remote start directory; if it can't be entered you get a plain remote shell.
+- Read at each terminal start, so no restart is needed after editing. Malformed entries are ignored.
+- A dropped connection ends the pane within ~2 minutes (`ServerAliveInterval=30`); press a key to reconnect.
+- Image paste and workspace secrets still target the local distro.
+
 ## dots integration (preview)
 
 Lets an MCP client — intended for **dots** via a plugin and Secure MCP Tunnel — read terminals you
