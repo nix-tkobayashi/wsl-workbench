@@ -329,7 +329,6 @@ const translations = {
     'secrets.error_too-large': 'The value is too large (max 1 MB).',
     'secrets.error_decrypt': 'The secret could not be decrypted.',
     'secrets.error_not-found': 'The secret was not found.',
-    'secrets.error_remote': 'Secrets cannot be inserted in a remote (SSH) workspace yet.',
     'secrets.error_failed': 'Could not write the secret into WSL',
   },
   ja: {
@@ -654,7 +653,6 @@ const translations = {
     'secrets.error_too-large': '値が大きすぎます（上限 1 MB）。',
     'secrets.error_decrypt': 'シークレットを復号できませんでした。',
     'secrets.error_not-found': 'シークレットが見つかりません。',
-    'secrets.error_remote': 'リモート (SSH) ワークスペースではシークレットを挿入できません（未対応）。',
     'secrets.error_failed': 'WSL へのシークレットの書き出しに失敗しました',
   }
 };

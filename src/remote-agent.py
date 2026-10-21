@@ -11,9 +11,12 @@ import ctypes.util
 import errno
 import json
 import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -213,13 +216,104 @@ def op_tempfile(a):
     return p
 
 
+# --- Workspace secrets: plaintext copies of a secret for a CLI on this host, mirroring the local
+# copies in WSL (secrets.js MATERIALIZE_SCRIPT): <base>/wb-secrets/<slug>/<key>, 0600 in 0700
+# directories, base = /run/user/<uid> (tmpfs) or /dev/shm/wslwb-<uid> when that is missing. Every
+# directory must be ours and not a symlink, so a planted one is refused rather than written into.
+_SECRET_SLUG_RE = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
+_SECRET_KEY_RE = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
+
+
+def _secret_names(a):
+    slug, key = a.get('slug'), a.get('key')
+    for v, rx in ((slug, _SECRET_SLUG_RE), (key, _SECRET_KEY_RE)):
+        if not isinstance(v, str) or not rx.match(v) or v in ('.', '..'):
+            raise AgentError('EINVAL', 'invalid secret name')
+    return slug, key
+
+
+def _secret_root():
+    uid = os.getuid()
+    base = os.environ.get('WB_SECRETS_BASE_TEST') or '/run/user/%d' % uid
+    try:
+        st = os.lstat(base)
+        ok = stat.S_ISDIR(st.st_mode) and st.st_uid == uid
+    except OSError:
+        ok = False
+    if not ok:
+        base = '/dev/shm/wslwb-%d' % uid
+    return base, os.path.join(base, 'wb-secrets')
+
+
+def _secret_dir_ok(p, create=False):
+    if create:
+        try:
+            os.mkdir(p, 0o700)
+        except FileExistsError:
+            pass
+    st = os.lstat(p)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise AgentError('EPERM', 'refusing unsafe secrets directory: %s' % p)
+
+
+def op_secret_put(a):
+    slug, key = _secret_names(a)
+    base, root = _secret_root()
+    d = os.path.join(root, slug)
+    for p in (base, root, d):
+        _secret_dir_ok(p, create=True)
+        os.chmod(p, 0o700)
+    fd, tmp = tempfile.mkstemp(prefix='.tmp.', dir=d)  # 0600
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(base64.b64decode(a['b64']))
+        target = os.path.join(d, key)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return target
+
+
+def op_secret_remove(a):
+    slug, key = _secret_names(a)
+    base, root = _secret_root()
+    d = os.path.join(root, slug)
+    for p in (base, root, d):
+        if not os.path.lexists(p):
+            return True  # nothing was ever written there
+        _secret_dir_ok(p)
+    f = os.path.join(d, key)
+    if os.path.lexists(f):
+        os.remove(f)
+    try:
+        os.rmdir(d)  # only when it is now empty
+    except OSError:
+        pass
+    return True
+
+
+def op_secret_remove_all(_a):
+    base, root = _secret_root()
+    if not os.path.lexists(root):
+        return True
+    _secret_dir_ok(base)
+    _secret_dir_ok(root)
+    shutil.rmtree(root)
+    return True
+
+
 OPS = {k[3:]: v for k, v in globals().items() if k.startswith('op_')}
 # Ops that change the filesystem run one at a time, in arrival order, on their own thread (like the
 # local handlers' synchronous fs calls): no check-then-act interleaving between them, no two saves
 # of one file mixing bytes, and a later save always lands last. They also exclude the readers below,
 # so a read never sees a file between a save's truncate and its write. Reads and git run in
 # parallel with each other (git only reads; it is not held back by an upload).
-MUTATING_OPS = frozenset(['write', 'mkdir', 'rename', 'delete', 'tempfile'])
+MUTATING_OPS = frozenset(['write', 'mkdir', 'rename', 'delete', 'tempfile',
+                          'secret_put', 'secret_remove', 'secret_remove_all'])
 READING_OPS = frozenset(['stat', 'readdir', 'readdirs', 'read', 'exists', 'realdir'])
 
 

@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld('api', {
   terminalResize: (payload) => ipcRenderer.send('terminal:resize', payload),
   terminalClose: (payload) => ipcRenderer.send('terminal:close', payload),
   onTerminalData: (cb) => ipcRenderer.on('terminal:data', (_event, payload) => cb(payload)),
+  onTerminalRemote: (cb) => ipcRenderer.on('terminal:remote', (_event, payload) => cb(payload || {})),
   onTerminalExit: (cb) => ipcRenderer.on('terminal:exit', (_event, payload) => cb(payload && payload.id)),
   // dots integration: per-pane sharing menu (main decides and confirms) and the badges' state.
   integrationPaneMenu: (payload) => ipcRenderer.send('integration:paneMenu', payload),

@@ -396,6 +396,7 @@ function wireTerminal(entry) {
   // Ctrl+C copies selection (else interrupt), Ctrl+V pastes; Ctrl+S is handled by the window handler.
   term.attachCustomKeyEventHandler((event) => {
     if (event.type !== 'keydown') return true;
+    appSelection = false; // typing clears a full-screen app's selection
     // Shift+Enter inserts a newline like Alt+Enter: send ESC+CR so CLIs (e.g. Claude Code) treat it as a newline, not submit.
     if (event.key === 'Enter' && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
       if (entry.exited) restartTerminal(entry);
@@ -429,6 +430,7 @@ function wireTerminal(entry) {
     return true;
   });
   // Right-click copy/paste via mousedown (xterm suppresses contextmenu). Logic in terminal-actions.js.
+  let appSelection = false;
   const io = {
     hasSelection: () => term.hasSelection(),
     getSelection: () => term.getSelection(),
@@ -456,28 +458,55 @@ function wireTerminal(entry) {
   // off, or when a clipboard image makes the paste intent unambiguous).
   const weOwnRightClick = () => window.terminalActions.shouldHandleRightClick({
     mouseReporting: mouseReportingActive(),
-    hasImage: window.api.clipboardHasImage()
+    hasImage: window.api.clipboardHasImage(),
+    remote: !!entry.remote,
+    appSelection
   });
+  // Track whether the mouse-reporting app likely holds a selection (see shouldHandleRightClick):
+  // observed only, never consumed, so the app still gets every left-button event.
+  let leftDown = null;
   entry.host.addEventListener('mousedown', (event) => {
-    if (event.button !== 2 || !weOwnRightClick()) return;
+    if (event.button === 0) leftDown = { x: event.clientX, y: event.clientY };
+  }, true);
+  entry.host.addEventListener('mouseup', (event) => {
+    if (event.button !== 0 || !leftDown) return;
+    appSelection = mouseReportingActive() && window.terminalActions.leftClickSelects({
+      dx: event.clientX - leftDown.x, dy: event.clientY - leftDown.y, detail: event.detail
+    });
+    leftDown = null;
+  }, true);
+  // The right-click's owner is decided once, on its mousedown, so its mouseup / contextmenu follow
+  // the same decision even after a forwarded copy cleared appSelection.
+  let rightClickOwned = false;
+  entry.host.addEventListener('mousedown', (event) => {
+    if (event.button !== 2) return;
+    rightClickOwned = weOwnRightClick();
+    // A right-click left to the app with a selection is its copy; the selection is gone after it.
+    if (!rightClickOwned) { appSelection = false; return; }
     event.preventDefault();
     event.stopPropagation();
-    // In mouse-reporting mode we only reach here for an image paste (see weOwnRightClick): the app
-    // owns selection/copy, so there's nothing to do but push the image the way Ctrl+V does.
-    if (mouseReportingActive()) { pasteImageToTerminal(entry); return; }
+    // In mouse-reporting mode we only reach here for an image paste or a remote paste (see
+    // weOwnRightClick): the app owns selection/copy, so paste the way Ctrl+V does.
+    if (mouseReportingActive()) {
+      if (window.api.clipboardHasImage()) { pasteImageToTerminal(entry); return; }
+      const text = window.api.clipboardReadText();
+      if (text) term.paste(text);
+      term.focus();
+      return;
+    }
     const result = window.terminalActions.terminalRightClick(io);
     if (result.action === 'paste') term.focus();
   }, true);
   // Also swallow the matching right-button mouseup so xterm doesn't emit a dangling release report.
   entry.host.addEventListener('mouseup', (event) => {
-    if (event.button !== 2 || !weOwnRightClick()) return;
+    if (event.button !== 2 || !rightClickOwned) return;
     event.preventDefault();
     event.stopPropagation();
   }, true);
   // Suppress xterm's own contextmenu handler (it stages the selection into the hidden textarea, which
   // could leak into the pty). Only when we own the right-click (mouse reporting off, or an image paste).
   entry.host.addEventListener('contextmenu', (event) => {
-    if (!weOwnRightClick()) return;
+    if (!rightClickOwned) return;
     event.preventDefault();
     event.stopPropagation();
   }, true);
@@ -518,7 +547,7 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   const id = nextTermId++;
   const host = document.createElement('div');
   host.className = 'term-pane';
-  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null };
+  const entry = { id, groupId: group.id, term: null, fit: null, host, divider: null, exited: false, cwd: null, name: null, remote: false };
   if (group.paneIds.length > 0) {
     entry.divider = makeTermDivider(group);
     group.container.appendChild(entry.divider);
@@ -547,6 +576,13 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   term.parser.registerOscHandler(7, (payload) => {
     const parsed = window.terminalActions.parseOsc7Cwd(payload);
     if (parsed) entry.cwd = parsed;
+    return true;
+  });
+  // OSC 52: a CLI copying to the clipboard (over ssh, Claude Code's /copy and selection copy arrive
+  // this way). Writes only — a clipboard query is ignored (see parseOsc52).
+  term.parser.registerOscHandler(52, (payload) => {
+    const text = window.terminalActions.parseOsc52(payload);
+    if (text) window.api.clipboardWriteText(text);
     return true;
   });
   // Per-pane close (shown only while split): kills this pane's shell and gives its space back.
@@ -683,6 +719,11 @@ function disposeAllTerminals() {
 window.api.onTerminalData(({ id, data }) => {
   const entry = terminals.get(id);
   if (entry) entry.term.write(data);
+});
+// Main reports whether a pane's shell runs over ssh (remote workspace or a remoteTerminals mapping).
+window.api.onTerminalRemote(({ id, remote }) => {
+  const entry = terminals.get(id);
+  if (entry) entry.remote = !!remote;
 });
 window.api.onTerminalExit((id) => {
   const entry = terminals.get(id);
@@ -2851,7 +2892,7 @@ function setSecretsVisible(on) {
 function toggleSecretsPanel() { setSecretsVisible(secretsPanel.classList.contains('hidden')); }
 
 function secretErrorText(error) {
-  const known = ['remove-failed', 'unavailable', 'invalid-key', 'duplicate', 'too-large', 'decrypt', 'not-found', 'remote'];
+  const known = ['remove-failed', 'unavailable', 'invalid-key', 'duplicate', 'too-large', 'decrypt', 'not-found'];
   return known.includes(error) ? t(`secrets.error_${error}`) : `${t('secrets.error_failed')} (${error || '?'})`;
 }
 

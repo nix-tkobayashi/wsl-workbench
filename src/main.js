@@ -1643,6 +1643,7 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = 
   const args = remote
     ? remoteTerminalArgs(sshDistro, remote, parts.join('; '))
     : ['-d', workspace.distro, '--cd', workspace.wslPath, '--exec', 'bash', '-lc', parts.join('; ')];
+  wc.send('terminal:remote', { id, remote: !!remote });
   if (remote) wc.send('terminal:data', { id, data: `\x1b[90m[remote] ssh ${remote.host}${remote.dir ? `:${remote.dir}` : ''}\x1b[0m\r\n` });
   const ptyProc = pty.spawn('wsl.exe', args, {
     name: 'xterm-256color',
@@ -1761,9 +1762,15 @@ function withSecretLock(ws, fn) {
   return run;
 }
 
+// A remote (ssh) workspace keeps its copies in the host's tmpfs, written by its agent (same layout
+// as in WSL); the result is shaped like runWsl's so both paths share the checks below.
+function remoteSecretOp(ws, op, args, timeoutMs) {
+  return Promise.resolve()
+    .then(() => remoteAgentFor(ws.distro).request(op, args, timeoutMs ? { timeoutMs } : undefined))
+    .then((p) => ({ code: 0, stdout: typeof p === 'string' ? p : '' }), (e) => ({ code: -1, stdout: '', error: e.message || String(e) }));
+}
+
 async function materializeSecret(ws, key) {
-  // Copies are written into a local distro's tmpfs; a remote (ssh) workspace has none to write to.
-  if (isRemoteDistro(ws.distro)) return { ok: false, error: 'remote' };
   const store = getSecretStore();
   let value;
   try { value = store.get(ws, key); } catch { return { ok: false, error: 'decrypt' }; }
@@ -1771,7 +1778,9 @@ async function materializeSecret(ws, key) {
   if (secretsClosing) return { ok: false, error: 'closing' };
   const slug = secretsLib.workspaceSlug(ws);
   secretDistros.add(ws.distro);
-  const write = runWsl(secretsLib.materializeArgs(ws.distro, slug, key), value);
+  const write = isRemoteDistro(ws.distro)
+    ? remoteSecretOp(ws, 'secret_put', { slug, key, b64: Buffer.from(value, 'utf8').toString('base64') })
+    : runWsl(secretsLib.materializeArgs(ws.distro, slug, key), value);
   pendingSecretWrites.add(write);
   const res = await write;
   pendingSecretWrites.delete(write);
@@ -1784,7 +1793,10 @@ async function materializeSecret(ws, key) {
 
 // True once the copy is gone (or never existed); false when WSL couldn't confirm the removal.
 async function removeSecretCopy(ws, key) {
-  const res = await runWsl(secretsLib.removeArgs(ws.distro, secretsLib.workspaceSlug(ws), key), '');
+  const slug = secretsLib.workspaceSlug(ws);
+  const res = isRemoteDistro(ws.distro)
+    ? await remoteSecretOp(ws, 'secret_remove', { slug, key })
+    : await runWsl(secretsLib.removeArgs(ws.distro, slug, key), '');
   if (res.code !== 0) return false;
   secretPaths.delete(secretPathKey(ws, key));
   return true;
@@ -1792,6 +1804,7 @@ async function removeSecretCopy(ws, key) {
 
 // Files in the workspace's legacy `.credentials/` directory that could be imported.
 async function importableCredentials(ws, existingKeys) {
+  if (isRemoteDistro(ws.distro)) return { dir: null, names: [] }; // .credentials/ import is local-only
   const dir = wslPathToWindowsFsPath(ws.distro, path.posix.join(ws.wslPath, '.credentials'));
   try {
     const entries = await withTimeout(fs.promises.readdir(dir, { withFileTypes: true }), WSL_FS_TIMEOUT_MS, 'timeout');
@@ -1976,13 +1989,26 @@ ipcMain.on('secrets:terminalMenu', (event, { x = 0, y = 0 } = {}) => {
   Menu.buildFromTemplate(items).popup({ window: win, x: Math.round(x), y: Math.round(y + TABSTRIP_H) });
 });
 
-// Remove every tmpfs copy this session wrote (the encrypted store itself stays).
+// Remove every tmpfs copy this session wrote (the encrypted store itself stays). Local distros only;
+// remote hosts are cleaned (asynchronously) by removeRemoteSecretCopies before this runs.
 function removeAllSecretCopies() {
   for (const distro of secretDistros) {
+    if (isRemoteDistro(distro)) continue;
     try {
       require('child_process').spawnSync('wsl.exe', secretsLib.removeAllArgs(distro), { timeout: 5000, windowsHide: true });
     } catch {}
   }
+}
+
+// Bounded: a host that can't be reached within the timeout keeps its copies until its tmpfs is
+// cleared (logout / reboot).
+const REMOTE_SECRET_CLEANUP_MS = 5000;
+function removeRemoteSecretCopies() {
+  const hosts = [...secretDistros].filter((d) => isRemoteDistro(d) && remoteHostOf(d));
+  return Promise.allSettled(hosts.map((distro) => Promise.race([
+    remoteSecretOp({ distro }, 'secret_remove_all', {}, REMOTE_SECRET_CLEANUP_MS),
+    new Promise((resolve) => setTimeout(resolve, REMOTE_SECRET_CLEANUP_MS))
+  ])));
 }
 
 // --- dots integration (stage A, read-only). Everything that grants access happens here, from an
@@ -2137,6 +2163,7 @@ async function showInputConfirmation(req) {
 }
 
 let appQuitting = false;
+let remoteSecretsCleaned = false;
 app.on('will-quit', (event) => {
   // Secret copies still being written must finish before the cleanup, or a late writer would
   // leave a plaintext copy behind after exit: hold the quit until they settle, then quit again
@@ -2146,6 +2173,14 @@ app.on('will-quit', (event) => {
     // Each write settles within runWsl's own timeout, so this wait is bounded.
     event.preventDefault();
     Promise.allSettled([...pendingSecretWrites]).then(() => app.quit());
+    return;
+  }
+  // Copies on ssh hosts go through their agents, which must still be connected: clean them first,
+  // then quit again (remoteSecretsCleaned keeps this from repeating).
+  if (!remoteSecretsCleaned && [...secretDistros].some(isRemoteDistro)) {
+    event.preventDefault();
+    remoteSecretsCleaned = true;
+    removeRemoteSecretCopies().then(() => app.quit());
     return;
   }
   appQuitting = true;
