@@ -50,19 +50,38 @@ class RemoteError extends Error {
   constructor(message, code = 'EIO') { super(message); this.name = 'RemoteError'; this.code = code; }
 }
 
+// Wait before reconnecting after a failed connection: doubles per failure up to the cap, so the
+// tree's 1.5 s poll can't spawn an ssh (and an SSM session) every tick while a host is down.
+function reconnectDelayMs(failures, baseMs = 2000, maxMs = 30000) {
+  if (!(failures > 0)) return 0;
+  return Math.min(maxMs, baseMs * 2 ** Math.min(failures - 1, 16));
+}
+
 // One agent process (one ssh connection) per host, started on first use and restarted on the next
-// request after it dies. `spawn` returns a ChildProcess-like object (stdin/stdout/stderr, 'exit').
+// request after it dies (after reconnectDelayMs once connecting has failed; `reconnect()` skips the
+// wait). `spawn` returns a ChildProcess-like object (stdin/stdout/stderr, 'exit'). `beforeStart`
+// (optional, async) runs before each connection attempt — main uses it to wait for the local
+// secret copies an ssh ProxyCommand may read.
 class RemoteAgent {
-  constructor(spawn, { label = 'remote', readyTimeoutMs = 60000, requestTimeoutMs = 30000 } = {}) {
+  constructor(spawn, { label = 'remote', readyTimeoutMs = 60000, requestTimeoutMs = 30000, beforeStart = null, now = Date.now } = {}) {
     this.spawn = spawn;
     this.label = label;
     this.readyTimeoutMs = readyTimeoutMs;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.beforeStart = beforeStart;
+    this.now = now;
     this.child = null;
     this.ready = null;
+    this.starting = null;
     this.pending = new Map();
     this.seq = 0;
+    this.failures = 0;      // consecutive failed connection attempts
+    this.lastError = null;  // the error of the last failed attempt
+    this.lastFailureAt = 0;
   }
+
+  // Whether the agent is currently connected (or connecting).
+  get connected() { return !!this.child; }
 
   _start() {
     const child = this.spawn();
@@ -80,7 +99,13 @@ class RemoteAgent {
       clearTimeout(readyTimer);
       const tail = stderr.trim().split('\n').slice(-3).join('\n');
       const err = new RemoteError(`${this.label}: ${message}${tail ? `\n${tail}` : ''}`, 'ECONNRESET');
-      if (!readyDone) { readyDone = true; rejectReady(err); }
+      if (!readyDone) {
+        readyDone = true;
+        this.failures += 1;
+        this.lastError = err;
+        this.lastFailureAt = this.now();
+        rejectReady(err);
+      }
       for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(err); }
       this.pending.clear();
       try { child.kill(); } catch {}
@@ -93,6 +118,8 @@ class RemoteAgent {
       if (msg.id === 0 && !readyDone) {
         readyDone = true;
         clearTimeout(readyTimer);
+        this.failures = 0;
+        this.lastError = null;
         this.info = msg.result || {};
         resolveReady(this.info);
         return;
@@ -125,9 +152,32 @@ class RemoteAgent {
     child.stdin.on('error', () => {});
   }
 
+  async _ensureStarted() {
+    if (this.child) return;
+    const wait = reconnectDelayMs(this.failures) - (this.now() - this.lastFailureAt);
+    if (this.failures && wait > 0) {
+      throw new RemoteError(`${this.lastError ? this.lastError.message : `${this.label}: not connected`}`, 'ENOTCONN');
+    }
+    if (!this.beforeStart) { this._start(); return; }
+    if (!this.starting) {
+      this.starting = (async () => {
+        try { if (this.beforeStart) await this.beforeStart(); } catch { /* best effort */ }
+        if (!this.child) this._start();
+      })().finally(() => { this.starting = null; });
+    }
+    await this.starting;
+  }
+
+  // Drop the reconnect wait so the next request connects right away (the user asked to retry).
+  reconnect() {
+    this.failures = 0;
+    this.lastFailureAt = 0;
+  }
+
   async request(op, args = {}, { timeoutMs = this.requestTimeoutMs } = {}) {
-    if (!this.child) this._start();
+    await this._ensureStarted();
     const child = this.child;
+    if (!child) throw new RemoteError(`${this.label}: connection closed`, 'ECONNRESET');
     await this.ready;
     if (this.child !== child) throw new RemoteError(`${this.label}: connection closed`, 'ECONNRESET');
     const id = ++this.seq;
@@ -172,5 +222,5 @@ class RemoteAgentPool {
 
 module.exports = {
   REMOTE_PREFIX, remoteHostOf, isRemoteDistro, remoteDistro, parseRemoteSpec,
-  agentRemoteCommand, agentSshArgs, RemoteError, RemoteAgent, RemoteAgentPool
+  agentRemoteCommand, agentSshArgs, reconnectDelayMs, RemoteError, RemoteAgent, RemoteAgentPool
 };

@@ -28,6 +28,8 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 /* Distro name badge before the path (e.g. Ubuntu-22.04), matching the branch badge's look. */
 #cwdDistro { flex:0 0 auto; max-width:40%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); background:#2b2b2b; border:1px solid #3f3f3f; border-radius:4px; padding:1px 7px; font-size:11px; }
 #cwdDistro.hidden { display:none; }
+#cwdDistro.disconnected { color:#fff; background:#7a2b2b; border-color:#a33; cursor:pointer; }
+#cwdDistro.disconnected.reconnecting { opacity:.6; cursor:progress; }
 #cwdPath { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 /* Git branch badge in the tree header; ⎇ + branch name, with a * suffix (added in JS) when dirty. */
 #gitBranch { flex:0 0 auto; max-width:45%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); background:#2b2b2b; border-radius:4px; padding:1px 7px; font-size:11px; }

@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {
   remoteHostOf, isRemoteDistro, remoteDistro, parseRemoteSpec,
-  agentRemoteCommand, agentSshArgs, RemoteAgent, RemoteAgentPool
+  agentRemoteCommand, agentSshArgs, reconnectDelayMs, RemoteAgent, RemoteAgentPool
 } = require('../src/remote-workspace');
 
 // The exact remote command ssh would run, executed by a local shell instead.
@@ -52,10 +52,15 @@ test('agent over the real remote command: hello, ops, errors with codes', async 
   const agent = new RemoteAgent(localAgent, { label: 'local' });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-agent-'));
   try {
-    assert.equal(await agent.request('realdir', { path: dir }), fs.realpathSync(dir));
+    assert.deepEqual(await agent.request('resolvedir', { path: dir }), { path: fs.realpathSync(dir), exists: true, isDir: true });
     assert.equal(agent.info.version, 1);
-    assert.equal(await agent.request('realdir', { path: '~' }), fs.realpathSync(os.homedir()));
-    await assert.rejects(agent.request('realdir', { path: path.join(dir, 'nope') }), { code: 'ENOTDIR' });
+    assert.equal((await agent.request('resolvedir', { path: '~' })).path, fs.realpathSync(os.homedir()));
+    const missing = path.join(dir, 'nope', 'deeper');
+    assert.deepEqual(await agent.request('resolvedir', { path: missing }), { path: missing, exists: false, isDir: false });
+    assert.equal(await agent.request('mkdirs', { path: missing }), missing);
+    assert.equal(fs.statSync(missing).isDirectory(), true);
+    fs.writeFileSync(path.join(dir, 'plain'), '');
+    assert.deepEqual(await agent.request('resolvedir', { path: path.join(dir, 'plain') }), { path: path.join(dir, 'plain'), exists: true, isDir: false });
     await assert.rejects(agent.request('stat', { path: 'relative' }), { code: 'EINVAL' });
     await assert.rejects(agent.request('bogus'), { code: 'ENOSYS' });
     const f = path.join(dir, 'a.txt');
@@ -108,12 +113,17 @@ function fakeChild() {
 
 test('a dying connection rejects pending requests with ssh stderr, and the next request reconnects', async () => {
   const children = [];
-  const agent = new RemoteAgent(() => { const c = fakeChild(); children.push(c); return c; }, { label: 'ssh h' });
+  let clock = 1000;
+  const agent = new RemoteAgent(() => { const c = fakeChild(); children.push(c); return c; }, { label: 'ssh h', now: () => clock });
   const p1 = agent.request('stat', { path: '/' });
   children[0].stderr.write('ssh: connect to host h: Connection refused\n');
   await new Promise((r) => setImmediate(r));
   children[0].emit('exit', 255);
   await assert.rejects(p1, (e) => e.code === 'ECONNRESET' && /Connection refused/.test(e.message));
+  // Within the reconnect wait the last error comes back without spawning another ssh.
+  await assert.rejects(agent.request('stat', { path: '/' }), (e) => e.code === 'ENOTCONN' && /Connection refused/.test(e.message));
+  assert.equal(children.length, 1);
+  clock += 2000;
   const p2 = agent.request('stat', { path: '/' });
   assert.equal(children.length, 2);
   children[1].stdout.write('{"id":0,"ok":true,"result":{"version":1}}\n');
@@ -130,6 +140,7 @@ test('no hello within the ready timeout fails the connection; a slow request tim
   const agent = new RemoteAgent(() => { const c = fakeChild(); children.push(c); return c; }, { readyTimeoutMs: 20, requestTimeoutMs: 20 });
   await assert.rejects(agent.request('stat', { path: '/' }), /connection timed out/);
   assert.equal(children[0].killed, true);
+  agent.reconnect(); // skip the reconnect wait
   const p = agent.request('stat', { path: '/' });
   children[1].stdout.write('{"id":0,"ok":true,"result":{}}\n');
   await assert.rejects(p, { code: 'ETIMEDOUT' });
@@ -200,4 +211,30 @@ test('a read never sees a file mid-save', async () => {
     agent.dispose();
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('reconnectDelayMs doubles per failure up to the cap', () => {
+  assert.equal(reconnectDelayMs(0), 0);
+  assert.equal(reconnectDelayMs(1), 2000);
+  assert.equal(reconnectDelayMs(2), 4000);
+  assert.equal(reconnectDelayMs(4), 16000);
+  assert.equal(reconnectDelayMs(5), 30000);
+  assert.equal(reconnectDelayMs(50), 30000);
+});
+
+test('beforeStart runs before each connection attempt', async () => {
+  const order = [];
+  const children = [];
+  const agent = new RemoteAgent(() => { order.push('spawn'); const c = fakeChild(); children.push(c); return c; }, {
+    beforeStart: async () => { order.push('before'); }
+  });
+  const p = agent.request('stat', { path: '/' });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(order, ['before', 'spawn']);
+  children[0].stdout.write('{"id":0,"ok":true,"result":{}}\n');
+  await new Promise((r) => setImmediate(r));
+  const { id } = JSON.parse(children[0].stdin.read().toString());
+  children[0].stdout.write(`${JSON.stringify({ id, ok: true, result: 1 })}\n`);
+  assert.equal(await p, 1);
+  agent.dispose();
 });

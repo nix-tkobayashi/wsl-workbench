@@ -140,7 +140,7 @@ Keep credentials (AWS keys, tokens…) per workspace without putting a file in t
 - **Key = file name, value = file contents.** Keys use letters, digits, `.`, `_`, `-` (1–64 chars). Each row has `→` (insert path), 👁 (show the value for 10 s), ✎ (edit), 🗑 (delete); `+ Add` creates one.
 - **Storage**: values are encrypted by Windows (DPAPI, via Electron `safeStorage`) under `%APPDATA%\wsl-workbench\secrets\` — nothing is written into the workspace.
 - **Handing a secret to a CLI**: `→` (or double-click the row, or the 🔑 button in the terminal tab strip) writes a plaintext copy to WSL tmpfs — `/run/user/<uid>/wb-secrets/<folder>-<id>/<key>` (`/dev/shm/wslwb-<uid>/…` when `/run/user/<uid>` is missing), mode `0600` in `0700` directories — and types its path into the focused terminal without Enter. Ask the CLI to "use this file".
-- The copies are removed when the app quits. The path is fixed per workspace and key, and the copies handed out before are re-created when the workspace is opened again, so a path given to a CLI earlier keeps working after a restart.
+- The copies are removed when the app quits. The path is fixed per workspace and key, and the copies handed out before are re-created at the next start (v0.40.0: for every local recent workspace at app start, before any ssh connection — so an ssh `ProxyCommand` that sources one works right after a restart; remote hosts' copies when their workspace is opened), so a path given to a CLI earlier keeps working after a restart.
 - **Paste value…** (terminal 🔑 menu) types the value itself after a warning — it becomes input to the running program and stays in the scrollback; the path is usually enough.
 - **Import**: if the workspace has a `.credentials/` folder, the panel offers to import its files (UTF-8 text) and then asks whether to delete the plaintext originals.
 
@@ -153,15 +153,23 @@ with your subscription login on that host.
 - **Workspace > Open Remote Workspace (SSH)...** or **Open Remote (SSH)…** on the landing screen,
   then enter `host:/path` — `host` is a `Host` from `~/.ssh/config` in WSL (keys, agent, SSM
   `ProxyCommand` all apply), the path may be absolute, `~/dir`, or omitted (home).
-- The workspace shows as `ssh:<host>` (badge, recent list, sessions). Terminals are `ssh -t <host>`
-  started in the workspace directory.
+- Workspaces are labeled `WSL:<distro>:<path>` / `SSH:<host>:<path>` (badge, tab tooltip, recent
+  list; v0.40.0). Terminals are `ssh -t <host>` started in the workspace directory.
+- A directory that doesn't exist yet is created (with its parents) after you confirm (v0.40.0).
+- **Clone to Remote (SSH)…** on the landing screen clones a Git URL into `host:/parent` on the host
+  and opens it (v0.40.0). Auth must work without a prompt on the host (ssh key / credential helper).
+- Connection loss (v0.40.0): the workspace badge turns red; click it to reconnect now — otherwise the
+  app retries on its own, waiting 2 s doubling up to 30 s between attempts. Opening a remote
+  workspace that can't be reached (e.g. at startup) offers to retry. A dropped terminal pane
+  restarts on a key press.
 - The host needs `python3` (stdlib only). Workbench starts a small agent there over one ssh
   connection per host (`src/remote-agent.py`, sent on each connect — nothing is installed) and does
   file and git operations through it. ssh runs in batch mode, so the host key must already be
   known and auth must not prompt: run `ssh <host>` once in a terminal first.
 - ssh runs inside the default distro (`Ubuntu`, or settings `"remoteSshDistro": "<distro>"`).
 - Dropping Windows files on the tree uploads them (100MB per file). Pasting an image into a remote
-  terminal uploads it to `~/.cache/wsl-workbench/paste/` (0600) and types its path.
+  terminal uploads it to `~/.cache/wsl-workbench/paste/` (0600) and types its path; images older
+  than 7 days there are deleted on the next paste (v0.40.0).
 - Workspace secrets (v0.39.0): `→` writes the copy into the **host's** tmpfs
   (`/run/user/<uid>/wb-secrets/…`, else `/dev/shm/wslwb-<uid>/…`, same modes as locally) and types
   that path; the copies are removed from the host when the app quits (if it is still reachable,
@@ -171,7 +179,7 @@ with your subscription login on that host.
   (Claude Code's `/copy` and its selection copy). Right-click pastes the Windows clipboard even
   while a full-screen app has mouse reporting on — unless you just selected text in it (drag or
   double-click), in which case the right-click goes to the app as its copy.
-- Not available remotely yet: Reveal in Explorer, clone from the landing screen.
+- Not available remotely: Reveal in Explorer (hidden from the menu), `.credentials/` import.
 
 ## Remote terminal over ssh (prototype, v0.37.0)
 

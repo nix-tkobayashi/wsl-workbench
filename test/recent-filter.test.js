@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { recentLabel, filterRecentWorkspaces } = require('../src/recent-filter');
+const { recentLabel, workspaceKind, workspaceLabel, filterRecentWorkspaces } = require('../src/recent-filter');
 
 const items = [
   { distro: 'Ubuntu', wslPath: '/home/u/projects/nix/nix-workbench-lite' },
@@ -11,8 +11,12 @@ const items = [
   { distro: 'Debian', wslPath: '/srv/Infra/terraform' },
 ];
 
-test('recentLabel is distro:path', () => {
-  assert.equal(recentLabel(items[0]), 'Ubuntu:/home/u/projects/nix/nix-workbench-lite');
+test('recentLabel is kind:distro:path (WSL / SSH)', () => {
+  assert.equal(recentLabel(items[0]), 'WSL:Ubuntu:/home/u/projects/nix/nix-workbench-lite');
+  assert.equal(recentLabel({ distro: 'ssh:ec2-dev', wslPath: '/home/ec2-user/app' }), 'SSH:ec2-dev:/home/ec2-user/app');
+  assert.equal(workspaceKind('Ubuntu-22.04'), 'WSL:Ubuntu-22.04');
+  assert.equal(workspaceKind('ssh:ec2-dev'), 'SSH:ec2-dev');
+  assert.equal(workspaceLabel({ distro: 'ssh:h', wslPath: '/x' }), 'SSH:h:/x');
 });
 
 test('blank query returns everything in order', () => {

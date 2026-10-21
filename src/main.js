@@ -35,6 +35,7 @@ const WSL_FS_TIMEOUT_MS = Math.max(1000, Number(process.env.WSLWB_FS_TIMEOUT_MS)
 const { WORKSPACE_EXT } = require('./workspace-args'); // single source for the extension + argv parsing
 const { shellCdCommand } = require('./terminal-actions'); // inherited-cwd `cd` for terminal:start
 const { findRemoteTerminal, remoteTerminalArgs } = require('./remote-terminal');
+const { workspaceLabel } = require('./recent-filter');
 const { remoteHostOf, isRemoteDistro, remoteDistro, parseRemoteSpec, agentSshArgs, RemoteAgentPool } = require('./remote-workspace');
 const remoteFs = require('./remote-fs');
 const { tabTitleForWorkspace, classifyTabDrop, nextActiveTab, shellWindowTitle } = require('./tab-shell');
@@ -134,8 +135,12 @@ function remoteSshDistro() {
   const d = readSettings().remoteSshDistro;
   return typeof d === 'string' && d && !isRemoteDistro(d) ? d : DEFAULT_DISTRO;
 }
+// Each connection first waits for the startup restore of local secret copies: an ssh ProxyCommand
+// may read one (e.g. AWS credentials for an SSM session). Bounded: every copy write has runWsl's
+// own timeout, so the restore always settles.
 const remoteAgents = new RemoteAgentPool((host) =>
-  require('child_process').spawn('wsl.exe', agentSshArgs(remoteSshDistro(), host), { windowsHide: true }));
+  require('child_process').spawn('wsl.exe', agentSshArgs(remoteSshDistro(), host), { windowsHide: true }),
+{ beforeStart: () => localSecretsReady });
 // The agent for a remote workspace's distro, or null for a local one. A malformed `ssh:` distro is
 // refused rather than treated as a (nonexistent) local distro.
 function remoteAgentFor(distro) {
@@ -478,7 +483,7 @@ function pushTabsState(win) {
       ),
       // Hover tooltip: the untruncated identity of the tab (full workspace path; ellipsized
       // labels and same-named leaf directories are both disambiguated by it).
-      tooltip: landing || !state ? tr('tabs.newTab') : `${state.workspace.distro}: ${state.workspace.wslPath}`
+      tooltip: landing || !state ? tr('tabs.newTab') : workspaceLabel(state.workspace)
     };
   });
   const active = tabs.find((tab) => tab.id === ws.activeId);
@@ -1015,6 +1020,7 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     initLanguage();
     initIntegration();
+    localSecretsReady = restoreLocalSecretCopies();
     checkForUpdatesInBackground('startup'); // fire-and-forget; windows are notified when a newer release exists
     const periodic = setInterval(() => checkForUpdatesInBackground('periodic'), updateSchedule.PERIOD_MS);
     if (periodic.unref) periodic.unref();
@@ -1129,12 +1135,59 @@ ipcMain.handle('workspace:openRecent', (event, { distro = DEFAULT_DISTRO, wslPat
 // workspace. The agent resolves it (~, symlinks) and checks it is a directory before switching, so
 // a typo or an unreachable host is reported here instead of as a failed tree load.
 ipcMain.handle('workspace:openRemote', async (event, { spec } = {}) => {
-  const { state } = getStateForWebContents(event.sender);
+  const { win, state } = getStateForWebContents(event.sender);
   const parsed = parseRemoteSpec(spec);
   if (!parsed) throw new Error(tr('remote.invalidSpec'));
-  const wslPath = await remoteAgents.get(parsed.host).request('realdir', { path: parsed.path });
+  const agent = remoteAgents.get(parsed.host);
+  agent.reconnect(); // an explicit open always tries to connect, even right after a failure
+  const wslPath = await ensureRemoteDir(win, agent, parsed);
+  if (!wslPath) return { ok: false };
   setCurrentWorkspaceForView(state, { distro: remoteDistro(parsed.host), wslPath });
   return { ok: true };
+});
+
+// Resolve a user-typed remote directory; a missing one is created (with its parents) after the user
+// confirms. Returns the real path, or null when the user declined.
+async function ensureRemoteDir(win, agent, parsed) {
+  const dir = await agent.request('resolvedir', { path: parsed.path });
+  if (dir.isDir) return dir.path;
+  if (dir.exists) throw new Error(tr('remote.notDirectory').replace('{path}', dir.path));
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'question',
+    buttons: [tr('remote.createDir'), tr('prompt.cancel')],
+    defaultId: 0,
+    cancelId: 1,
+    message: tr('remote.createDirPrompt').replace('{path}', `${parsed.host}:${dir.path}`)
+  });
+  if (response !== 0) return null;
+  return agent.request('mkdirs', { path: dir.path });
+}
+
+// Clone a repo into a directory on an ssh host ("host:/parent"), then open it as the workspace.
+const REMOTE_CLONE_TIMEOUT_MS = 15 * 60 * 1000;
+ipcMain.handle('workspace:cloneRemote', async (event, { spec, url } = {}) => {
+  const { win, state } = getStateForWebContents(event.sender);
+  const parsed = parseRemoteSpec(spec);
+  if (!parsed) throw new Error(tr('remote.invalidSpec'));
+  const cleanUrl = String(url || '').trim();
+  if (!cleanUrl) throw new Error('Repository URL is required.');
+  const name = repoDirNameFromUrl(cleanUrl);
+  if (!name) throw new Error('Could not determine a folder name from the URL.');
+  const agent = remoteAgents.get(parsed.host);
+  agent.reconnect();
+  const parent = await ensureRemoteDir(win, agent, parsed);
+  if (!parent) return { ok: false };
+  const wslPath = await agent.request('git_clone', { parent, url: cleanUrl, name, timeout: REMOTE_CLONE_TIMEOUT_MS / 1000 },
+    { timeoutMs: REMOTE_CLONE_TIMEOUT_MS + 30000 });
+  setCurrentWorkspaceForView(state, { distro: remoteDistro(parsed.host), wslPath });
+  return { ok: true, wslPath, name };
+});
+
+// "Reconnect" on a disconnected remote workspace: skip the reconnect wait for its host.
+ipcMain.handle('remote:reconnect', (_event, { distro } = {}) => {
+  const host = remoteHostOf(distro);
+  if (host) remoteAgents.get(host).reconnect();
+  return { ok: !!host };
 });
 
 // --- Editor session persistence: which files were open per workspace, restored on reopen. ---
@@ -1600,7 +1653,8 @@ ipcMain.handle('folder:pick', async (event) => {
 // views down asynchronously (viewState is unregistered, then webContents.close() runs the page
 // teardown), and the closing renderer can still emit a resize/write/close. Dropping such a
 // message is correct — throwing would surface an uncaught-exception dialog per tab.
-ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = '' }) => {
+const pendingTerminalStarts = new Map(); // `${viewId}/${termId}` -> token of a start waiting on secrets
+ipcMain.on('terminal:start', async (event, { id, distro, wslPath, command = '', cwd = '' }) => {
   const state = viewState.get(event.sender.id);
   const win = state && state.winId != null ? BrowserWindow.fromId(state.winId) : null;
   if (!state || !win || win.isDestroyed()) return;
@@ -1645,10 +1699,25 @@ ipcMain.on('terminal:start', (event, { id, distro, wslPath, command = '', cwd = 
     : ['-d', workspace.distro, '--cd', workspace.wslPath, '--exec', 'bash', '-lc', parts.join('; ')];
   wc.send('terminal:remote', { id, remote: !!remote });
   if (remote) wc.send('terminal:data', { id, data: `\x1b[90m[remote] ssh ${remote.host}${remote.dir ? `:${remote.dir}` : ''}\x1b[0m\r\n` });
+  // ssh may need a local secret copy (ProxyCommand); right after app start, wait for its restore.
+  // A newer start of this pane, or the view going away, meanwhile supersedes this one.
+  let size = { cols: 100, rows: 30 };
+  if (remote) {
+    const token = { size: null };
+    state.terminals.delete(id); // the old pty was killed above; nothing may resize it meanwhile
+    pendingTerminalStarts.set(`${wc.id}/${id}`, token);
+    await localSecretsReady;
+    if (pendingTerminalStarts.get(`${wc.id}/${id}`) !== token) return;
+    pendingTerminalStarts.delete(`${wc.id}/${id}`);
+    if (wc.isDestroyed() || viewState.get(wc.id) !== state) return;
+    if (token.size) size = token.size;
+  } else {
+    pendingTerminalStarts.delete(`${wc.id}/${id}`);
+  }
   const ptyProc = pty.spawn('wsl.exe', args, {
     name: 'xterm-256color',
-    cols: 100,
-    rows: 30,
+    cols: size.cols,
+    rows: size.rows,
     cwd: os.homedir(),
     env: process.env
   });
@@ -1684,12 +1753,16 @@ ipcMain.on('terminal:write', (event, { id, data }) => {
 });
 
 ipcMain.on('terminal:resize', (event, { id, cols, rows }) => {
+  // A pane whose start is still waiting on secrets keeps the latest size for its spawn.
+  const pending = pendingTerminalStarts.get(`${event.sender.id}/${id}`);
+  if (pending) { if (cols && rows) pending.size = { cols, rows }; return; }
   const state = viewState.get(event.sender.id);
   const ptyProc = state && state.terminals.get(id);
   if (ptyProc && cols && rows) ptyProc.resize(cols, rows);
 });
 
 ipcMain.on('terminal:close', (event, { id }) => {
+  pendingTerminalStarts.delete(`${event.sender.id}/${id}`); // a start still waiting on secrets is dropped
   const state = viewState.get(event.sender.id);
   if (!state) return;
   const ptyProc = state.terminals.get(id);
@@ -1826,17 +1899,21 @@ ipcMain.handle('secrets:list', async (event) => {
   return withSecretLock(ws, () => listSecrets(ws));
 });
 
+// Once per workspace per app session (callers hold its secret lock).
+async function restoreSecretCopies(ws) {
+  const id = secretsLib.workspaceId(ws);
+  if (restoredSecretWorkspaces.has(id)) return;
+  restoredSecretWorkspaces.add(id);
+  for (const item of getSecretStore().list(ws)) {
+    if (item.materialized) await materializeSecret(ws, item.key);
+  }
+}
+
 async function listSecrets(ws) {
   const store = getSecretStore();
-  const id = secretsLib.workspaceId(ws);
   // First open of this workspace in this app session: re-create the copies that were handed out
   // before, at the same fixed paths, so a path given to a CLI earlier keeps working.
-  if (!restoredSecretWorkspaces.has(id)) {
-    restoredSecretWorkspaces.add(id);
-    for (const item of store.list(ws)) {
-      if (item.materialized) await materializeSecret(ws, item.key);
-    }
-  }
+  await restoreSecretCopies(ws);
   const items = store.list(ws).map((i) => ({ key: i.key, path: secretPaths.get(secretPathKey(ws, i.key)) || null }));
   const { names } = await importableCredentials(ws, items.map((i) => i.key));
   return { available: safeStorage.isEncryptionAvailable(), items, importable: names };
@@ -2009,6 +2086,28 @@ function removeRemoteSecretCopies() {
     remoteSecretOp({ distro }, 'secret_remove_all', {}, REMOTE_SECRET_CLEANUP_MS),
     new Promise((resolve) => setTimeout(resolve, REMOTE_SECRET_CLEANUP_MS))
   ])));
+}
+
+// At startup, re-create the copies handed out before for every local recent workspace (not only when
+// that workspace is opened), so a path another program reads — e.g. an ssh ProxyCommand sourcing
+// AWS credentials for a remote workspace — works right after a restart. Remote hosts' copies are
+// re-created when their workspace is opened (that needs the connection).
+let localSecretsReady = Promise.resolve();
+function restoreLocalSecretCopies() {
+  if (!safeStorage.isEncryptionAvailable()) return Promise.resolve();
+  const recents = readSettings().recentWorkspaces;
+  const seen = new Set();
+  const jobs = [];
+  for (const e of Array.isArray(recents) ? recents : []) {
+    if (!e || !e.wslPath || isRemoteDistro(e.distro)) continue;
+    const ws = normalizeWorkspace(e);
+    const id = secretsLib.workspaceId(ws);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (!getSecretStore().list(ws).some((i) => i.materialized)) continue;
+    jobs.push(withSecretLock(ws, () => restoreSecretCopies(ws)));
+  }
+  return Promise.allSettled(jobs);
 }
 
 // --- dots integration (stage A, read-only). Everything that grants access happens here, from an
