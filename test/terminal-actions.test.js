@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments, loadWebglRenderer } = require('../src/terminal-actions');
+const { splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc52, leftClickSelects, parseOsc7Cwd, shellCdCommand, buildTabSegments, loadWebglRenderer } = require('../src/terminal-actions');
 
 // Build a mock io that records calls and lets the test control selection/clipboard.
 function makeIO({ selection = '', clipboard = '' } = {}) {
@@ -265,4 +265,32 @@ test('loadWebglRenderer: context loss disposes the addon so the pane falls back 
   addon.lossHandler();
   assert.equal(addon.disposed, 1);
   assert.equal(errors.length, 1);
+});
+
+test('shouldHandleRightClick: over ssh the renderer pastes unless the app holds a selection', () => {
+  assert.equal(shouldHandleRightClick({ mouseReporting: true, hasImage: false, remote: true, appSelection: false }), true);
+  assert.equal(shouldHandleRightClick({ mouseReporting: true, hasImage: false, remote: true, appSelection: true }), false);
+  assert.equal(shouldHandleRightClick({ mouseReporting: true, hasImage: true, remote: true, appSelection: true }), true);
+  // Local terminals keep leaving the click to the app.
+  assert.equal(shouldHandleRightClick({ mouseReporting: true, hasImage: false, remote: false, appSelection: false }), false);
+});
+
+test('parseOsc52: decodes clipboard writes, refuses queries and junk', () => {
+  const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
+  assert.equal(parseOsc52(`c;${b64('hello')}`), 'hello');
+  assert.equal(parseOsc52(`;${b64('日本語\nline2')}`), '日本語\nline2');
+  assert.equal(parseOsc52(`c;${b64('abc').slice(0, 2)}\n${b64('abc').slice(2)}`), 'abc');
+  assert.equal(parseOsc52('c;?'), null);
+  assert.equal(parseOsc52('c;'), null);
+  assert.equal(parseOsc52('no-separator'), null);
+  assert.equal(parseOsc52('c;not base64!'), null);
+  assert.equal(parseOsc52(`c;${b64('x'.repeat(100))}`, 10), null);
+  assert.equal(parseOsc52(`c;${b64('x'.repeat(10))}`, 10), 'x'.repeat(10));
+});
+
+test('leftClickSelects: drags and double-clicks select, plain clicks do not', () => {
+  assert.equal(leftClickSelects({ dx: 0, dy: 0, detail: 1 }), false);
+  assert.equal(leftClickSelects({ dx: 2, dy: 2, detail: 1 }), false);
+  assert.equal(leftClickSelects({ dx: 30, dy: 0, detail: 1 }), true);
+  assert.equal(leftClickSelects({ dx: 0, dy: 0, detail: 2 }), true);
 });

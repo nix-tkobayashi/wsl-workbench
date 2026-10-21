@@ -162,7 +162,16 @@ with your subscription login on that host.
 - ssh runs inside the default distro (`Ubuntu`, or settings `"remoteSshDistro": "<distro>"`).
 - Dropping Windows files on the tree uploads them (100MB per file). Pasting an image into a remote
   terminal uploads it to `~/.cache/wsl-workbench/paste/` (0600) and types its path.
-- Not available remotely yet: Reveal in Explorer, workspace secrets, clone from the landing screen.
+- Workspace secrets (v0.39.0): `→` writes the copy into the **host's** tmpfs
+  (`/run/user/<uid>/wb-secrets/…`, else `/dev/shm/wslwb-<uid>/…`, same modes as locally) and types
+  that path; the copies are removed from the host when the app quits (if it is still reachable,
+  within 5 s — otherwise they stay until the host's tmpfs is cleared). `.credentials/` import is
+  local-only.
+- Clipboard in ssh terminals (v0.39.0): a CLI's copy reaches the Windows clipboard via OSC 52
+  (Claude Code's `/copy` and its selection copy). Right-click pastes the Windows clipboard even
+  while a full-screen app has mouse reporting on — unless you just selected text in it (drag or
+  double-click), in which case the right-click goes to the app as its copy.
+- Not available remotely yet: Reveal in Explorer, clone from the landing screen.
 
 ## Remote terminal over ssh (prototype, v0.37.0)
 
@@ -179,7 +188,7 @@ local workspace. There is no UI yet — add the mapping to `%APPDATA%\wsl-workbe
 - A workspace whose path equals `wslPath` (optional `distro` narrows the match) opens every terminal — new tabs, splits, restarts — as `ssh -t <host>` run **inside that distro**, so its `~/.ssh/config` (keys, agent, SSM `ProxyCommand`) applies. `dir` (optional, absolute) is the remote start directory; if it can't be entered you get a plain remote shell.
 - Read at each terminal start, so no restart is needed after editing. Malformed entries are ignored.
 - A dropped connection ends the pane within ~2 minutes (`ServerAliveInterval=30`); press a key to reconnect.
-- Image paste and workspace secrets still target the local distro.
+- Image paste and workspace secrets still target the local distro. Clipboard copy (OSC 52) and right-click paste work as in remote workspaces (v0.39.0).
 
 ## dots integration (preview)
 

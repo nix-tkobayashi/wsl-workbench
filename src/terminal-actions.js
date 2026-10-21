@@ -30,8 +30,40 @@
   // mouse reporting is off. When it's ON we normally bow out — except for an image on the clipboard,
   // whose paste intent is unambiguous and which the app can't consume through a mouse event anyway,
   // so we still bridge it to the terminal (an image paste, the way Ctrl+V does it).
-  function shouldHandleRightClick({ mouseReporting, hasImage }) {
-    return !mouseReporting || !!hasImage;
+  // In a terminal running over ssh, the app (e.g. Claude Code) pastes on right-click by reading ITS
+  // host's clipboard, which a remote host doesn't have — so we paste ourselves unless the app holds
+  // a selection (`appSelection`: the user just dragged / double-clicked), whose right-click is the
+  // app's copy (it reaches us as OSC 52, see parseOsc52).
+  function shouldHandleRightClick({ mouseReporting, hasImage, remote = false, appSelection = false }) {
+    return !mouseReporting || !!hasImage || (!!remote && !appSelection);
+  }
+
+  // OSC 52 (set clipboard) payload "<targets>;<base64>" → the text to put on the clipboard, or null.
+  // CLIs on an ssh host copy this way (Claude Code's /copy and selection copy), since the host has no
+  // clipboard of its own. A query ("?") is refused: a program must not read the user's clipboard.
+  // `maxBytes` bounds the decoded text.
+  function parseOsc52(payload, maxBytes = 1024 * 1024) {
+    const text = String(payload == null ? '' : payload);
+    const semi = text.indexOf(';');
+    if (semi < 0) return null;
+    const data = text.slice(semi + 1).replace(/\s+/g, '');
+    if (!data || data === '?' || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) return null;
+    if (data.length > Math.ceil(maxBytes / 3) * 4) return null; // decoded size checked again below
+    let bytes;
+    try {
+      const bin = atob(data);
+      bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    } catch {
+      return null;
+    }
+    if (bytes.length > maxBytes) return null;
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+
+  // Whether a left-button press/release pair (mouse-reporting mode) left a selection in the app: a
+  // drag of more than a few pixels or a double-click selects; a plain click clears it.
+  function leftClickSelects({ dx = 0, dy = 0, detail = 1 }, slop = 4) {
+    return detail >= 2 || Math.hypot(dx, dy) > slop;
   }
 
   // Payload of an OSC 7 sequence ("file://<host>/<path>", the shell-integration cwd report) →
@@ -141,7 +173,7 @@
     return addon;
   }
 
-  const terminalActions = { loadWebglRenderer, shareBadgeModel, shareSegmentMark, splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc7Cwd, shellCdCommand, buildTabSegments };
+  const terminalActions = { loadWebglRenderer, shareBadgeModel, shareSegmentMark, splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc52, leftClickSelects, parseOsc7Cwd, shellCdCommand, buildTabSegments };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = terminalActions;
   }
