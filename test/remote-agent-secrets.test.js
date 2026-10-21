@@ -84,3 +84,55 @@ test('remote agent: refuses a symlinked secrets directory', { skip: !hasPython }
     fs.rmSync(elsewhere, { recursive: true, force: true });
   }
 });
+
+test('remote agent: tempfile drops pasted images older than a week', { skip: !hasPython }, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-home-'));
+  const child = spawn('python3', ['-u', AGENT], { env: { ...process.env, HOME: home } });
+  const lines = [];
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (d) => lines.push(...d.split('\n').filter(Boolean)));
+  try {
+    const dir = path.join(home, '.cache', 'wsl-workbench', 'paste');
+    fs.mkdirSync(dir, { recursive: true });
+    const old = path.join(dir, 'old.png');
+    const recent = path.join(dir, 'recent.png');
+    fs.writeFileSync(old, 'x');
+    fs.writeFileSync(recent, 'x');
+    const eightDaysAgo = Date.now() / 1000 - 8 * 24 * 3600;
+    fs.utimesSync(old, eightDaysAgo, eightDaysAgo);
+    child.stdin.write(`${JSON.stringify({ id: 1, op: 'tempfile', name: 'new.png', b64: 'eA==' })}\n`);
+    for (let i = 0; i < 100 && !lines.some((l) => JSON.parse(l).id === 1); i++) await new Promise((r) => setTimeout(r, 20));
+    const res = JSON.parse(lines.find((l) => JSON.parse(l).id === 1));
+    assert.equal(res.ok, true);
+    assert.equal(fs.existsSync(old), false);
+    assert.equal(fs.existsSync(recent), true);
+    assert.equal(fs.existsSync(path.join(dir, 'new.png')), true);
+  } finally {
+    child.stdin.end();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('remote agent: git_clone clones into a new directory and refuses bad input', { skip: !hasPython || spawnSync('git', ['--version']).status !== 0 }, async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-clone-'));
+  const src = path.join(base, 'src');
+  fs.mkdirSync(src);
+  spawnSync('git', ['init', '-q', src]);
+  spawnSync('git', ['-C', src, '-c', 'user.email=a@b', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init']);
+  const agent = startAgent(base);
+  try {
+    const res = await agent.request('git_clone', { parent: base, url: src, name: 'copy' });
+    assert.equal(res.ok, true);
+    assert.equal(res.result, path.join(base, 'copy'));
+    assert.equal(fs.existsSync(path.join(base, 'copy', '.git')), true);
+    assert.equal((await agent.request('git_clone', { parent: base, url: src, name: 'copy' })).error.code, 'EEXIST');
+    assert.equal((await agent.request('git_clone', { parent: base, url: '--upload-pack=x', name: 'y' })).error.code, 'EINVAL');
+    assert.equal((await agent.request('git_clone', { parent: base, url: src, name: '../y' })).error.code, 'EINVAL');
+    const bad = await agent.request('git_clone', { parent: base, url: path.join(base, 'missing'), name: 'z' });
+    assert.equal(bad.ok, false);
+    assert.equal(fs.existsSync(path.join(base, 'z')), false);
+  } finally {
+    agent.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});

@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('api', {
   openWorkspaceFile: () => ipcRenderer.invoke('workspace:openFile'),
   cloneRepo: (args) => ipcRenderer.invoke('workspace:clone', args),
   openRemoteWorkspace: (args) => ipcRenderer.invoke('workspace:openRemote', args),
+  cloneRemoteRepo: (args) => ipcRenderer.invoke('workspace:cloneRemote', args),
+  remoteReconnect: (args) => ipcRenderer.invoke('remote:reconnect', args),
   onMenuOpenRemote: (cb) => ipcRenderer.on('menu:openRemote', () => cb()),
   recentWorkspaces: () => ipcRenderer.invoke('workspace:recent'),
   openRecentWorkspace: (args) => ipcRenderer.invoke('workspace:openRecent', args),

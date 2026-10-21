@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 VERSION = 1
@@ -175,8 +176,9 @@ def op_exists(a):
     return os.path.lexists(_abs(a['path']))
 
 
-def op_realdir(a):
-    # Resolve a user-typed directory (`~`, `~/x`, relative to home) to an absolute real path.
+def op_resolvedir(a):
+    # Resolve a user-typed directory (`~`, `~/x`, relative to home) to an absolute real path, and say
+    # whether it exists, so the caller can offer to create a missing one.
     p = a.get('path') or '~'
     if not isinstance(p, str) or '\x00' in p:
         raise AgentError('EINVAL', 'invalid path')
@@ -184,9 +186,41 @@ def op_realdir(a):
     if not p.startswith('/'):
         p = os.path.join(os.path.expanduser('~'), p)
     p = os.path.realpath(p)
-    if not os.path.isdir(p):
-        raise AgentError('ENOTDIR', 'Not a directory: %s' % p)
-    return p
+    return {'path': p, 'exists': os.path.lexists(p), 'isDir': os.path.isdir(p)}
+
+
+def op_mkdirs(a):
+    # `mkdir -p` of an absolute path resolved by resolvedir; returns its real path.
+    p = _abs(a['path'])
+    os.makedirs(p, 0o777, exist_ok=True)
+    return os.path.realpath(p)
+
+
+def op_git_clone(a):
+    # `git clone -- <url> <name>` in an existing directory. url/name travel as argv, never through a
+    # shell; no prompt can be answered here, so auth that would ask fails instead of hanging.
+    parent = _abs(a['parent'])
+    url, name = a.get('url'), a.get('name')
+    if not isinstance(url, str) or not url or '\x00' in url or url.startswith('-'):
+        raise AgentError('EINVAL', 'invalid url')
+    if not isinstance(name, str) or not name or '/' in name or '\x00' in name or name in ('.', '..'):
+        raise AgentError('EINVAL', 'invalid name')
+    if os.path.lexists(os.path.join(parent, name)):
+        raise AgentError('EEXIST', 'Already exists: %s' % name)
+    env = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='/bin/true',
+               GIT_SSH_COMMAND='ssh -o BatchMode=yes')
+    try:
+        r = subprocess.run(['git', 'clone', '--', url, name], cwd=parent, env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                           timeout=float(a.get('timeout', 900)))
+    except subprocess.TimeoutExpired:
+        raise AgentError('ETIMEDOUT', 'git clone timed out')
+    except OSError as e:
+        raise AgentError('ENOENT', 'git is not available on the host (%s)' % e)
+    err = r.stderr.decode('utf-8', 'replace').strip()
+    if r.returncode != 0:
+        raise AgentError('EIO', err or 'git clone failed (exit %d)' % r.returncode)
+    return os.path.join(parent, name)
 
 
 def op_sh(a):
@@ -201,11 +235,30 @@ def op_sh(a):
     return {'code': r.returncode, 'stdout': r.stdout.decode('utf-8', 'replace')}
 
 
+PASTE_KEEP_SECONDS = 7 * 24 * 3600
+
+
+def _prune_paste_dir(d, now):
+    # Pasted images older than a week are dropped, so the directory doesn't grow forever (a CLI has
+    # long since read them). Only regular files directly inside; anything odd is left alone.
+    try:
+        with os.scandir(d) as it:
+            for e in it:
+                try:
+                    if e.is_file(follow_symlinks=False) and now - e.stat(follow_symlinks=False).st_mtime > PASTE_KEEP_SECONDS:
+                        os.remove(e.path)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
 def op_tempfile(a):
     # A 0600 file in a 0700 per-user directory, for handing pasted images to a CLI by path.
     d = os.path.join(os.path.expanduser('~'), '.cache', 'wsl-workbench', 'paste')
     os.makedirs(d, mode=0o700, exist_ok=True)
     os.chmod(d, 0o700)
+    _prune_paste_dir(d, time.time())
     name = os.path.basename(a['name'])
     if not name or name in ('.', '..'):
         raise AgentError('EINVAL', 'invalid name')
@@ -312,9 +365,10 @@ OPS = {k[3:]: v for k, v in globals().items() if k.startswith('op_')}
 # of one file mixing bytes, and a later save always lands last. They also exclude the readers below,
 # so a read never sees a file between a save's truncate and its write. Reads and git run in
 # parallel with each other (git only reads; it is not held back by an upload).
-MUTATING_OPS = frozenset(['write', 'mkdir', 'rename', 'delete', 'tempfile',
+# git_clone is neither: it can take minutes and only creates its own new directory.
+MUTATING_OPS = frozenset(['write', 'mkdir', 'mkdirs', 'rename', 'delete', 'tempfile',
                           'secret_put', 'secret_remove', 'secret_remove_all'])
-READING_OPS = frozenset(['stat', 'readdir', 'readdirs', 'read', 'exists', 'realdir'])
+READING_OPS = frozenset(['stat', 'readdir', 'readdirs', 'read', 'exists', 'resolvedir'])
 
 
 class _RWLock(object):

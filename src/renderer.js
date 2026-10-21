@@ -1988,7 +1988,7 @@ function showContextMenu(event, node) {
   show('new-folder', !multi);
   show('rename', !multi && !isRoot);
   show('delete', !isRoot);
-  show('reveal', !multi);
+  show('reveal', !multi && !isRemoteWorkspace(config)); // nothing to reveal on an ssh host
   show('open-new-window', !multi);
   tidyMenuSeparators(menu);
   menu.classList.remove('hidden');
@@ -2374,10 +2374,11 @@ async function renderTree() {
   const cwdEl = document.getElementById('cwd');
   // Distro name as a badge, path as plain text (the full distro:path stays in the tooltip).
   const distroEl = document.getElementById('cwdDistro');
-  distroEl.textContent = cfg.distro;
+  distroEl.textContent = window.recentFilter.workspaceKind(cfg.distro);
   distroEl.classList.remove('hidden');
   document.getElementById('cwdPath').textContent = cfg.wslPath;
-  cwdEl.title = `${cfg.distro}:${cfg.wslPath}`;
+  cwdEl.title = window.recentFilter.workspaceLabel(cfg);
+  setRemoteDisconnected(null); // a successful read means the host is reachable
   updateWorkspaceName();
   decorateTreeGitStatus(); // fresh rows: re-apply the last known git tinting immediately
   updateGitBranch();       // then refresh branch + statuses asynchronously
@@ -2409,7 +2410,16 @@ async function applyWorkspace(nextConfig) {
   try {
     await renderTree(); // builds detached and publishes only on success; landing stays as a loading cover
   } catch (error) {
-    alert(error.message || String(error));
+    // A remote host that can't be reached (e.g. restoring an ssh workspace at startup before its
+    // credentials are ready) can be retried without going through the open dialog again.
+    if (isRemoteWorkspace(nextConfig) && confirm(`${error.message || String(error)}\n\n${t('remote.retryConfirm')}`)) {
+      config = prevConfig;
+      expanded.clear();
+      for (const p of prevExpanded) expanded.add(p);
+      try { await window.api.remoteReconnect({ distro: nextConfig.distro }); } catch {}
+      return applyWorkspace(nextConfig);
+    }
+    if (!isRemoteWorkspace(nextConfig)) alert(error.message || String(error));
     // Roll back: the live tree/CWD/editor tabs were never replaced.
     config = prevConfig;
     expanded.clear();
@@ -2572,6 +2582,7 @@ function initLanding() {
   document.getElementById('landingOpenFile').addEventListener('click', () => window.api.openWorkspaceFile());
   document.getElementById('landingClone').addEventListener('click', cloneRepoFlow);
   document.getElementById('landingRemote').addEventListener('click', openRemoteFlow);
+  document.getElementById('landingCloneRemote').addEventListener('click', cloneRemoteFlow);
 }
 
 // Populate the landing screen's recent-workspaces list (hidden when there are none).
@@ -2646,6 +2657,29 @@ async function cloneRepoFlow() {
   buttons.forEach((b) => { b.disabled = true; });
   try {
     await window.api.cloneRepo({ distro: folder.distro, parentDirPath: folder.wslPath, url: url.trim() });
+  } catch (error) {
+    alert(error.message || String(error));
+  } finally {
+    if (subtitle) subtitle.textContent = prevSubtitle;
+    buttons.forEach((b) => { b.disabled = false; });
+  }
+}
+
+// Landing "Clone to Remote (SSH)": ask for a Git URL and a parent directory on an ssh host
+// ("host:/path"; created after confirmation if missing), then clone there and open the result.
+async function cloneRemoteFlow() {
+  const url = await askPrompt(t('prompt.cloneUrl'), '');
+  if (!url || !url.trim()) return;
+  const host = (lastRemoteSpec.match(/^[^:\s]+/) || [''])[0] || (isRemoteWorkspace(config) ? config.distro.slice(4) : '');
+  const spec = await askPrompt(t('prompt.cloneRemoteParent'), host ? `${host}:~/` : '');
+  if (!spec || !spec.trim()) return;
+  const subtitle = document.querySelector('#landing .landing-subtitle');
+  const buttons = document.querySelectorAll('#landing .landing-actions button');
+  const prevSubtitle = subtitle ? subtitle.textContent : '';
+  if (subtitle) subtitle.textContent = t('landing.cloning');
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    await window.api.cloneRemoteRepo({ spec: spec.trim(), url: url.trim() });
   } catch (error) {
     alert(error.message || String(error));
   } finally {
@@ -2820,6 +2854,33 @@ function initTerminalDropTarget() {
   });
 }
 
+function isRemoteWorkspace(cfg) { return !!(cfg && typeof cfg.distro === 'string' && cfg.distro.startsWith('ssh:')); }
+
+// A remote workspace whose host stopped answering: the workspace badge turns red and says so; a
+// click reconnects right away (otherwise the agent retries on its own, backing off up to 30 s).
+let remoteDisconnected = false;
+function setRemoteDisconnected(error) {
+  const el = document.getElementById('cwdDistro');
+  const on = !!error;
+  if (on === remoteDisconnected && !on) return;
+  remoteDisconnected = on;
+  el.classList.toggle('disconnected', on);
+  el.title = on ? `${t('remote.disconnected')}\n${error.message || String(error)}` : '';
+}
+document.getElementById('cwdDistro').addEventListener('click', async () => {
+  if (!remoteDisconnected || !isRemoteWorkspace(config)) return;
+  const el = document.getElementById('cwdDistro');
+  el.classList.add('reconnecting');
+  try {
+    await window.api.remoteReconnect({ distro: config.distro });
+    await renderTree();
+  } catch (error) {
+    setRemoteDisconnected(error);
+  } finally {
+    el.classList.remove('reconnecting');
+  }
+});
+
 // Periodically refresh the tree so changes made outside the app (e.g. files created from the
 // terminal) appear without a manual Refresh. Polls a cheap signature and re-renders only on change.
 let lastTreeSignature = null;
@@ -2841,9 +2902,11 @@ async function pollTreeChanges() {
     let signature;
     try {
       signature = await window.api.treeSignature({ distro: configAtStart.distro, paths: Array.from(expanded) });
-    } catch {
+    } catch (error) {
+      if (config === configAtStart && isRemoteWorkspace(configAtStart)) setRemoteDisconnected(error);
       return;
     }
+    if (config === configAtStart) setRemoteDisconnected(null);
     if (config !== configAtStart) return; // workspace switched mid-poll; let the next tick resync
     if (lastTreeSignature !== null && signature !== lastTreeSignature) {
       await renderTree();
