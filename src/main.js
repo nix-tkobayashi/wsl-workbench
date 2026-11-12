@@ -1913,10 +1913,18 @@ async function listSecrets(ws) {
   const store = getSecretStore();
   // First open of this workspace in this app session: re-create the copies that were handed out
   // before, at the same fixed paths, so a path given to a CLI earlier keeps working.
+  const share = await syncSecrets(ws);
   await restoreSecretCopies(ws);
   const items = store.list(ws).map((i) => ({ key: i.key, path: secretPaths.get(secretPathKey(ws, i.key)) || null }));
   const { names } = await importableCredentials(ws, items.map((i) => i.key));
-  return { available: safeStorage.isEncryptionAvailable(), items, importable: names };
+  const cfg = readSettings().secretSync || {};
+  return {
+    available: safeStorage.isEncryptionAvailable(),
+    items,
+    importable: names,
+    share,
+    sync: { folder: typeof cfg.folder === 'string' ? cfg.folder : null, hasPassphrase: typeof cfg.passphrase === 'string' }
+  };
 }
 
 ipcMain.handle('secrets:get', (event, { key, workspace = null } = {}) => {
@@ -1933,7 +1941,11 @@ ipcMain.handle('secrets:get', (event, { key, workspace = null } = {}) => {
 ipcMain.handle('secrets:set', async (event, { key, value, previousKey = null, workspace = null } = {}) => {
   const ws = secretsWorkspaceFor(event.sender, workspace);
   if (!ws) return { ok: false, error: 'no-workspace' };
-  return withSecretLock(ws, () => setSecret(ws, { key, value, previousKey }));
+  return withSecretLock(ws, async () => {
+    const res = await setSecret(ws, { key, value, previousKey });
+    if (res.ok) await syncSecrets(ws);
+    return res;
+  });
 });
 
 async function setSecret(ws, { key, value, previousKey }) {
@@ -1951,7 +1963,10 @@ async function setSecret(ws, { key, value, previousKey }) {
   // A copy already handed out follows the edit (a renamed one appears at its new path).
   if (res.materialized) {
     const m = await materializeSecret(ws, key);
-    if (!m.ok) return { ok: true, warning: m.error };
+    if (!m.ok) {
+      queueCopyUpdate(ws, key); // retried on the next sync/list, so a stale copy doesn't stay readable
+      return { ok: true, warning: m.error };
+    }
   }
   return { ok: true };
 }
@@ -1964,8 +1979,181 @@ ipcMain.handle('secrets:delete', async (event, { key, workspace = null } = {}) =
     // the entry is kept so the plaintext copy is never left behind unmanaged.
     if (!(await removeSecretCopy(ws, key))) return { ok: false, error: 'remove-failed' };
     getSecretStore().remove(ws, key);
+    await syncSecrets(ws);
     return { ok: true };
   });
+});
+
+// --- Sharing secrets between PCs through a synced folder (src/secret-sync.js) ---
+// settings.json `secretSync`: { folder, passphrase } — the passphrase is kept DPAPI-encrypted.
+// A workspace is shared under a name (kept in its local store); the file `<folder>/<name>.wbsecrets`
+// is merged with the local entries on every list and after every change.
+const secretSync = require('./secret-sync');
+const shareStatus = new Map(); // workspace id -> last sync result, shown in the panel
+const pendingCopyUpdates = new Map(); // workspace id -> keys whose copy a sync couldn't update yet
+
+function secretSyncConfig() {
+  const cfg = readSettings().secretSync || {};
+  if (typeof cfg.folder !== 'string' || typeof cfg.passphrase !== 'string') return null;
+  try {
+    return { folder: cfg.folder, passphrase: safeStorage.decryptString(Buffer.from(cfg.passphrase, 'base64')) };
+  } catch {
+    return null;
+  }
+}
+
+function readShareFile(file) {
+  try { return { raw: fs.readFileSync(file, 'utf8') }; } catch (e) {
+    return e && e.code === 'ENOENT' ? { raw: null } : { error: 'read-failed' };
+  }
+}
+
+function queueCopyUpdate(ws, key) {
+  const id = secretsLib.workspaceId(ws);
+  pendingCopyUpdates.set(id, (pendingCopyUpdates.get(id) || new Set()).add(key));
+}
+
+// Bring handed-out copies in line with the store: rewrite those whose value changed (`changed`, plus
+// any update that failed before) and remove those of keys deleted elsewhere. What fails now stays
+// pending — updates in memory (copies are re-created from current values at the next start anyway),
+// removals in the store (they must survive a restart). Returns whether anything is still pending.
+async function flushSecretCopies(ws, changed = []) {
+  const store = getSecretStore();
+  const id = secretsLib.workspaceId(ws);
+  const pending = pendingCopyUpdates.get(id) || new Set();
+  for (const key of changed) pending.add(key);
+  for (const key of [...pending]) {
+    const item = store.list(ws).find((i) => i.key === key);
+    if (!item || !item.materialized || (await materializeSecret(ws, key)).ok) pending.delete(key);
+  }
+  if (pending.size) pendingCopyUpdates.set(id, pending); else pendingCopyUpdates.delete(id);
+  for (const key of store.pendingRemovals(ws)) {
+    if (store.has(ws, key) || (await removeSecretCopy(ws, key))) store.clearPendingRemoval(ws, key);
+  }
+  return pending.size > 0 || store.pendingRemovals(ws).length > 0;
+}
+
+// Merge the workspace's local entries with its shared file and write back what changed on either
+// side, then bring the handed-out copies in line. Callers hold the workspace's secret lock.
+// Returns the status shown in the panel, or null when the workspace isn't shared. Never throws.
+async function syncSecrets(ws) {
+  const store = getSecretStore();
+  const name = store.shareName(ws);
+  const id = secretsLib.workspaceId(ws);
+  if (!name) { shareStatus.delete(id); await flushSecretCopies(ws); return null; }
+  const status = (extra) => { const s = { name, at: Date.now(), ...extra }; shareStatus.set(id, s); return s; };
+  const cfg = secretSyncConfig();
+  let res = { ok: false, error: 'not-configured' };
+  if (cfg && !safeStorage.isEncryptionAvailable()) res = { ok: false, error: 'unavailable' };
+  else if (cfg && !safeStat(cfg.folder)) res = { ok: false, error: 'folder-missing' };
+  else if (cfg) {
+    res = secretSync.syncWorkspaceFile({
+      store, ws, name, passphrase: cfg.passphrase, file: path.join(cfg.folder, secretSync.shareFileName(name))
+    });
+  }
+  // Even when only the write back failed: the local entries were already updated.
+  const copiesPending = await flushSecretCopies(ws, res.changed || []);
+  if (!res.ok) return status({ ok: false, error: res.error });
+  if (copiesPending) return status({ ok: false, error: 'copy-failed' });
+  return status({ ok: true, pulled: res.changed.length + res.removed.length });
+}
+
+ipcMain.handle('secrets:chooseSyncFolder', async (event) => {
+  const win = windowForSender(event.sender);
+  if (!win) return { ok: false };
+  const cfg = readSettings().secretSync || {};
+  const res = await dialog.showOpenDialog(win, {
+    title: tr('secrets.syncFolderTitle'),
+    defaultPath: typeof cfg.folder === 'string' ? cfg.folder : undefined,
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (res.canceled || !res.filePaths || !res.filePaths[0]) return { ok: false };
+  writeSettings({ secretSync: { ...cfg, folder: res.filePaths[0] } });
+  return { ok: true, folder: res.filePaths[0] };
+});
+
+// Whether `<folder>/<name>.wbsecrets` exists: then the passphrase is checked against it, otherwise
+// the renderer asks for it twice (it becomes the passphrase of a new shared file).
+ipcMain.handle('secrets:shareExists', (event, { name } = {}) => {
+  const cfg = readSettings().secretSync || {};
+  if (!secretSync.isValidShareName(name) || typeof cfg.folder !== 'string') return { exists: false };
+  return { exists: !!safeStat(path.join(cfg.folder, secretSync.shareFileName(name))) };
+});
+
+ipcMain.handle('secrets:setPassphrase', (event, { passphrase, name = null } = {}) => {
+  if (typeof passphrase !== 'string' || passphrase.length < secretSync.MIN_PASSPHRASE) return { ok: false, error: 'weak-passphrase' };
+  if (!safeStorage.isEncryptionAvailable()) return { ok: false, error: 'unavailable' };
+  const cfg = readSettings().secretSync || {};
+  if (secretSync.isValidShareName(name) && typeof cfg.folder === 'string') {
+    const read = readShareFile(path.join(cfg.folder, secretSync.shareFileName(name)));
+    if (read.error) return { ok: false, error: read.error };
+    if (read.raw != null) {
+      try { secretSync.decryptBundle(passphrase, name, read.raw); } catch (e) { return { ok: false, error: e.code || 'bad-format' }; }
+    }
+  }
+  writeSettings({ secretSync: { ...cfg, passphrase: safeStorage.encryptString(passphrase).toString('base64') } });
+  return { ok: true };
+});
+
+ipcMain.handle('secrets:share', async (event, { name, workspace = null } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  if (!ws) return { ok: false, error: 'no-workspace' };
+  if (!secretSync.isValidShareName(name)) return { ok: false, error: 'invalid-share-name' };
+  return withSecretLock(ws, async () => {
+    const store = getSecretStore();
+    const prev = store.shareName(ws);
+    store.setShareName(ws, name);
+    const res = await syncSecrets(ws);
+    // A file this PC can't read (wrong passphrase, not ours) isn't joined: nothing was merged.
+    if (!res.ok && ['bad-passphrase', 'bad-format', 'newer-format'].includes(res.error)) {
+      store.setShareName(ws, prev);
+      shareStatus.delete(secretsLib.workspaceId(ws));
+      return { ok: false, error: res.error };
+    }
+    return res;
+  });
+});
+
+ipcMain.handle('secrets:unshare', async (event, { workspace = null } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  if (!ws) return { ok: false };
+  return withSecretLock(ws, () => {
+    getSecretStore().setShareName(ws, null);
+    shareStatus.delete(secretsLib.workspaceId(ws));
+    return { ok: true };
+  });
+});
+
+ipcMain.handle('secrets:syncNow', async (event, { workspace = null } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  if (!ws) return { ok: false, error: 'no-workspace' };
+  return withSecretLock(ws, async () => (await syncSecrets(ws)) || { ok: false, error: 'not-shared' });
+});
+
+// The panel's ☁ button: a native menu; a click sends the action back to the renderer, which runs
+// the prompts (folder, passphrase, name) and calls the handlers above.
+ipcMain.on('secrets:shareMenu', (event, { x = 0, y = 0 } = {}) => {
+  const win = windowForSender(event.sender);
+  const ws = secretsWorkspaceFor(event.sender);
+  if (!win || !ws) return;
+  const wc = event.sender;
+  const send = (action) => { if (!wc.isDestroyed()) wc.send('secrets:shareAction', { action }); };
+  const name = getSecretStore().shareName(ws);
+  const cfg = readSettings().secretSync || {};
+  const items = name
+    ? [
+      { label: tr('secrets.sharedAs').replace('{name}', name), enabled: false },
+      { label: tr('secrets.syncNow'), click: () => send('sync') },
+      { label: tr('secrets.unshare'), click: () => send('unshare') }
+    ]
+    : [{ label: tr('secrets.share'), click: () => send('share') }];
+  items.push(
+    { type: 'separator' },
+    { label: `${tr('secrets.syncFolder')}: ${typeof cfg.folder === 'string' ? cfg.folder : tr('secrets.syncFolderNone')}`, enabled: false },
+    { label: tr('secrets.changeSyncFolder'), click: () => send('folder') },
+    { label: tr('secrets.setPassphrase'), click: () => send('passphrase') }
+  );
+  Menu.buildFromTemplate(items).popup({ window: win, x: Math.round(x), y: Math.round(y) + TABSTRIP_H });
 });
 
 ipcMain.handle('secrets:insertPath', async (event, { key, workspace = null } = {}) => {
@@ -2012,9 +2200,14 @@ ipcMain.handle('secrets:import', async (event) => {
         // Text only: a file that isn't valid UTF-8 is skipped (decoding would alter its bytes).
         const bytes = fs.readFileSync(path.join(found.dir, name));
         const value = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-        if (store.set(ws, { key: name, value }).ok) done.push({ name, bytes });
+        const res = store.set(ws, { key: name, value });
+        if (!res.ok) continue;
+        done.push({ name, bytes });
+        // It took over a copy still handed out (pending removal): rewrite it with the imported value.
+        if (res.materialized && !(await materializeSecret(ws, name)).ok) queueCopyUpdate(ws, name);
       } catch {}
     }
+    if (done.length) await syncSecrets(ws);
     return { dir: found.dir, imported: done };
   });
   const imported = importedItems.map((i) => i.name);

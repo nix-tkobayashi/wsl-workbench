@@ -141,9 +141,10 @@ function applyLanguage() {
 }
 
 // Promise-based replacement for the unsupported window.prompt() in Electron.
-function askPrompt(message, defaultValue = '') {
+function askPrompt(message, defaultValue = '', { password = false } = {}) {
   return new Promise((resolve) => {
     promptMessage.textContent = message;
+    promptInput.type = password ? 'password' : 'text';
     promptInput.value = defaultValue;
     promptModal.classList.remove('hidden');
     promptInput.focus();
@@ -151,6 +152,8 @@ function askPrompt(message, defaultValue = '') {
 
     const cleanup = () => {
       promptModal.classList.add('hidden');
+      promptInput.value = ''; // a passphrase must not stay in the DOM
+      promptInput.type = 'text';
       promptOk.removeEventListener('click', onOk);
       promptCancel.removeEventListener('click', onCancel);
       promptModal.removeEventListener('keydown', onKey);
@@ -2931,7 +2934,7 @@ const secretKeyInput = document.getElementById('secretKeyInput');
 const secretValueInput = document.getElementById('secretValueInput');
 const secretModalError = document.getElementById('secretModalError');
 const SECRET_REVEAL_MS = 10000;
-let secretsState = { available: true, items: [], importable: [] };
+let secretsState = { available: true, items: [], importable: [], share: null, sync: {} };
 let secretRevealTimer = null;
 let secretsLoadGen = 0;
 let closeSecretDialog = null; // cancels the open edit dialog (a workspace switch closes it)
@@ -2997,6 +3000,7 @@ function renderSecrets() {
   secretsNotice.textContent = secretsState.available ? '' : t('secrets.error_unavailable');
   const n = secretsState.importable.length;
   secretsImport.classList.toggle('hidden', !n || !secretsState.available);
+  renderSecretsShare();
   document.getElementById('secretsImportText').textContent = t('secrets.importFound').replace('{n}', String(n));
   if (!secretsState.items.length) {
     const empty = document.createElement('div');
@@ -3031,8 +3035,82 @@ async function refreshSecrets() {
   let res;
   try { res = await window.api.secretsList(); } catch { return; }
   if (gen !== secretsLoadGen || !sameSecretsWs(ws)) return;
-  secretsState = { available: !!res.available, items: res.items || [], importable: res.importable || [] };
+  secretsState = { available: !!res.available, items: res.items || [], importable: res.importable || [], share: res.share || null, sync: res.sync || {} };
   renderSecrets();
+}
+
+// --- Sharing between PCs: one encrypted file per share name in a synced folder (main: secrets:share*). ---
+const secretsShareEl = document.getElementById('secretsShare');
+function shareErrorText(error) {
+  const known = ['not-configured', 'folder-missing', 'read-failed', 'write-failed', 'bad-passphrase', 'bad-format', 'newer-format', 'weak-passphrase', 'invalid-share-name', 'decrypt', 'unavailable', 'copy-failed'];
+  return known.includes(error) ? t(`secrets.shareError_${error}`) : `${t('secrets.error_failed')} (${error || '?'})`;
+}
+function renderSecretsShare() {
+  const s = secretsState.share;
+  document.getElementById('secretsShareBtn').classList.toggle('active', !!s);
+  secretsShareEl.classList.toggle('hidden', !s);
+  secretsShareEl.classList.toggle('error', !!s && !s.ok);
+  if (!s) { secretsShareEl.textContent = ''; return; }
+  const time = new Date(s.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  secretsShareEl.textContent = s.ok
+    ? `☁ ${t('secrets.shareSynced').replace('{name}', s.name).replace('{time}', time)}`
+    : `☁ ${s.name}: ${shareErrorText(s.error)}`;
+  secretsShareEl.title = secretsState.sync.folder || '';
+}
+
+// Ask for the passphrase (twice when it starts a new shared file) and store it on this PC.
+async function askSyncPassphrase(name) {
+  const exists = name ? (await window.api.secretsShareExists(name)).exists : false;
+  for (;;) {
+    const pass = await askPrompt(t(exists ? 'secrets.passphraseExisting' : 'secrets.passphraseNew'), '', { password: true });
+    if (pass == null) return false;
+    if (!exists) {
+      const again = await askPrompt(t('secrets.passphraseConfirm'), '', { password: true });
+      if (again == null) return false;
+      if (again !== pass) { alert(t('secrets.passphraseMismatch')); continue; }
+    }
+    const res = await window.api.secretsSetPassphrase(pass, name);
+    if (res.ok) return true;
+    alert(shareErrorText(res.error));
+    if (res.error !== 'bad-passphrase' && res.error !== 'weak-passphrase') return false;
+  }
+}
+
+async function shareAction(action) {
+  const workspace = secretsWs();
+  if (!workspace) return;
+  let res = null;
+  if (action === 'share') {
+    if (!secretsState.sync.folder && !(await window.api.secretsChooseSyncFolder()).ok) return;
+    const base = (workspace.wslPath.split('/').filter(Boolean).pop() || 'workspace').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64);
+    let name = null;
+    for (;;) {
+      name = await askPrompt(t('secrets.shareNamePrompt'), name || base);
+      if (name == null) return;
+      name = name.trim();
+      if (window.secretKeys.isValidKey(name)) break;
+      alert(shareErrorText('invalid-share-name'));
+    }
+    // No passphrase on this PC yet: ask (checked against the file when it already exists). A stored
+    // one that can't open the file comes back as bad-passphrase below and is asked for again.
+    if (!secretsState.sync.hasPassphrase && !(await askSyncPassphrase(name))) return;
+    if (!sameSecretsWs(workspace)) return;
+    res = await window.api.secretsShare(name, workspace);
+    if (!res.ok && res.error === 'bad-passphrase' && (await askSyncPassphrase(name)) && sameSecretsWs(workspace)) {
+      res = await window.api.secretsShare(name, workspace);
+    }
+  } else if (action === 'sync') {
+    res = await window.api.secretsSyncNow(workspace);
+  } else if (action === 'unshare') {
+    if (!confirm(t('secrets.unshareConfirm'))) return;
+    res = await window.api.secretsUnshare(workspace);
+  } else if (action === 'folder') {
+    if (!(await window.api.secretsChooseSyncFolder()).ok) return;
+  } else if (action === 'passphrase') {
+    if (!(await askSyncPassphrase(secretsState.share ? secretsState.share.name : null))) return;
+  }
+  if (res && !res.ok && res.error) alert(shareErrorText(res.error));
+  refreshSecrets();
 }
 
 // Put a secret into the focused terminal pane, without Enter: by default the path of its tmpfs
@@ -3143,6 +3221,11 @@ function initSecrets() {
     window.api.secretsTerminalMenu({ x: rect.left, y: rect.bottom });
   });
   window.api.onSecretsInsert(({ key, mode } = {}) => insertSecret(key, mode));
+  document.getElementById('secretsShareBtn').addEventListener('click', (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    window.api.secretsShareMenu({ x: rect.left, y: rect.bottom });
+  });
+  window.api.onSecretsShareAction(({ action } = {}) => shareAction(action));
   window.api.onMenuToggleSecrets(() => toggleSecretsPanel());
 }
 
@@ -3151,7 +3234,7 @@ function initSecrets() {
 function applySecretsForWorkspace() {
   if (closeSecretDialog) closeSecretDialog();
   secretsLoadGen++; // a list still in flight for the previous workspace must not land here
-  secretsState = { available: true, items: [], importable: [] };
+  secretsState = { available: true, items: [], importable: [], share: null, sync: {} };
   hideSecretReveal();
   secretsList.textContent = '';
   const on = readSecretsVisible();
