@@ -144,6 +144,16 @@ Keep credentials (AWS keys, tokens…) per workspace without putting a file in t
 - **Paste value…** (terminal 🔑 menu) types the value itself after a warning — it becomes input to the running program and stays in the scrollback; the path is usually enough.
 - **Import**: if the workspace has a `.credentials/` folder, the panel offers to import its files (UTF-8 text) and then asks whether to delete the plaintext originals.
 
+### Sharing secrets between PCs (v0.41.0)
+
+Share a workspace's secrets with your other PCs through a folder synced by **Google Drive for desktop** (or OneDrive / Dropbox) — the app never calls a cloud API, the desktop client syncs the file.
+
+- **☁** in the Secrets panel header → **Share via Synced Folder…**: pick the synced folder (e.g. `G:\My Drive\wsl-workbench`), a **share name** (use the same name on every PC — the workspace path may differ) and a **passphrase** (8+ characters, the same on every PC; stored on each PC with DPAPI).
+- The file `<folder>/<share name>.wbsecrets` is encrypted with the passphrase (scrypt + AES-256-GCM); the local store stays DPAPI-encrypted as before.
+- Sync runs when the panel lists secrets (opening the workspace / panel) and after every add, edit, delete or import; **Sync Now** in the ☁ menu forces one. The status line under the header shows the last sync or the error.
+- Merge is per key, newest edit wins; a deletion or rename on one PC removes the key on the others (copies handed out there are removed too).
+- **Stop Sharing on This PC** keeps both the local secrets and the shared file. Changing the passphrase does not re-encrypt existing files.
+
 ## Remote workspaces over ssh (v0.38.0)
 
 Open a directory on another host (e.g. an EC2 instance) as the workspace: the file tree, editor,

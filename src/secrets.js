@@ -39,11 +39,18 @@ class SecretStore {
   file(ws) { return path.join(this.dir, `${workspaceId(ws)}.json`); }
 
   load(ws) {
+    const empty = { workspace: { distro: ws.distro, wslPath: ws.wslPath }, items: [], tombstones: [], share: null, pendingRemovals: [] };
     try {
       const data = JSON.parse(fs.readFileSync(this.file(ws), 'utf8'));
-      return { workspace: { distro: ws.distro, wslPath: ws.wslPath }, items: Array.isArray(data.items) ? data.items.filter((i) => i && isValidKey(i.key) && typeof i.value === 'string') : [] };
+      return {
+        ...empty,
+        items: Array.isArray(data.items) ? data.items.filter((i) => i && isValidKey(i.key) && typeof i.value === 'string') : [],
+        tombstones: Array.isArray(data.tombstones) ? data.tombstones.filter((d) => d && isValidKey(d.key)) : [],
+        share: data.share && isValidKey(data.share.name) ? { name: data.share.name } : null,
+        pendingRemovals: Array.isArray(data.pendingRemovals) ? data.pendingRemovals.filter(isValidKey) : []
+      };
     } catch {
-      return { workspace: { distro: ws.distro, wslPath: ws.wslPath }, items: [] };
+      return empty;
     }
   }
 
@@ -81,30 +88,101 @@ class SecretStore {
     return { ok: true };
   }
 
-  set(ws, { key, value, previousKey = null }) {
+  set(ws, { key, value, previousKey = null }, now = Date.now()) {
     const check = this.validate(ws, { key, value, previousKey });
     if (!check.ok) return check;
     const data = this.load(ws);
     const fromKey = previousKey && previousKey !== key ? previousKey : null;
     const enc = this.encrypt(value).toString('base64');
     const idx = data.items.findIndex((i) => i.key === (previousKey || key));
-    let materialized = false;
+    // A copy still waiting for removal (key deleted elsewhere) is taken over by the re-added key.
+    const takeover = data.pendingRemovals.includes(key);
+    let materialized = takeover;
     if (idx >= 0) {
-      materialized = !!data.items[idx].materialized;
-      data.items[idx] = { key, value: enc, materialized };
+      materialized = !!data.items[idx].materialized || takeover;
+      data.items[idx] = { key, value: enc, materialized, updatedAt: now };
     } else {
-      data.items.push({ key, value: enc, materialized: false });
+      data.items.push({ key, value: enc, materialized, updatedAt: now });
     }
+    // A rename deletes the old key (so a shared copy drops it too); the new key is live again.
+    data.tombstones = data.tombstones.filter((d) => d.key !== key && d.key !== fromKey);
+    if (fromKey) data.tombstones.push({ key: fromKey, deletedAt: now });
+    data.pendingRemovals = data.pendingRemovals.filter((k) => k !== key);
     this.save(ws, data);
     return { ok: true, renamedFrom: fromKey, materialized };
   }
 
-  remove(ws, key) {
+  remove(ws, key, now = Date.now()) {
     const data = this.load(ws);
     const before = data.items.length;
     data.items = data.items.filter((i) => i.key !== key);
-    if (data.items.length !== before) this.save(ws, data);
-    return data.items.length !== before;
+    if (data.items.length === before) return false;
+    data.tombstones = data.tombstones.filter((d) => d.key !== key);
+    data.tombstones.push({ key, deletedAt: now });
+    this.save(ws, data);
+    return true;
+  }
+
+  // --- Sharing (src/secret-sync.js) ---
+
+  shareName(ws) { const s = this.load(ws).share; return s ? s.name : null; }
+
+  setShareName(ws, name) {
+    const data = this.load(ws);
+    data.share = name ? { name } : null;
+    this.save(ws, data);
+  }
+
+  // Plaintext entries for merging: { items: [{ key, value, updatedAt }], tombstones }.
+  // Throws when a value can't be decrypted (the caller then doesn't sync at all).
+  exportPlain(ws) {
+    const data = this.load(ws);
+    return {
+      items: data.items.map((i) => ({ key: i.key, value: this.decrypt(Buffer.from(i.value, 'base64')), updatedAt: i.updatedAt || 0 })),
+      tombstones: data.tombstones.map((d) => ({ key: d.key, deletedAt: d.deletedAt || 0 }))
+    };
+  }
+
+  // Replace the entries with a merge result, keeping each kept key's materialized flag (a local
+  // matter). Returns the keys whose value changed and the keys that were removed.
+  applyMerged(ws, merged) {
+    const data = this.load(ws);
+    const old = this.exportPlain(ws);
+    const oldByKey = new Map(old.items.map((i) => [i.key, i]));
+    const flags = new Map(data.items.map((i) => [i.key, !!i.materialized]));
+    // A key whose copy is still waiting for removal and comes back: that copy is handed out again
+    // and must get the new value (not be forgotten with the stale one still readable).
+    for (const key of data.pendingRemovals) if (!flags.has(key)) flags.set(key, true);
+    const changed = [];
+    data.items = merged.items.map((i) => {
+      const prev = oldByKey.get(i.key);
+      if (prev && prev.value === i.value && (prev.updatedAt || 0) === i.updatedAt) {
+        return data.items.find((x) => x.key === i.key);
+      }
+      if (!prev || prev.value !== i.value) changed.push(i.key);
+      return { key: i.key, value: this.encrypt(i.value).toString('base64'), materialized: flags.get(i.key) || false, updatedAt: i.updatedAt };
+    });
+    const live = new Set(merged.items.map((i) => i.key));
+    const removed = old.items.map((i) => i.key).filter((k) => !live.has(k));
+    data.tombstones = merged.tombstones.map((d) => ({ key: d.key, deletedAt: d.deletedAt }));
+    // A key deleted elsewhere whose copy was handed out here: its copy must still be removed. Kept on
+    // disk until that succeeds, so an app restart while WSL / the host is unreachable doesn't lose it.
+    const pend = new Set(data.pendingRemovals);
+    for (const key of removed) if (flags.get(key)) pend.add(key);
+    for (const key of live) pend.delete(key);
+    data.pendingRemovals = [...pend];
+    this.save(ws, data);
+    return { changed, removed: removed.map((key) => ({ key, materialized: flags.get(key) || false })) };
+  }
+
+  // Keys whose handed-out copy is still to be removed (see applyMerged).
+  pendingRemovals(ws) { return this.load(ws).pendingRemovals; }
+
+  clearPendingRemoval(ws, key) {
+    const data = this.load(ws);
+    if (!data.pendingRemovals.includes(key)) return;
+    data.pendingRemovals = data.pendingRemovals.filter((k) => k !== key);
+    this.save(ws, data);
   }
 
   setMaterialized(ws, key, on) {

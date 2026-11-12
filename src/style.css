@@ -50,9 +50,11 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 #secretsPanel { position:sticky; bottom:-8px; margin:8px -8px -8px; padding:6px 8px 8px; background:var(--panel); border-top:1px solid var(--border); display:flex; flex-direction:column; gap:4px; max-height:45vh; z-index:5; }
 #secretsPanel.hidden { display:none; }
 .secrets-head { display:flex; align-items:center; justify-content:space-between; color:var(--muted); font-size:12px; }
-.secrets-title { font-weight:600; }
+.secrets-title { font-weight:600; flex:1; }
 .secrets-notice { color:#e5a050; font-size:12px; }
-.secrets-notice.hidden, .secrets-import.hidden { display:none; }
+.secrets-notice.hidden, .secrets-import.hidden, .secrets-share.hidden { display:none; }
+.secrets-share { color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.secrets-share.error { color:#e5a050; white-space:normal; }
 .secrets-import { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text); background:#2a2a1e; border:1px solid #4a4a2e; border-radius:4px; padding:4px 6px; }
 .secrets-import span { flex:1 1 auto; min-width:0; }
 .secrets-import button { padding:2px 8px; font-size:12px; }
@@ -65,6 +67,7 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .secret-btn { flex:0 0 auto; padding:1px 5px; background:transparent; border:0; border-radius:4px; color:var(--muted); font-size:12px; line-height:1.2; cursor:pointer; }
 .secret-btn:hover:not(:disabled) { background:#3a3a3a; color:var(--text); }
 .secret-btn.danger:hover:not(:disabled) { color:#ff7b7b; }
+.secret-btn.active { color:#6cb6ff; }
 .secret-reveal { margin:0 4px 4px; padding:6px 8px; max-height:160px; overflow:auto; background:#181818; border:1px solid var(--border); border-radius:4px; font-family:Consolas, "Cascadia Mono", monospace; font-size:12px; white-space:pre-wrap; word-break:break-all; color:var(--text); }
 .secrets-add { align-self:flex-start; padding:2px 8px; font-size:12px; background:transparent; border:1px dashed #555; color:var(--muted); }
 .secrets-add:hover:not(:disabled) { color:var(--text); }
