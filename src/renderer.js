@@ -559,14 +559,17 @@ function createPane(group, { command = '', cwd = '' } = {}) {
   // minimumContrastRatio: AI CLIs pin the current prompt to the top of the viewport in dim grey on
   // grey; xterm lifts any cell below WCAG AA (4.5:1) so that banner stays readable (#65).
   // scrollback: xterm's default keeps only 1000 lines, which long AI CLI sessions outrun quickly.
-  const term = new Terminal({ cursorBlink: true, fontFamily: 'Consolas, monospace', fontSize: 13, minimumContrastRatio: 4.5, scrollback: TERMINAL_SCROLLBACK });
+  // linkHandler: OSC 8 hyperlinks (Claude Code, gh) open like plain URLs, without xterm's default
+  // "This link could potentially be dangerous" confirm dialog (#123).
+  const term = new Terminal({ cursorBlink: true, fontFamily: 'Consolas, monospace', fontSize: 13, minimumContrastRatio: 4.5, scrollback: TERMINAL_SCROLLBACK,
+    linkHandler: window.terminalActions.osc8LinkHandler((uri) => window.api.openExternal(uri)) });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   // Clickable URLs: the web-links addon underlines http(s) URLs on hover; clicking routes through
   // the main process (shell:openExternal re-validates the scheme) so links open in the OS browser,
   // never in an Electron window.
   term.loadAddon(new WebLinksAddon.WebLinksAddon((_event, uri) => {
-    if (/^https?:\/\//i.test(uri)) window.api.openExternal(uri);
+    window.terminalActions.openTerminalLink(uri, (u) => window.api.openExternal(u));
   }));
   term.open(host);
   // WebGL draws block/box glyphs pixel-exact (Claude Code's mascot had gaps on the DOM renderer).
