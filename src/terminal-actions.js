@@ -173,7 +173,27 @@
     return addon;
   }
 
-  const terminalActions = { loadWebglRenderer, shareBadgeModel, shareSegmentMark, splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc52, leftClickSelects, parseOsc7Cwd, shellCdCommand, buildTabSegments };
+  // Click handler for terminal links. Only http(s) URLs are handed to `openExternal` (the main
+  // process re-validates the scheme and opens the OS browser); anything else is ignored. Shared by
+  // the web-links addon (plain URLs in the output) and xterm's `linkHandler` option, which handles
+  // OSC 8 hyperlinks (Claude Code, gh, ls --hyperlink). Without that option xterm falls back to a
+  // window.confirm("…This link could potentially be dangerous") before opening a new window (#123).
+  function openTerminalLink(uri, openExternal) {
+    if (typeof uri !== 'string' || !/^https?:\/\//i.test(uri)) return false;
+    openExternal(uri);
+    return true;
+  }
+
+  // xterm ILinkHandler for OSC 8 hyperlinks: open http(s) links without the default confirm dialog.
+  // allowNonHttpProtocols stays false, so xterm itself never activates file:, javascript:, etc.
+  function osc8LinkHandler(openExternal) {
+    return {
+      activate: (_event, uri) => { openTerminalLink(uri, openExternal); },
+      allowNonHttpProtocols: false
+    };
+  }
+
+  const terminalActions = { openTerminalLink, osc8LinkHandler, loadWebglRenderer, shareBadgeModel, shareSegmentMark, splitAvailability, terminalRightClick, shouldHandleRightClick, parseOsc52, leftClickSelects, parseOsc7Cwd, shellCdCommand, buildTabSegments };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = terminalActions;
   }

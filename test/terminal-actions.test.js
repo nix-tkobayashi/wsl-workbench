@@ -294,3 +294,27 @@ test('leftClickSelects: drags and double-clicks select, plain clicks do not', ()
   assert.equal(leftClickSelects({ dx: 30, dy: 0, detail: 1 }), true);
   assert.equal(leftClickSelects({ dx: 0, dy: 0, detail: 2 }), true);
 });
+
+// #123: terminal links (plain URLs and OSC 8 hyperlinks) open http(s) only, with no confirm dialog.
+const { openTerminalLink, osc8LinkHandler } = require('../src/terminal-actions');
+
+test('openTerminalLink opens http(s) URLs and ignores other schemes', () => {
+  const opened = [];
+  const open = (u) => opened.push(u);
+  assert.equal(openTerminalLink('https://github.com/x/y', open), true);
+  assert.equal(openTerminalLink('HTTP://example.com', open), true);
+  assert.equal(openTerminalLink('file:///etc/passwd', open), false);
+  assert.equal(openTerminalLink('javascript:alert(1)', open), false);
+  assert.equal(openTerminalLink('  https://x', open), false);
+  assert.equal(openTerminalLink(undefined, open), false);
+  assert.deepEqual(opened, ['https://github.com/x/y', 'HTTP://example.com']);
+});
+
+test('osc8LinkHandler activates http(s) links via openExternal and disallows other protocols', () => {
+  const opened = [];
+  const handler = osc8LinkHandler((u) => opened.push(u));
+  assert.equal(handler.allowNonHttpProtocols, false);
+  handler.activate({}, 'https://github.com/RICHKA-Development/player-infra', {});
+  handler.activate({}, 'ssh://host', {});
+  assert.deepEqual(opened, ['https://github.com/RICHKA-Development/player-infra']);
+});
