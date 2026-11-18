@@ -27,6 +27,8 @@ body { margin:0; overflow:hidden; background:var(--bg); color:var(--text); font-
 .perf-stats { -webkit-app-region: no-drag; display:flex; align-items:center; gap:10px; flex:none; margin-right:8px; color:var(--muted); font-size:11px; cursor:default; }
 .perf-stats.hidden { display:none; }
 .perf-seg { display:flex; align-items:center; gap:4px; }
+.perf-clickable { cursor:pointer; border-radius:3px; }
+.perf-clickable:hover { color:var(--text); }
 .perf-name { font-weight:600; letter-spacing:.02em; }
 .perf-track { width:56px; height:5px; border-radius:3px; background:#2e2e2e; overflow:hidden; }
 .perf-fill { display:block; height:100%; width:0; border-radius:3px; background:#5f8cff; transition:width .4s ease; }

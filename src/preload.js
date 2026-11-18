@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld('api', {
   onUpdateProgress: (cb) => ipcRenderer.on('update:progress', (_event, payload) => cb(payload)),
   onUpdateAvailable: (cb) => ipcRenderer.on('update:available', (_event, payload) => cb(payload)),
   onPerfStats: (cb) => ipcRenderer.on('perf:stats', (_event, payload) => cb(payload)),
+  freeWslMemory: () => ipcRenderer.send('wslMemory:free'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   // Tab strip (shell windows only): render state pushed by main, user intent sent back.
   tabsReady: () => ipcRenderer.send('tabs:ready'),

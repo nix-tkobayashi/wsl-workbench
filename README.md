@@ -19,6 +19,12 @@ Lightweight Windows Electron app for working in WSL:
 - Tree auto-refreshes (files created in the terminal appear without a manual refresh)
 - CPU / memory meters at the right of the title bar show the host PC's live usage (updated every
   2 seconds; hover for absolute memory numbers)
+- **Free WSL Memory** (View menu, or click the MEM meter; v0.42.0): WSL2 keeps the Linux page cache
+  instead of returning it to Windows, so `VmmemWSL` grows toward its cap. After a confirmation this
+  runs `sync`, `drop_caches` and `compact_memory` as root (`wsl.exe -u root`) and shows how much
+  cache was freed — no process is stopped. The VM is shared, so it helps every distro. Task Manager
+  catches up within tens of seconds to minutes (free page reporting); `autoMemoryReclaim=gradual`
+  under `[experimental]` in `.wslconfig` does this automatically.
 - English / Japanese UI (Language menu)
 - Drag & drop to move within the tree, or copy in from Windows Explorer
 - Multi-select in the tree: `Ctrl`+click / `Shift`+click / `Ctrl+A` (`Esc` clears), then Delete,
