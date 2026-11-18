@@ -788,6 +788,66 @@ app.whenReady().then(() => {
   setInterval(samplePerf, PERF_INTERVAL_MS);
 });
 
+// --- Free WSL memory (#125): drop the WSL VM's page cache so VmmemWSL shrinks, without stopping
+// any process. Script/parsing live in wsl-memory.js. The VM is shared by all distros, so it runs in
+// the active workspace's distro — or, for a remote (ssh) workspace, the local distro its ssh runs
+// in. One run at a time; the result dialog notes that Windows reclaims with a delay.
+const wslMemory = require('./wsl-memory');
+let freeWslMemoryRunning = false;
+async function freeWslMemory(win, state) {
+  // Held from the confirm dialog to the result, so a second window can't queue another run.
+  if (freeWslMemoryRunning) return;
+  freeWslMemoryRunning = true;
+  try {
+    await runFreeWslMemory(win, state);
+  } finally {
+    freeWslMemoryRunning = false;
+  }
+}
+async function runFreeWslMemory(win, state) {
+  // Re-check the window on every dialog: it may close while the reclaim runs.
+  const show = (opts) => (win && !win.isDestroyed() ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts));
+  // A remote workspace's host isn't this VM: use the local distro its ssh already runs in.
+  const wsDistro = (state && state.workspace && state.workspace.distro) || DEFAULT_DISTRO;
+  const distro = isRemoteDistro(wsDistro) ? remoteSshDistro() : wsDistro;
+  const { response } = await show({
+    type: 'question',
+    title: tr('wslMemory.title'),
+    message: tr('wslMemory.confirm'),
+    detail: tr('wslMemory.confirmDetail').replace('{distro}', distro),
+    buttons: [tr('wslMemory.run'), tr('prompt.cancel')],
+    defaultId: 0,
+    cancelId: 1
+  });
+  if (response !== 0) return;
+  const result = await new Promise((resolve) => {
+    require('child_process').execFile('wsl.exe', wslMemory.reclaimArgs(distro),
+      { timeout: 120000, windowsHide: true, maxBuffer: 1024 * 1024 },
+      (error, stdout, stderr) => resolve({ error, stdout, stderr }));
+  });
+  const parsed = !result.error ? wslMemory.parseReclaimOutput(result.stdout) : null;
+  if (!parsed) {
+    const reason = result.error ? String(result.error.message || result.error) : 'unexpected output';
+    await show({ type: 'error', title: tr('wslMemory.title'), message: tr('wslMemory.failed'), detail: reason.slice(0, 500), buttons: ['OK'] });
+    return;
+  }
+  await show({
+    type: 'info',
+    title: tr('wslMemory.title'),
+    message: tr('wslMemory.done').replace('{freed}', wslMemory.formatGB(parsed.freedBytes)),
+    detail: tr('wslMemory.doneDetail')
+      .replace('{available}', wslMemory.formatGB(parsed.availableAfter))
+      .replace('{total}', wslMemory.formatGB(parsed.totalBytes)),
+    buttons: ['OK']
+  });
+}
+// The tab strip's MEM meter is a shortcut for the same action, scoped to that window's active tab.
+ipcMain.on('wslMemory:free', (event) => {
+  const win = windowForSender(event.sender);
+  const ws = win ? windowState.get(win.id) : null;
+  freeWslMemory(win, (ws && viewState.get(ws.activeId)) || null).catch((err) => console.warn('free WSL memory failed', err));
+});
+
 ipcMain.handle('update:install', (event) => {
   const latest = startupUpdate;
   if (!latest) return { ok: false };
@@ -946,6 +1006,7 @@ function buildAppMenu() {
       label: tr('menu.view'),
       submenu: [
         { label: tr('menu.toggleSecrets'), accelerator: 'CmdOrCtrl+Shift+K', click: () => sendToFocusedWindow('menu:toggleSecrets') },
+        { label: tr('menu.freeWslMemory'), click: () => { const { win, state } = getFocusedWindowAndState(); freeWslMemory(win, state).catch((err) => console.warn('free WSL memory failed', err)); } },
         { type: 'separator' },
         { role: 'reload', label: tr('menu.reload') },
         { role: 'forceReload', label: tr('menu.forceReload') },

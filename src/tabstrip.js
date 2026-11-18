@@ -119,7 +119,14 @@
       .replace('{cpu}', String(lastPerf.cpu))
       .replace('{used}', toGB(lastPerf.memUsed))
       .replace('{total}', toGB(lastPerf.memTotal));
+    document.getElementById('perfMemSeg').title = `${perfStats.title}\n${t('perf.memClickHint')}`;
   }
+  // Clicking the MEM meter offers to free the WSL VM's page cache (#125; main confirms first).
+  const perfMemSeg = document.getElementById('perfMemSeg');
+  perfMemSeg.addEventListener('click', () => window.api.freeWslMemory());
+  perfMemSeg.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); window.api.freeWslMemory(); }
+  });
   window.api.onPerfStats((p) => {
     if (!p || typeof p.cpu !== 'number') return;
     lastPerf = p;
