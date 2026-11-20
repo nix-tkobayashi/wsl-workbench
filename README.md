@@ -160,6 +160,25 @@ Share a workspace's secrets with your other PCs through a folder synced by **Goo
 - Merge is per key, newest edit wins; a deletion or rename on one PC removes the key on the others (copies handed out there are removed too).
 - **Stop Sharing on This PC** keeps both the local secrets and the shared file. Changing the passphrase does not re-encrypt existing files.
 
+## Task panels: GitHub / Backlog (v0.43.0)
+
+Open tasks assigned to you, in resizable panels to the right of the editor (GitHub, then Backlog;
+the terminal keeps the full width below). A panel appears only once it is set up, so with neither
+set up the window looks as before. Settings are per workspace.
+
+- **Set up**: View → *GitHub Tasks Settings…* / *Backlog Tasks Settings…* (or ⚙ on a panel). The
+  token is one of the workspace's secrets, picked by name — its value stays in the main process and
+  is never shown or written anywhere else.
+  - GitHub: a personal access token (classic: `repo`, `read:org`; fine-grained: Issues and Pull
+    requests read). Pick an organization (or your account), search, and check repositories (up to 200; type an organization name if a
+    fine-grained token does not list it). Listed:
+    open issues/PRs in the checked repositories assigned to you (●), and open PRs requesting your
+    review (◆).
+  - Backlog: an API key and the space (`xxx` of `https://xxx.backlog.com` / `.jp`; pasting the URL
+    fills both). Listed: open issues (any status but Closed) assigned to you, with status and due date.
+- Newest update first (with a note when there are more than can be fetched). Click an item to open it in the browser. ⟳ refreshes; panels also refresh
+  every 5 minutes. View → *Task Panels* hides/shows them.
+
 ## Remote workspaces over ssh (v0.38.0)
 
 Open a directory on another host (e.g. an EC2 instance) as the workspace: the file tree, editor,

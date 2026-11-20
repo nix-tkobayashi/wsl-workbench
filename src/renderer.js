@@ -2432,6 +2432,8 @@ async function applyWorkspace(nextConfig) {
     for (const p of prevExpanded) expanded.add(p);
     if (prevConfig) {
       window.api.resyncWorkspace({ workspace: prevConfig, showLanding: false });
+      // A task refresh during the failed switch may have loaded the other workspace's tasks.
+      if (window.taskPanels) window.taskPanels.applyWorkspace();
     } else {
       landing.classList.remove('hidden');
       updateWorkspaceName();
@@ -2445,6 +2447,7 @@ async function applyWorkspace(nextConfig) {
   disposeAllTerminals();  // close the previous workspace's terminals, open one fresh
   createTerminal();
   applySecretsForWorkspace();
+  if (window.taskPanels) window.taskPanels.applyWorkspace(); // GitHub / Backlog panels (task-panels.js)
   restoreEditorSession(); // reopen the files that were open here last time (async, best-effort)
 }
 
@@ -3356,5 +3359,6 @@ updateBtn.addEventListener('click', () => {
   }
   createTerminal();
   applySecretsForWorkspace();
+  if (window.taskPanels) window.taskPanels.applyWorkspace(); // GitHub / Backlog panels (task-panels.js)
   restoreEditorSession(); // reopen this workspace's files from the last session
 })();
