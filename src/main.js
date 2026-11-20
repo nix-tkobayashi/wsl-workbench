@@ -1006,6 +1006,10 @@ function buildAppMenu() {
       label: tr('menu.view'),
       submenu: [
         { label: tr('menu.toggleSecrets'), accelerator: 'CmdOrCtrl+Shift+K', click: () => sendToFocusedWindow('menu:toggleSecrets') },
+        { label: tr('menu.toggleTaskPanels'), click: () => sendToFocusedWindow('menu:toggleTaskPanels') },
+        { label: tr('menu.githubTasksSettings'), click: () => sendToFocusedWindow('menu:taskSettingsGithub') },
+        { label: tr('menu.backlogTasksSettings'), click: () => sendToFocusedWindow('menu:taskSettingsBacklog') },
+        { type: 'separator' },
         { label: tr('menu.freeWslMemory'), click: () => { const { win, state } = getFocusedWindowAndState(); freeWslMemory(win, state).catch((err) => console.warn('free WSL memory failed', err)); } },
         { type: 'separator' },
         { role: 'reload', label: tr('menu.reload') },
@@ -2299,6 +2303,70 @@ ipcMain.handle('secrets:import', async (event) => {
 
 // The terminal strip's key button: insert a secret's path (or, confirmed, its value) into the
 // focused pane. Clicking sends the choice back; the renderer then calls insertPath / pasteValue.
+// --- Task panels (src/tasks.js, issue #127): GitHub / Backlog tasks assigned to the user, beside
+// the editor. Settings are per workspace (like its secrets); the token is a secret of that
+// workspace, read here by key name — the renderer never sees its value. ---
+const tasksLib = require('./tasks');
+const TASK_PROVIDERS = ['github', 'backlog'];
+const tasksSettingsKey = (ws) => `${ws.distro}:${ws.wslPath}`;
+function readTaskConfig(ws) {
+  return tasksLib.normalizeConfig((readSettings().tasks || {})[tasksSettingsKey(ws)]);
+}
+function taskToken(ws, tokenKey) {
+  let value;
+  try { value = getSecretStore().get(ws, tokenKey); } catch { throw new tasksLib.TaskError('decrypt'); }
+  if (value == null || !value.trim()) throw new tasksLib.TaskError('no-token');
+  return value.trim();
+}
+const taskResult = (promise) => promise.then((data) => ({ ok: true, ...data }),
+  (err) => ({ ok: false, error: (err && err.code) || 'network' }));
+
+ipcMain.handle('tasks:getConfig', (event) => {
+  const ws = secretsWorkspaceFor(event.sender);
+  if (!ws) return { config: tasksLib.normalizeConfig(null), secretKeys: [] };
+  return { config: readTaskConfig(ws), secretKeys: getSecretStore().list(ws).map((i) => i.key) };
+});
+
+ipcMain.handle('tasks:setConfig', (event, { provider, value = null, workspace = null } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  if (!ws || !TASK_PROVIDERS.includes(provider)) return { ok: false, error: 'workspace' };
+  const next = provider === 'github' ? tasksLib.normalizeGithub(value) : tasksLib.normalizeBacklog(value);
+  if (value != null && !next) return { ok: false, error: 'invalid' };
+  const all = { ...(readSettings().tasks || {}) };
+  const entry = { ...(all[tasksSettingsKey(ws)] || {}) };
+  if (next) entry[provider] = next; else delete entry[provider];
+  if (Object.keys(entry).length) all[tasksSettingsKey(ws)] = entry; else delete all[tasksSettingsKey(ws)];
+  if (!writeSettings({ tasks: all })) return { ok: false, error: 'save-failed' };
+  return { ok: true, config: readTaskConfig(ws) };
+});
+
+ipcMain.handle('tasks:list', (event, { provider, workspace = null, fresh = false } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  if (!ws || !TASK_PROVIDERS.includes(provider)) return { ok: false, error: 'workspace' };
+  const cfg = readTaskConfig(ws)[provider];
+  if (!tasksLib.isConfigured(provider, cfg)) return { ok: false, error: 'not-configured' };
+  return taskResult((async () => {
+    const token = taskToken(ws, cfg.tokenKey);
+    return provider === 'github'
+      ? tasksLib.fetchGithubTasks({ token, repos: cfg.repos })
+      : tasksLib.fetchBacklogTasks({ apiKey: token, space: cfg.space, domain: cfg.domain, fresh: fresh === true });
+  })());
+});
+
+// Settings dialog: the owners (account + organizations) and an owner's repositories for a token
+// the user picked but hasn't saved yet.
+ipcMain.handle('tasks:githubOwners', (event, { tokenKey, workspace = null } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  if (!ws || !secretsLib.isValidKey(tokenKey)) return { ok: false, error: 'workspace' };
+  return taskResult((async () => tasksLib.fetchGithubOwners({ token: taskToken(ws, tokenKey) }))());
+});
+
+ipcMain.handle('tasks:githubRepos', (event, { tokenKey, owner, login, workspace = null } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  if (!ws || !secretsLib.isValidKey(tokenKey)) return { ok: false, error: 'workspace' };
+  return taskResult((async () => ({ repos: await tasksLib.fetchGithubRepos({ token: taskToken(ws, tokenKey), owner, login }) }))());
+});
+
 ipcMain.on('secrets:terminalMenu', (event, { x = 0, y = 0 } = {}) => {
   const win = windowForSender(event.sender);
   const ws = secretsWorkspaceFor(event.sender);

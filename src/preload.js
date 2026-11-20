@@ -73,6 +73,17 @@ contextBridge.exposeInMainWorld('api', {
   secretsSyncNow: (workspace) => ipcRenderer.invoke('secrets:syncNow', { workspace }),
   onSecretsInsert: (cb) => ipcRenderer.on('secrets:insert', (_event, payload) => cb(payload)),
   onMenuToggleSecrets: (cb) => ipcRenderer.on('menu:toggleSecrets', () => cb()),
+  // Task panels (issue #127): only secret key names and settings cross; main reads the token.
+  tasksGetConfig: () => ipcRenderer.invoke('tasks:getConfig'),
+  tasksSetConfig: (args) => ipcRenderer.invoke('tasks:setConfig', args),
+  tasksList: (provider, workspace, fresh = false) => ipcRenderer.invoke('tasks:list', { provider, workspace, fresh: !!fresh }),
+  tasksGithubOwners: (tokenKey, workspace) => ipcRenderer.invoke('tasks:githubOwners', { tokenKey, workspace }),
+  tasksGithubRepos: (args) => ipcRenderer.invoke('tasks:githubRepos', args),
+  onMenuToggleTaskPanels: (cb) => ipcRenderer.on('menu:toggleTaskPanels', () => cb()),
+  onMenuTaskSettings: (cb) => {
+    ipcRenderer.on('menu:taskSettingsGithub', () => cb('github'));
+    ipcRenderer.on('menu:taskSettingsBacklog', () => cb('backlog'));
+  },
   onWorkspaceChanged: (cb) => ipcRenderer.on('workspace:changed', (_event, data) => cb(data)),
   onMenuRefreshTree: (cb) => ipcRenderer.on('menu:refreshTree', () => cb()),
   onMenuRestartTerminal: (cb) => ipcRenderer.on('menu:restartTerminal', () => cb()),
