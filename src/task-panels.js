@@ -1,6 +1,6 @@
 // Task panels (issue #127): GitHub and Backlog tasks assigned to the user, each in its own
 // resizable panel to the right of the editor. Loaded after renderer.js and uses its globals
-// (config, t, secretsWs). The main process holds the tokens and makes the API calls; this side
+// (config, t, secretsWs, activeTerminal). The main process holds the tokens and makes the API calls; this side
 // only names the secret that holds a token.
 (function () {
   const PROVIDERS = ['github', 'backlog'];
@@ -87,6 +87,31 @@
     return btn;
   }
 
+  // Type a task's URL into the focused terminal pane, without Enter (issue #130) — as the
+  // secrets panel's → does with a secret's path.
+  function insertUrl(url) {
+    const text = view.terminalUrl(url);
+    const entry = activeTerminal();
+    if (!text || !entry || entry.exited) return;
+    entry.term.paste(text);
+    entry.term.focus();
+  }
+
+  // One list row: the task itself (click = open in the browser) and its → button.
+  function itemRowEl(p, item) {
+    const wrap = el('div', 'task-item-row');
+    const node = p === 'github' ? githubItemEl(item) : backlogItemEl(item);
+    node.dataset.id = item.id;
+    node.addEventListener('click', () => window.api.openExternal(item.url));
+    const insert = el('button', 'task-btn task-insert', '→');
+    insert.dataset.id = item.id;
+    insert.title = t('tasks.insertUrl');
+    insert.disabled = !view.terminalUrl(item.url);
+    insert.addEventListener('click', () => insertUrl(item.url));
+    wrap.append(node, insert);
+    return wrap;
+  }
+
   function render(p) {
     const root = pane(p);
     const st = state[p];
@@ -105,14 +130,14 @@
     msg.classList.toggle('error', !!st.error);
     const list = root.querySelector('.task-list');
     // Keep keyboard focus on the same task across a re-render (e.g. the 5-minute refresh).
-    const focused = list.contains(document.activeElement) ? document.activeElement.dataset.id : null;
+    const active = list.contains(document.activeElement) ? document.activeElement : null;
+    const focused = active ? active.dataset.id : null;
+    const focusedCls = active && active.classList.contains('task-insert') ? '.task-insert' : '.task-item';
     list.textContent = '';
     for (const item of st.items || []) {
-      const node = p === 'github' ? githubItemEl(item) : backlogItemEl(item);
-      node.dataset.id = item.id;
-      node.addEventListener('click', () => window.api.openExternal(item.url));
+      const node = itemRowEl(p, item);
       list.appendChild(node);
-      if (focused && item.id === focused) node.focus();
+      if (focused && item.id === focused) node.querySelector(focusedCls).focus();
     }
   }
 

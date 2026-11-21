@@ -69,7 +69,15 @@
     return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   }
 
-  const taskView = { REPOS_MAX, PANEL_MIN, EDITOR_MIN, PANEL_DEFAULT, clampPanelWidth, fitPanelWidths, filterRepos, isOverdue, timeLabel };
+  // A task's URL as it may be typed into the terminal (issue #130): an http(s) URL on one line,
+  // with no whitespace or control characters — nothing in it can act as Enter or split the
+  // command line. Anything else gives '' (nothing is typed).
+  function terminalUrl(url) {
+    if (typeof url !== 'string' || !/^https?:\/\/[^\s\u0000-\u001f\u007f-\u009f]+$/.test(url)) return '';
+    return url;
+  }
+
+  const taskView = { REPOS_MAX, PANEL_MIN, EDITOR_MIN, PANEL_DEFAULT, clampPanelWidth, fitPanelWidths, filterRepos, isOverdue, timeLabel, terminalUrl };
   if (typeof module !== 'undefined' && module.exports) module.exports = taskView;
   if (typeof window !== 'undefined') window.taskView = taskView;
 })();

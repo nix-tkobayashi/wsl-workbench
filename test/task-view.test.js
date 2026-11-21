@@ -64,3 +64,15 @@ test('fitPanelWidths keeps the editor minimum when one panel hits its own minimu
   assert.equal(w[1], view.PANEL_MIN);
   assert.equal(w[0], 558 - view.PANEL_MIN);
 });
+
+test('terminalUrl passes a one-line http(s) URL and refuses anything that could act on the command line', () => {
+  assert.equal(view.terminalUrl('https://github.com/o/r/issues/130'), 'https://github.com/o/r/issues/130');
+  assert.equal(view.terminalUrl('https://example.backlog.jp/view/PRJ-1'), 'https://example.backlog.jp/view/PRJ-1');
+  assert.equal(view.terminalUrl('https://github.com/o/r/issues/1\nrm -rf ~'), '');
+  assert.equal(view.terminalUrl('https://github.com/o/r/issues/1\r'), '');
+  assert.equal(view.terminalUrl('https://github.com/o/r issues'), '');
+  assert.equal(view.terminalUrl('https://github.com/\u001b[201~x'), '');
+  assert.equal(view.terminalUrl('javascript:alert(1)'), '');
+  assert.equal(view.terminalUrl(''), '');
+  assert.equal(view.terminalUrl(null), '');
+});
