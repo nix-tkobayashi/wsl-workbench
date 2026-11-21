@@ -176,6 +176,8 @@ set up the window looks as before. Settings are per workspace.
     review (◆).
   - Backlog: an API key and the space (`xxx` of `https://xxx.backlog.com` / `.jp`; pasting the URL
     fills both). Listed: open issues (any status but Closed) assigned to you, with status and due date.
+    *Projects to show* (v0.47.0) limits the list to the projects you check, out of the space's
+    (none checked = all).
     Several spaces (v0.45.0): each has its own panel and its own API key. In the dialog, *Space to
     set up* picks the space to edit or *+ Add a space…*; *Remove* drops only that space.
   - Slack To-dos (v0.45.0): your open to-dos (the list formerly called *Later*), soonest due first,

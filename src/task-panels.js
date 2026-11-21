@@ -459,7 +459,9 @@
     };
   }
 
-  function backlogForm(current) {
+  // Backlog: the space, then the projects whose issues are shown (issue #138; none checked = all).
+  function backlogForm(current, tokenSel, ws) {
+    const SPACE_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/;
     const space = document.createElement('input');
     space.type = 'text';
     space.spellcheck = false;
@@ -467,6 +469,78 @@
     space.value = current ? current.space : '';
     const domain = select([['com', 'backlog.com'], ['jp', 'backlog.jp']], current ? current.domain : 'com');
     const preview = el('span', 'task-hint');
+
+    const checked = new Set(current && Array.isArray(current.projects) ? current.projects : []);
+    let projects = [];
+    let seq = 0;
+    let listHint = null;
+    let loadedFor = null; // "token\nspace\ndomain" the list (and the checks) belong to
+    let failed = false;   // the lookup for it failed: asking again is not a repeat
+    const search = document.createElement('input');
+    search.type = 'text';
+    search.spellcheck = false;
+    search.placeholder = t('tasks.searchProjects');
+    const list = el('div', 'task-repo-list');
+    const countEl = el('span', 'task-hint');
+    const updateCount = () => {
+      countEl.textContent = checked.size ? t('tasks.checkedProjects').replace('{n}', String(checked.size)) : t('tasks.allProjects');
+    };
+
+    // Checked projects are always listed, also while the lookup is loading or failing and when
+    // Backlog no longer returns one (archived, deleted) — shown by id then — so it can be unchecked.
+    function renderProjects(hint = null) {
+      listHint = hint;
+      list.textContent = '';
+      if (hint) list.appendChild(el('div', 'task-hint', hint));
+      if (failed) { // shown with the error for as long as it is (also across a search)
+        const retry = el('button', 'task-retry', t('tasks.retry'));
+        retry.type = 'button';
+        retry.addEventListener('click', loadProjects);
+        list.appendChild(retry);
+      }
+      const known = new Set(projects.map((p) => p.id));
+      const all = [...projects, ...[...checked].filter((id) => !known.has(id)).map((id) => ({ id, key: `#${id}`, name: '' }))];
+      const shown = view.filterProjects(all, search.value, checked);
+      if (!shown.length) { if (!hint) list.appendChild(el('div', 'task-hint', t('tasks.noProjects'))); return; }
+      for (const p of shown) {
+        const label = el('label');
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = checked.has(p.id);
+        box.addEventListener('change', () => { if (box.checked) checked.add(p.id); else checked.delete(p.id); updateCount(); });
+        label.append(box, el('span', null, p.name ? `${p.key}  ${p.name}` : p.key));
+        list.appendChild(label);
+      }
+    }
+
+    // (Re)load the list for the key and space now in the form. The checks belong to a space (and
+    // what a key can see): once either changes, they are dropped.
+    async function loadProjects() {
+      if (!list.isConnected) return; // the dialog was closed (a lookup still pending from typing): ask nothing
+      const name = space.value.trim();
+      const target = `${tokenSel.value}\n${name.toLowerCase()}\n${domain.value}`;
+      if (target === loadedFor && !failed) return;
+      if (loadedFor !== null && target !== loadedFor) { checked.clear(); updateCount(); }
+      loadedFor = target;
+      failed = false;
+      const my = ++seq;
+      projects = [];
+      if (!tokenSel.value) { renderProjects(t('tasks.chooseSecretFirst')); return; }
+      if (!SPACE_RE.test(name)) { renderProjects(t('tasks.enterSpaceFirst')); return; }
+      renderProjects(t('tasks.loading'));
+      let res;
+      try { res = await window.api.tasksBacklogProjects({ tokenKey: tokenSel.value, space: name, domain: domain.value, workspace: ws }); } catch { res = { ok: false, error: 'network' }; }
+      if (my !== seq) return;
+      if (!res || !res.ok) {
+        // A failed lookup can be tried again (the checks stay: it is still the same space).
+        failed = true;
+        renderProjects(errorText((res && res.error) || 'network'));
+        return;
+      }
+      projects = res.projects || [];
+      renderProjects();
+    }
+
     const update = () => {
       // Pasting the space's URL fills both fields.
       const m = /([A-Za-z0-9][A-Za-z0-9-]*)\.backlog\.(com|jp)/i.exec(space.value);
@@ -474,16 +548,29 @@
       const name = space.value.trim();
       preview.textContent = name ? `https://${name}.backlog.${domain.value}/` : '';
     };
-    space.addEventListener('input', update);
-    domain.addEventListener('change', update);
+    // The list follows the space once typing pauses (not on every key), and at once on the rest.
+    let typing = null;
+    space.addEventListener('input', () => { update(); clearTimeout(typing); typing = setTimeout(loadProjects, 600); });
+    space.addEventListener('change', () => { clearTimeout(typing); loadProjects(); });
+    domain.addEventListener('change', () => { update(); loadProjects(); });
+    tokenSel.addEventListener('change', loadProjects);
+    search.addEventListener('input', () => renderProjects(listHint));
     update();
     const spaceRow = el('div', 'task-row');
     spaceRow.append(space, domain);
-    modalBody.append(field(t('tasks.space'), spaceRow), preview);
+    modalBody.append(field(t('tasks.space'), spaceRow), preview,
+      field(t('tasks.backlogProjects'), search, t('tasks.backlogProjectsHint')), list, countEl);
+    updateCount();
+    loadProjects();
+
     return () => {
+      clearTimeout(typing);
       const name = space.value.trim();
-      if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/.test(name)) return { error: t('tasks.err.space') };
-      return { value: { tokenKey: null, space: name, domain: domain.value } };
+      if (!SPACE_RE.test(name)) return { error: t('tasks.err.space') };
+      // Checks made for another space or key than the one now in the form don't apply to it.
+      const stale = loadedFor !== `${tokenSel.value}\n${name.toLowerCase()}\n${domain.value}`;
+      if (!stale && checked.size > view.BACKLOG_PROJECTS_MAX) return { error: t('tasks.err.tooManyProjects').replace('{max}', String(view.BACKLOG_PROJECTS_MAX)) };
+      return { value: { tokenKey: null, space: name, domain: domain.value, projects: stale ? [] : [...checked] } };
     };
   }
 
@@ -600,7 +687,7 @@
     const tokenSel = select([['', t('tasks.chooseSecret')], ...keys.map((k) => [k, k])], current ? current.tokenKey : '');
     modalBody.appendChild(field(t('tasks.token'), tokenSel, keys.length ? t(`tasks.tokenHint.${provider}`) : t('tasks.noSecrets')));
     const getValue = provider === 'github' ? githubForm(current, tokenSel, ws)
-      : provider === 'backlog' ? backlogForm(current)
+      : provider === 'backlog' ? backlogForm(current, tokenSel, ws)
         : slackForm(current, tokenSel, ws);
 
     const close = () => {

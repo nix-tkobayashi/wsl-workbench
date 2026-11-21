@@ -30,7 +30,7 @@ test('normalizeConfig keeps only well-formed settings', () => {
   });
   assert.deepEqual(cfg.github, { tokenKey: 'GH_TOKEN', repos: ['a/b', 'org/r.e-p_o'] });
   // Settings saved before issue #134 hold one space as an object: it becomes a list of one.
-  assert.deepEqual(cfg.backlog, [{ tokenKey: 'BL_KEY', space: 'myspace', domain: 'jp' }]);
+  assert.deepEqual(cfg.backlog, [{ tokenKey: 'BL_KEY', space: 'myspace', domain: 'jp', projects: [] }]);
   assert.equal(cfg.slack, null);
   assert.equal(tasks.normalizeGithub({ tokenKey: '../x', repos: ['a/b'] }), null);
   assert.equal(tasks.normalizeBacklog({ tokenKey: 'K', space: 'evil.com/x' }), null);
@@ -286,7 +286,7 @@ test('normalizeConfig keeps several Backlog spaces (each once, up to the cap) an
     ],
     slack: { tokenKey: 'SLACK', extra: 1 }
   });
-  assert.deepEqual(cfg.backlog, [{ tokenKey: 'K1', space: 'one', domain: 'com' }, { tokenKey: 'K3', space: 'one', domain: 'jp' }]);
+  assert.deepEqual(cfg.backlog, [{ tokenKey: 'K1', space: 'one', domain: 'com', projects: [] }, { tokenKey: 'K3', space: 'one', domain: 'jp', projects: [] }]);
   assert.deepEqual(cfg.slack, { tokenKey: 'SLACK', channels: [] });
   assert.equal(tasks.normalizeSlack({ tokenKey: '../x' }), null);
   const many = Array.from({ length: 20 }, (_, i) => ({ tokenKey: 'K', space: `s${i}`, domain: 'com' }));
@@ -296,8 +296,8 @@ test('normalizeConfig keeps several Backlog spaces (each once, up to the cap) an
 });
 
 test('applyConfigChange adds, edits and removes one Backlog space without touching the others', () => {
-  const a = { tokenKey: 'KA', space: 'alpha', domain: 'com' };
-  const b = { tokenKey: 'KB', space: 'beta', domain: 'jp' };
+  const a = { tokenKey: 'KA', space: 'alpha', domain: 'com', projects: [] };
+  const b = { tokenKey: 'KB', space: 'beta', domain: 'jp', projects: [7, 8] };
   let cfg = tasks.applyConfigChange(null, 'backlog', a).config;
   cfg = tasks.applyConfigChange(cfg, 'backlog', b).config;
   assert.deepEqual(cfg.backlog, [a, b]);
@@ -341,4 +341,66 @@ test('normalizeSlack keeps the checked channels (well-formed ids, each once) and
   // Saving the filter goes through the same check.
   assert.deepEqual(tasks.applyConfigChange(null, 'slack', { tokenKey: 'S', channels: ['C0AAA'] }).config.slack, { tokenKey: 'S', channels: ['C0AAA'] });
   assert.deepEqual(tasks.applyConfigChange(null, 'slack', { tokenKey: 'S', channels: many }), { error: 'invalid' });
+});
+
+test('normalizeBacklog keeps the checked projects (positive integer ids, each once) and refuses more than the cap', () => {
+  const base = { tokenKey: 'K', space: 's', domain: 'com' };
+  assert.deepEqual(tasks.normalizeBacklog({ ...base, projects: [7, 7, 8, 0, -1, 1.5, '9', null] }).projects, [7, 8]);
+  assert.deepEqual(tasks.normalizeBacklog({ ...base, projects: 7 }).projects, []);
+  assert.deepEqual(tasks.normalizeBacklog(base).projects, []); // settings saved before the filter existed
+  const many = Array.from({ length: 101 }, (_, i) => i + 1);
+  assert.equal(tasks.normalizeBacklog({ ...base, projects: many }), null);
+  assert.equal(tasks.normalizeBacklog({ ...base, projects: many.slice(0, 100) }).projects.length, 100);
+  // Editing a space's projects keeps it the same space (same panel).
+  const cfg = tasks.applyConfigChange({ backlog: [base] }, 'backlog', { ...base, projects: [7] }, 'backlog:s.com').config;
+  assert.deepEqual(cfg.backlog, [{ ...base, projects: [7] }]);
+});
+
+test('fetchBacklogTasks with projects picked asks only their issues and statuses', async () => {
+  const f = fakeFetch([
+    { match: '/users/myself', body: { id: 42 } },
+    { match: (u) => /\/projects\?/.test(u), body: [{ id: 7 }, { id: 8 }, { id: 9 }] },
+    { match: '/projects/7/statuses', body: [{ id: 1 }, { id: 4 }, { id: 70 }] },
+    { match: '/projects/9/statuses', body: [{ id: 1 }, { id: 90 }] },
+    { match: '/issues?', body: [{ issueKey: 'A-1', summary: 's', status: { id: 70, name: 'Custom' }, updated: '2026-01-01T00:00:00Z' }] }
+  ]);
+  const cache = new Map();
+  // 11 was picked but is gone (archived, deleted): skipped, not an error.
+  const { items } = await tasks.fetchBacklogTasks({ apiKey: 'k', space: 's', domain: 'com', projects: [9, 7, 11], fetchImpl: f, statusCache: cache });
+  assert.deepEqual(items.map((i) => i.ref), ['A-1']);
+  assert.ok(!f.calls.some((c) => c.url.includes('/projects/8/statuses'))); // nothing asked of the one left out
+  const params = new URL(f.calls.find((c) => c.url.includes('/issues?')).url).searchParams;
+  assert.deepEqual(params.getAll('projectId[]'), ['7', '9']);
+  assert.deepEqual(params.getAll('statusId[]'), ['1', '2', '3', '70', '90']);
+  // The status list is cached per set of picked projects: another set asks again, the same doesn't.
+  const before = f.calls.filter((c) => c.url.includes('/statuses')).length;
+  await tasks.fetchBacklogTasks({ apiKey: 'k', space: 's', domain: 'com', projects: [7, 9, 11], fetchImpl: f, statusCache: cache });
+  assert.equal(f.calls.filter((c) => c.url.includes('/statuses')).length, before);
+  await tasks.fetchBacklogTasks({ apiKey: 'k', space: 's', domain: 'com', projects: [7], fetchImpl: f, statusCache: cache });
+  assert.equal(f.calls.filter((c) => c.url.includes('/statuses')).length, before + 1);
+  // No projects picked: no projectId filter, as before.
+  await tasks.fetchBacklogTasks({ apiKey: 'k', space: 's', domain: 'com', fetchImpl: fakeFetch([
+    { match: '/users/myself', body: { id: 42 } }, { match: (u) => /\/projects\?/.test(u), body: [] },
+    { match: (u) => { if (u.includes('/issues?')) assert.equal(new URL(u).searchParams.getAll('projectId[]').length, 0); return u.includes('/issues?'); }, body: [] }
+  ]), statusCache: new Map() });
+});
+
+test('fetchBacklogTasks lists nothing (and asks no issues) when every picked project is gone', async () => {
+  const f = fakeFetch([
+    { match: '/users/myself', body: { id: 42 } },
+    { match: (u) => /\/projects\?/.test(u), body: [{ id: 7 }] },
+    { match: '/issues?', body: [{ issueKey: 'A-1', summary: 's', status: { id: 1, name: 'Open' } }] }
+  ]);
+  const res = await tasks.fetchBacklogTasks({ apiKey: 'k', space: 's', domain: 'com', projects: [11], fetchImpl: f, statusCache: new Map() });
+  assert.deepEqual(res, { items: [], truncated: false });
+  assert.ok(!f.calls.some((c) => c.url.includes('/issues?'))); // an unfiltered query would list every project's
+});
+
+test('fetchBacklogProjects lists the space\'s projects by key', async () => {
+  const f = fakeFetch([{ match: (u) => /\/projects\?/.test(u), body: [{ id: 9, projectKey: 'ZED', name: 'Zed\n project' }, { id: 7, projectKey: 'ALPHA', name: 'Alpha' }, { projectKey: 'NOID' }, null] }]);
+  const list = await tasks.fetchBacklogProjects({ apiKey: 'k&y', space: 'myspace', domain: 'jp', fetchImpl: f });
+  assert.deepEqual(list, [{ id: 7, key: 'ALPHA', name: 'Alpha' }, { id: 9, key: 'ZED', name: 'Zed project' }]);
+  assert.ok(f.calls[0].url.startsWith('https://myspace.backlog.jp/api/v2/projects?apiKey=k%26y&archived=false'));
+  await assert.rejects(tasks.fetchBacklogProjects({ apiKey: 'k', space: 'x.evil.com/', domain: 'com', fetchImpl: f }), { code: 'bad-space' });
+  await assert.rejects(tasks.fetchBacklogProjects({ apiKey: 'k', space: 's', domain: 'com', fetchImpl: fakeFetch([{ match: '/projects', status: 401 }]) }), { code: 'auth' });
 });
