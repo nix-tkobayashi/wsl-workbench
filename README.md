@@ -179,7 +179,9 @@ set up the window looks as before. Settings are per workspace.
     Several spaces (v0.45.0): each has its own panel and its own API key. In the dialog, *Space to
     set up* picks the space to edit or *+ Add a space…*; *Remove* drops only that space.
   - Slack To-dos (v0.45.0): your open to-dos (the list formerly called *Later*), soonest due first,
-    with the channel and the start of the message; an item opens the message. Slack has no official
+    with the channel and the start of the message; an item opens the message. *Channels to show*
+    (v0.46.0) limits the list to the channels you check, out of those you are in (none checked =
+    all); to-dos outside channels — DMs, group DMs, files — are always shown. Slack has no official
     API for To-dos, so this uses the web client's own, with your signed-in browser session: store
     **both** the token (`xoxc-…`) and the value of the cookie named `d` (`xoxd-…`) in one secret
     (e.g. on two lines). That pair can do anything you can do in Slack — treat it accordingly; it

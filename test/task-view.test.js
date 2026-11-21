@@ -112,3 +112,11 @@ test('panelList tells apart two spaces of the same name on backlog.com and backl
   assert.deepEqual(list.map((p) => p.title), ['Backlog: acme.backlog.com', 'Backlog: Acme.backlog.jp', 'Backlog: other']);
   assert.deepEqual(list.map((p) => p.tip), ['acme.backlog.com', 'Acme.backlog.jp', 'other.backlog.jp']);
 });
+
+test('filterChannels matches the name case-insensitively (a leading # is ignored) and lists checked channels first', () => {
+  const chans = [{ id: 'C1', name: 'general' }, { id: 'C2', name: 'dev-General' }, { id: 'C3', name: 'random' }];
+  assert.deepEqual(view.filterChannels(chans, 'GENERAL').map((c) => c.id), ['C1', 'C2']);
+  assert.deepEqual(view.filterChannels(chans, '#gen').map((c) => c.id), ['C1', 'C2']);
+  assert.deepEqual(view.filterChannels(chans, '', new Set(['C3'])).map((c) => c.id), ['C3', 'C1', 'C2']);
+  assert.deepEqual(view.filterChannels(chans, 'zzz'), []);
+});

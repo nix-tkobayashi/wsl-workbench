@@ -79,6 +79,7 @@ contextBridge.exposeInMainWorld('api', {
   tasksList: (panel, workspace, fresh = false) => ipcRenderer.invoke('tasks:list', { panel, workspace, fresh: !!fresh }),
   tasksGithubOwners: (tokenKey, workspace) => ipcRenderer.invoke('tasks:githubOwners', { tokenKey, workspace }),
   tasksGithubRepos: (args) => ipcRenderer.invoke('tasks:githubRepos', args),
+  tasksSlackChannels: (tokenKey, workspace) => ipcRenderer.invoke('tasks:slackChannels', { tokenKey, workspace }),
   onMenuToggleTaskPanels: (cb) => ipcRenderer.on('menu:toggleTaskPanels', () => cb()),
   onMenuTaskSettings: (cb) => {
     ipcRenderer.on('menu:taskSettingsGithub', () => cb('github'));

@@ -69,6 +69,14 @@
     return [...hits.filter((r) => checked.has(r)), ...hits.filter((r) => !checked.has(r))];
   }
 
+  // Settings dialog, Slack channels ({ id, name }): case-insensitive substring match on the name;
+  // checked channels first.
+  function filterChannels(channels, query, checked = new Set()) {
+    const q = String(query || '').trim().replace(/^#/, '').toLowerCase();
+    const hits = channels.filter((c) => !q || String(c.name).toLowerCase().includes(q));
+    return [...hits.filter((c) => checked.has(c.id)), ...hits.filter((c) => !checked.has(c.id))];
+  }
+
   // "YYYY-MM-DD" due date → whether it has passed (before today, local time).
   function isOverdue(due, now = new Date()) {
     if (typeof due !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(due)) return false;
@@ -91,6 +99,7 @@
     return url;
   }
 
+  const SLACK_CHANNELS_MAX = 200; // channels checked for the Slack panel (main refuses more)
   const BACKLOG_SPACES_MAX = 5; // panels beside the editor: more would leave no room to read any
 
   // The id of a Backlog space's panel (issue #134): one panel per space. Lower case, as a space
@@ -121,7 +130,7 @@
     return out;
   }
 
-  const taskView = { BACKLOG_SPACES_MAX, backlogPanelId, panelList, REPOS_MAX, PANEL_MIN, EDITOR_MIN, PANEL_DEFAULT, clampPanelWidth, fitPanelWidths, filterRepos, isOverdue, timeLabel, terminalUrl };
+  const taskView = { SLACK_CHANNELS_MAX, filterChannels, BACKLOG_SPACES_MAX, backlogPanelId, panelList, REPOS_MAX, PANEL_MIN, EDITOR_MIN, PANEL_DEFAULT, clampPanelWidth, fitPanelWidths, filterRepos, isOverdue, timeLabel, terminalUrl };
   if (typeof module !== 'undefined' && module.exports) module.exports = taskView;
   if (typeof window !== 'undefined') window.taskView = taskView;
 })();
