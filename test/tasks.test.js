@@ -287,7 +287,7 @@ test('normalizeConfig keeps several Backlog spaces (each once, up to the cap) an
     slack: { tokenKey: 'SLACK', extra: 1 }
   });
   assert.deepEqual(cfg.backlog, [{ tokenKey: 'K1', space: 'one', domain: 'com' }, { tokenKey: 'K3', space: 'one', domain: 'jp' }]);
-  assert.deepEqual(cfg.slack, { tokenKey: 'SLACK' });
+  assert.deepEqual(cfg.slack, { tokenKey: 'SLACK', channels: [] });
   assert.equal(tasks.normalizeSlack({ tokenKey: '../x' }), null);
   const many = Array.from({ length: 20 }, (_, i) => ({ tokenKey: 'K', space: `s${i}`, domain: 'com' }));
   assert.equal(tasks.normalizeConfig({ backlog: many }).backlog.length, 5);
@@ -323,10 +323,22 @@ test('applyConfigChange adds, edits and removes one Backlog space without touchi
 test('applyConfigChange sets and clears GitHub and Slack, leaving the rest alone', () => {
   const base = { backlog: [{ tokenKey: 'KA', space: 'alpha', domain: 'com' }] };
   const withSlack = tasks.applyConfigChange(base, 'slack', { tokenKey: 'SLACK' }).config;
-  assert.deepEqual(withSlack.slack, { tokenKey: 'SLACK' });
+  assert.deepEqual(withSlack.slack, { tokenKey: 'SLACK', channels: [] });
   assert.equal(withSlack.backlog.length, 1);
   assert.equal(tasks.applyConfigChange(withSlack, 'slack', null).config.slack, null);
   assert.deepEqual(tasks.applyConfigChange(base, 'slack', { tokenKey: '' }), { error: 'invalid' });
   assert.deepEqual(tasks.applyConfigChange(base, 'github', { tokenKey: 'T', repos: ['a/b'] }).config.github, { tokenKey: 'T', repos: ['a/b'] });
   assert.deepEqual(tasks.applyConfigChange(base, 'other', {}), { error: 'invalid' });
+});
+
+test('normalizeSlack keeps the checked channels (well-formed ids, each once) and refuses more than the cap', () => {
+  assert.deepEqual(tasks.normalizeSlack({ tokenKey: 'S', channels: ['C0AAA', 'C0AAA', 'G0PRIV', 'D0DM', 'c0low', '../x', 5, null] }),
+    { tokenKey: 'S', channels: ['C0AAA', 'G0PRIV'] });
+  assert.deepEqual(tasks.normalizeSlack({ tokenKey: 'S', channels: 'C0AAA' }), { tokenKey: 'S', channels: [] });
+  const many = Array.from({ length: 201 }, (_, i) => `C0${String(i).padStart(4, '0')}`);
+  assert.equal(tasks.normalizeSlack({ tokenKey: 'S', channels: many }), null);
+  assert.equal(tasks.normalizeSlack({ tokenKey: 'S', channels: many.slice(0, 200) }).channels.length, 200);
+  // Saving the filter goes through the same check.
+  assert.deepEqual(tasks.applyConfigChange(null, 'slack', { tokenKey: 'S', channels: ['C0AAA'] }).config.slack, { tokenKey: 'S', channels: ['C0AAA'] });
+  assert.deepEqual(tasks.applyConfigChange(null, 'slack', { tokenKey: 'S', channels: many }), { error: 'invalid' });
 });

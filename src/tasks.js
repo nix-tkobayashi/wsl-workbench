@@ -5,7 +5,7 @@
 // Kept free of Electron so it can be unit-tested: `fetch` is injected.
 const crypto = require('crypto');
 const { isValidKey } = require('./secret-keys');
-const { backlogPanelId, BACKLOG_SPACES_MAX } = require('./task-view');
+const { backlogPanelId, BACKLOG_SPACES_MAX, SLACK_CHANNELS_MAX } = require('./task-view');
 
 const GITHUB_API = 'https://api.github.com';
 const REQUEST_TIMEOUT_MS = 20000;
@@ -22,6 +22,7 @@ const REPO_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const SPACE_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})$/;
 const BACKLOG_DOMAINS = ['com', 'jp'];
+const SLACK_CHANNEL_RE = /^[CG][A-Z0-9]{2,20}$/;
 
 // Only well-formed settings survive; anything else is dropped (= that provider is "not set").
 function normalizeGithub(raw) {
@@ -55,10 +56,13 @@ function normalizeBacklogList(raw) {
   return out;
 }
 
-// Slack To-dos (issue #133): only the secret that holds the session token and cookie.
+// Slack To-dos (issue #133): the secret that holds the session token and cookie.
 function normalizeSlack(raw) {
   if (!raw || typeof raw !== 'object' || !isValidKey(raw.tokenKey)) return null;
-  return { tokenKey: raw.tokenKey };
+  // The channels whose to-dos are shown (issue #136); none = all of them.
+  const channels = [...new Set((Array.isArray(raw.channels) ? raw.channels : []).filter((c) => typeof c === 'string' && SLACK_CHANNEL_RE.test(c)))];
+  if (channels.length > SLACK_CHANNELS_MAX) return null;
+  return { tokenKey: raw.tokenKey, channels };
 }
 
 function normalizeConfig(raw) {

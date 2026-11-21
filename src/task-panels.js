@@ -487,6 +487,70 @@
     };
   }
 
+  // Slack: the channels whose to-dos are shown (issue #136). None checked = every to-do.
+  function slackForm(current, tokenSel, ws) {
+    const checked = new Set(current && Array.isArray(current.channels) ? current.channels : []);
+    let channels = [];
+    let seq = 0;
+    let listHint = null;
+    const search = document.createElement('input');
+    search.type = 'text';
+    search.spellcheck = false;
+    search.placeholder = t('tasks.searchChannels');
+    const list = el('div', 'task-repo-list');
+    const countEl = el('span', 'task-hint');
+    const updateCount = () => {
+      countEl.textContent = checked.size ? t('tasks.checkedChannels').replace('{n}', String(checked.size)) : t('tasks.allChannels');
+    };
+
+    // Checked channels are always listed, also while the lookup is loading or failing and when
+    // Slack no longer returns one (left, archived) — shown by id then — so it can be unchecked.
+    function renderChannels(hint = null) {
+      listHint = hint;
+      list.textContent = '';
+      if (hint) list.appendChild(el('div', 'task-hint', hint));
+      const known = new Set(channels.map((c) => c.id));
+      const all = [...channels, ...[...checked].filter((id) => !known.has(id)).map((id) => ({ id, name: id, unknown: true }))];
+      const shown = view.filterChannels(all, search.value, checked);
+      if (!shown.length) { if (!hint) list.appendChild(el('div', 'task-hint', t('tasks.noChannels'))); return; }
+      for (const c of shown) {
+        const label = el('label');
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = checked.has(c.id);
+        box.addEventListener('change', () => { if (box.checked) checked.add(c.id); else checked.delete(c.id); updateCount(); });
+        label.append(box, el('span', null, c.unknown ? c.name : `#${c.name}`));
+        list.appendChild(label);
+      }
+    }
+
+    async function loadChannels() {
+      const my = ++seq;
+      channels = [];
+      if (!tokenSel.value) { renderChannels(t('tasks.chooseSecretFirst')); return; }
+      renderChannels(t('tasks.loading'));
+      let res;
+      try { res = await window.api.tasksSlackChannels(tokenSel.value, ws); } catch { res = { ok: false, error: 'network' }; }
+      if (my !== seq) return;
+      if (!res || !res.ok) { renderChannels(errorText((res && res.error) || 'network')); return; }
+      channels = res.channels || [];
+      renderChannels(res.truncated ? t('tasks.channelsTruncated') : null);
+    }
+
+    // Another secret may be another Slack workspace: its channels are not these, and ids checked
+    // here would hide every channel to-do there.
+    tokenSel.addEventListener('change', () => { checked.clear(); updateCount(); loadChannels(); });
+    search.addEventListener('input', () => renderChannels(listHint));
+    modalBody.append(field(t('tasks.slackChannels'), search, t('tasks.slackChannelsHint')), list, countEl);
+    updateCount();
+    loadChannels();
+
+    return () => {
+      if (checked.size > view.SLACK_CHANNELS_MAX) return { error: t('tasks.err.tooManyChannels').replace('{max}', String(view.SLACK_CHANNELS_MAX)) };
+      return { value: { tokenKey: null, channels: [...checked] } };
+    };
+  }
+
   const NEW_SPACE = 'new';
   let settingsSeq = 0; // only the latest open request builds the dialog
   // `target` (Backlog): the panel id of the space to edit, or NEW_SPACE to add one. From the menu
@@ -537,7 +601,7 @@
     modalBody.appendChild(field(t('tasks.token'), tokenSel, keys.length ? t(`tasks.tokenHint.${provider}`) : t('tasks.noSecrets')));
     const getValue = provider === 'github' ? githubForm(current, tokenSel, ws)
       : provider === 'backlog' ? backlogForm(current)
-        : () => ({ value: { tokenKey: null } });
+        : slackForm(current, tokenSel, ws);
 
     const close = () => {
       modal.classList.add('hidden');

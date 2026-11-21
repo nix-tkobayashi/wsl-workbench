@@ -210,3 +210,78 @@ test('the cache keeps only the most recently used accounts', async () => {
   await slack.fetchSlackTasks({ secret: 'xoxc-acct-0 xoxd-c', fetchImpl: f, cache }); // long gone
   assert.equal(f.count('conversations.history'), before + 1);
 });
+
+test('fetchSlackTasks with channels picked shows their messages, and always what is outside channels', async () => {
+  const f = fakeSlack({
+    'auth.test': AUTH,
+    'saved.list': saved([
+      todo({ item_id: 'C0PICK', ts: '1700000001.000100', date_created: 9 }),
+      todo({ item_id: 'C0OTHER', ts: '1700000002.000100', date_created: 8 }),
+      todo({ item_id: 'C0OTHER', ts: '1700000003.000100', date_created: 7 }),
+      todo({ item_id: 'D0DM', ts: '1700000004.000100', date_created: 6 }),
+      todo({ item_id: 'G0MPIM', ts: '1700000005.000100', date_created: 5 }),
+      todo({ item_id: 'C0GONE', ts: '1700000006.000100', date_created: 4 }),
+      todo({ item_id: 'F0FILE', item_type: 'file', ts: undefined, date_created: 3 })
+    ]),
+    'conversations.info': (p) => {
+      if (p.channel === 'C0GONE') return { ok: false, error: 'channel_not_found' };
+      return { ok: true, channel: p.channel === 'D0DM' ? { is_im: true } : p.channel === 'G0MPIM' ? { is_mpim: true, name: 'mpdm-a--b-1' } : { name: p.channel.toLowerCase() } };
+    },
+    'conversations.history': (p) => ({ ok: true, messages: [{ ts: p.latest, text: `in ${p.channel}` }] }),
+    'users.conversations': { ok: true, channels: [{ id: 'G0MPIM', is_mpim: true }], response_metadata: { next_cursor: '' } },
+    'files.info': { ok: true, file: { title: 'Spec.pdf' } }
+  });
+  const cache = new Map();
+  const res = await slack.fetchSlackTasks({ secret: SECRET, channels: ['C0PICK'], fetchImpl: f, cache });
+  assert.deepEqual(res.items.map((i) => [i.ref, i.title]), [['#c0pick', 'in C0PICK'], ['DM', 'in D0DM'], ['Group DM', 'in G0MPIM'], ['File', 'Spec.pdf']]);
+  // Nothing is asked about the channels left out (nor about one that is gone): group DMs are known
+  // from the user's own list of them, read once and reused by the next refresh.
+  assert.deepEqual(f.calls.filter((c) => c.method === 'conversations.history').map((c) => c.params.channel), ['C0PICK', 'D0DM', 'G0MPIM']);
+  assert.deepEqual(f.calls.filter((c) => c.method === 'conversations.info').map((c) => c.params.channel), ['C0PICK', 'D0DM', 'G0MPIM']);
+  assert.deepEqual(f.calls.filter((c) => c.method === 'users.conversations').map((c) => c.params.types), ['mpim']);
+  await slack.fetchSlackTasks({ secret: SECRET, channels: ['C0PICK'], fetchImpl: f, cache });
+  assert.equal(f.count('users.conversations'), 1);
+  // No channels picked: everything, as before.
+  const all = await slack.fetchSlackTasks({ secret: SECRET, channels: [], fetchImpl: f, cache: new Map() });
+  assert.equal(all.items.length, 7);
+});
+
+test('the channel filter applies before the cap', async () => {
+  const picked = Array.from({ length: 3 }, (_, i) => todo({ item_id: 'C0PICK', ts: `17100${String(i).padStart(5, '0')}.000100` }));
+  const noise = Array.from({ length: 47 }, (_, i) => todo({ item_id: 'C0NOISE', ts: `17000${String(i).padStart(5, '0')}.000100` }));
+  const f = fakeSlack({
+    'auth.test': AUTH,
+    'saved.list': (p) => saved(p.cursor === '3' ? picked : noise, p.cursor === '3' ? '' : String(Number(p.cursor || 0) + 1)), // 141 others, then the 3
+    'users.conversations': { ok: true, channels: [], response_metadata: { next_cursor: '' } },
+    'conversations.info': (p) => ({ ok: true, channel: { name: p.channel.toLowerCase() } }),
+    'conversations.history': (p) => ({ ok: true, messages: [{ ts: p.latest, text: 't' }] })
+  });
+  const res = await slack.fetchSlackTasks({ secret: SECRET, channels: ['C0PICK'], fetchImpl: f, cache: new Map() });
+  assert.equal(res.items.length, 3);
+  assert.equal(res.truncated, false);
+  assert.equal(f.count('conversations.info'), 1); // the picked channel only
+  // A list of group DMs that can't be read fails the refresh rather than hiding them silently.
+  // ...and it is read only when some message needs it: picked channels, DMs and files don't.
+  const handlers = { 'auth.test': AUTH, 'users.conversations': { ok: false, error: 'missing_scope' },
+    'conversations.info': { ok: true, channel: { name: 'x' } }, 'conversations.history': (p) => ({ ok: true, messages: [{ ts: p.latest, text: 't' }] }), 'files.info': { ok: true, file: { title: 'f' } } };
+  const clear = fakeSlack({ ...handlers, 'saved.list': saved([...picked, todo({ item_id: 'D0DM' }), todo({ item_id: 'F0FILE', item_type: 'file', ts: undefined })]) });
+  assert.equal((await slack.fetchSlackTasks({ secret: SECRET, channels: ['C0PICK'], fetchImpl: clear, cache: new Map() })).items.length, 5);
+  assert.equal(clear.count('users.conversations'), 0);
+  const bad = fakeSlack({ ...handlers, 'saved.list': saved([...picked, todo({ item_id: 'C0MAYBE' })]) });
+  assert.equal(await slack.fetchSlackTasks({ secret: SECRET, channels: ['C0PICK'], fetchImpl: bad, cache: new Map() }).then(() => null, (e) => e.code), 'slack-missing_scope');
+});
+
+test('fetchSlackChannels lists the channels the user is in, by name, across pages', async () => {
+  const f = fakeSlack({
+    'users.conversations': (p) => (p.cursor
+      ? { ok: true, channels: [{ id: 'C0BBB', name: 'alpha' }, { id: 'C0ARCH', name: 'old', is_archived: true }, { id: 'bad id', name: 'x' }, { id: 'G0MPIM', name: 'mpdm-a--b-1', is_mpim: true }], response_metadata: { next_cursor: '' } }
+      : { ok: true, channels: [{ id: 'C0AAA', name: 'zeta' }, { id: 'G0PRIV', name: 'private-one', is_private: true }], response_metadata: { next_cursor: 'next' } })
+  });
+  const res = await slack.fetchSlackChannels({ secret: SECRET, fetchImpl: f });
+  assert.deepEqual(res, { channels: [{ id: 'C0BBB', name: 'alpha' }, { id: 'G0PRIV', name: 'private-one' }, { id: 'C0AAA', name: 'zeta' }], truncated: false });
+  assert.equal(f.calls[0].params.types, 'public_channel,private_channel');
+  assert.equal(f.calls[0].params.exclude_archived, 'true');
+  assert.deepEqual(f.calls.map((c) => c.params.cursor), [undefined, 'next']);
+  const err = await slack.fetchSlackChannels({ secret: SECRET, fetchImpl: fakeSlack({ 'users.conversations': { ok: false, error: 'invalid_auth' } }) }).then(() => null, (e) => e.code);
+  assert.equal(err, 'auth');
+});

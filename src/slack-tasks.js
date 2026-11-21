@@ -171,12 +171,13 @@ async function cached(store, key, run, load) {
   return value;
 }
 
-async function channelLabel(fetchImpl, creds, channel) {
+// → { label, direct }: `direct` for a DM or group DM (not a channel one can pick in the settings).
+async function channelInfo(fetchImpl, creds, channel) {
   const data = await slackCall(fetchImpl, creds, 'conversations.info', { channel });
   const c = data.channel || {};
-  if (c.is_im) return 'DM';
-  if (c.is_mpim) return 'Group DM';
-  return typeof c.name === 'string' && c.name ? `#${c.name}` : '';
+  if (c.is_im) return { label: 'DM', direct: true };
+  if (c.is_mpim) return { label: 'Group DM', direct: true };
+  return { label: typeof c.name === 'string' && c.name ? `#${c.name}` : '', direct: false };
 }
 
 // The saved message itself: a channel message comes from the history; a thread reply (which the
@@ -196,13 +197,24 @@ async function messageInfo(fetchImpl, creds, channel, ts) {
 // gives a row — the to-do exists — except for errors that fail every request (auth, rate limit,
 // no network), which fail the refresh.
 const FATAL = new Set(['auth', 'rate-limit', 'network', 'timeout']);
+const soft = async (fn, fallback) => {
+  try { return await fn(); } catch (err) { if (err && FATAL.has(err.code)) throw err; return fallback; }
+};
+const isMessage = (raw) => raw.item_type === 'message' && CHANNEL_RE.test(raw.item_id) && typeof raw.ts === 'string' && TS_RE.test(raw.ts);
+const cachedChannel = (fetchImpl, creds, store, run, id) => cached(store, `c:${id}`, run, () => channelInfo(fetchImpl, creds, id));
+
+// With channels picked in the settings (issue #136): a message shows when it is in one of them.
+// What isn't in a channel always shows — DMs and group DMs, files, anything else. Group DMs are
+// told from channels by the user's own list of them (one request, cached), not by a lookup per
+// message: nothing is spent on the channels left out, however many to-dos they hold.
+function passesFilter(only, groupDms, raw) {
+  return !isMessage(raw) || only.has(raw.item_id) || raw.item_id.startsWith('D') || groupDms.has(raw.item_id);
+}
+
 async function todoItem(fetchImpl, creds, base, store, run, raw) {
-  const soft = async (fn, fallback) => {
-    try { return await fn(); } catch (err) { if (err && FATAL.has(err.code)) throw err; return fallback; }
-  };
   const common = { due: dueDate(raw.date_due), created: Number.isFinite(raw.date_created) ? raw.date_created : 0, status: '' };
-  if (raw.item_type === 'message' && CHANNEL_RE.test(raw.item_id) && typeof raw.ts === 'string' && TS_RE.test(raw.ts)) {
-    const ref = await soft(() => cached(store, `c:${raw.item_id}`, run, () => channelLabel(fetchImpl, creds, raw.item_id)), '');
+  if (isMessage(raw)) {
+    const ref = (await soft(() => cachedChannel(fetchImpl, creds, store, run, raw.item_id), { label: '' })).label;
     const info = await soft(() => cached(store, `m:${raw.item_id}:${raw.ts}`, run, () => messageInfo(fetchImpl, creds, raw.item_id, raw.ts)), { title: '', threadTs: null });
     return { ...common, id: `${raw.item_id}:${raw.ts}`, ref, title: info.title, url: slackMessageUrl(base, raw.item_id, raw.ts, info.threadTs) };
   }
@@ -225,7 +237,8 @@ async function todoItem(fetchImpl, creds, base, store, run, raw) {
 }
 
 // → { items, truncated, team }: the user's open to-dos, soonest due first.
-async function fetchSlackTasks({ secret, fresh = false, fetchImpl = fetch, cache = slackCache }) {
+// `channels`: ids of the channels picked in the settings (none = every to-do).
+async function fetchSlackTasks({ secret, channels = [], fresh = false, fetchImpl = fetch, cache = slackCache }) {
   const creds = parseSlackSecret(secret);
   const auth = await slackCall(fetchImpl, creds, 'auth.test');
   const base = slackBaseUrl(auth.url);
@@ -252,10 +265,51 @@ async function fetchSlackTasks({ secret, fresh = false, fetchImpl = fetch, cache
     return true;
   });
   wanted = sortTodos(wanted.map((raw) => ({ raw, due: dueDate(raw.date_due), created: Number.isFinite(raw.date_created) ? raw.date_created : 0 }))).map((x) => x.raw);
+  // The channel filter comes before the cap and before any text lookup: nothing is spent on
+  // messages that won't be shown, and they don't count toward the cap.
+  const only = new Set(Array.isArray(channels) ? channels : []);
+  if (only.size) {
+    // Asked only when some message is neither in a picked channel nor in a DM: the rest is told
+    // apart without it.
+    const none = new Set();
+    const groupDms = wanted.every((raw) => passesFilter(only, none, raw)) ? none
+      : new Set(await cached(store, 'mpims', run, async () => (await listConversations(fetchImpl, creds, 'mpim')).list.map((c) => c.id)));
+    wanted = wanted.filter((raw) => passesFilter(only, groupDms, raw));
+  }
   if (wanted.length > ITEMS_MAX) { wanted.length = ITEMS_MAX; truncated = true; }
   const items = [];
   for (const raw of wanted) items.push(await todoItem(fetchImpl, creds, base, store, run, raw)); // one request at a time: Slack rate-limits per method
   return { items: sortTodos(items), truncated, team: typeof auth.team === 'string' ? auth.team.slice(0, 80) : '' };
 }
 
-module.exports = { SAVED_PAGES_MAX, SlackError, parseSlackSecret, slackPlainText, slackBaseUrl, slackMessageUrl, slackFileUrl, dueDate, isOpenTodo, sortTodos, fetchSlackTasks, ITEMS_MAX };
+// The user's conversations of the given types (not archived), across pages → { list, truncated }.
+const CONVERSATION_PAGES_MAX = 10; // × 200
+async function listConversations(fetchImpl, creds, types) {
+  const list = [];
+  let truncated = false;
+  let cursor = '';
+  for (let page = 0; page < CONVERSATION_PAGES_MAX; page++) {
+    const data = await slackCall(fetchImpl, creds, 'users.conversations', { types, exclude_archived: 'true', limit: '200', ...(cursor ? { cursor } : {}) });
+    if (!Array.isArray(data.channels)) throw new SlackError('bad-response');
+    for (const c of data.channels) if (c && typeof c.id === 'string' && CHANNEL_RE.test(c.id) && !c.is_archived) list.push(c);
+    cursor = data.response_metadata && typeof data.response_metadata.next_cursor === 'string' ? data.response_metadata.next_cursor : '';
+    if (!cursor) break;
+    if (page === CONVERSATION_PAGES_MAX - 1) truncated = true;
+  }
+  return { list, truncated };
+}
+
+// The channels the user is in (public and private, not archived), by name, for the settings
+// dialog → { channels: [{ id, name }], truncated }.
+async function fetchSlackChannels({ secret, fetchImpl = fetch }) {
+  const creds = parseSlackSecret(secret);
+  const { list, truncated } = await listConversations(fetchImpl, creds, 'public_channel,private_channel');
+  const out = new Map();
+  for (const c of list) {
+    if (!/^[CG]/.test(c.id) || typeof c.name !== 'string' || c.is_mpim || c.is_im) continue;
+    out.set(c.id, { id: c.id, name: oneLine(c.name, 80) });
+  }
+  return { channels: [...out.values()].sort((a, b) => a.name.localeCompare(b.name)), truncated };
+}
+
+module.exports = { fetchSlackChannels, SAVED_PAGES_MAX, SlackError, parseSlackSecret, slackPlainText, slackBaseUrl, slackMessageUrl, slackFileUrl, dueDate, isOpenTodo, sortTodos, fetchSlackTasks, ITEMS_MAX };
