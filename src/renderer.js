@@ -2447,7 +2447,7 @@ async function applyWorkspace(nextConfig) {
   disposeAllTerminals();  // close the previous workspace's terminals, open one fresh
   createTerminal();
   applySecretsForWorkspace();
-  if (window.taskPanels) window.taskPanels.applyWorkspace(); // GitHub / Backlog panels (task-panels.js)
+  if (window.taskPanels) window.taskPanels.applyWorkspace(); // GitHub / Backlog / Slack panels (task-panels.js)
   restoreEditorSession(); // reopen the files that were open here last time (async, best-effort)
 }
 
@@ -3359,6 +3359,6 @@ updateBtn.addEventListener('click', () => {
   }
   createTerminal();
   applySecretsForWorkspace();
-  if (window.taskPanels) window.taskPanels.applyWorkspace(); // GitHub / Backlog panels (task-panels.js)
+  if (window.taskPanels) window.taskPanels.applyWorkspace(); // GitHub / Backlog / Slack panels (task-panels.js)
   restoreEditorSession(); // reopen this workspace's files from the last session
 })();

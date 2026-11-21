@@ -6,6 +6,10 @@
   const PANEL_DEFAULT = 280;
   const REPOS_MAX = 200; // same cap as src/tasks.js (main refuses more)
 
+  // What the editor keeps when the panels' minimums don't fit beside its own minimum: a quarter of
+  // the row, at most its minimum.
+  const editorFloor = (rowWidth) => Math.min(EDITOR_MIN, Math.floor(rowWidth / 4));
+
   // Width of a task panel being dragged: its left edge follows the pointer, within limits that
   // keep the editor (and the other open panel) usable. `rowWidth` is the editor row's width.
   // In a row too narrow for that, the panel may go below its minimum but never past the row, so
@@ -14,7 +18,10 @@
     const room = Math.max(0, rowWidth - otherPanelsWidth - 1); // 1px: this panel's resizer
     const soft = room - EDITOR_MIN;
     // Narrow: no wider than the minimum (as fitPanelWidths lays it out), and never past the row.
-    const max = soft >= PANEL_MIN ? soft : Math.min(room, PANEL_MIN);
+    // ...and, in a row with room for an editor, never into the part fitPanelWidths keeps for it.
+    const max = soft >= PANEL_MIN ? soft
+      : rowWidth >= 2 * EDITOR_MIN ? Math.max(0, Math.min(PANEL_MIN, room - editorFloor(rowWidth)))
+        : Math.min(room, PANEL_MIN);
     const min = Math.min(PANEL_MIN, max);
     const w = Number.isFinite(width) ? width : PANEL_DEFAULT;
     return Math.round(Math.max(min, Math.min(max, w)));
@@ -31,6 +38,13 @@
     const total = ws.reduce((a, b) => a + b, 0);
     if (total <= available) return ws.map(Math.round);
     const row = Math.max(0, rowWidth - ws.length);
+    // The minimums don't fit beside the editor's minimum: the editor gives way — but in a row that
+    // has room for one it keeps EDITOR_FLOOR of it (many panels, e.g. several Backlog spaces,
+    // would otherwise leave it nothing), and the panels share the rest evenly, below their minimum.
+    const atMinimums = row - ws.length * PANEL_MIN; // what panels at their minimums leave the editor
+    if (ws.length * PANEL_MIN > available && rowWidth >= 2 * EDITOR_MIN && atMinimums < editorFloor(rowWidth)) {
+      return ws.map(() => Math.floor((row - editorFloor(rowWidth)) / ws.length));
+    }
     // Not even the minimums fit (very narrow row): the panels split the whole row evenly.
     if (ws.length * PANEL_MIN > row) return ws.map(() => Math.floor(row / ws.length));
     // Proportional shares; a panel whose share is below its minimum gets the minimum and the rest
@@ -77,7 +91,37 @@
     return url;
   }
 
-  const taskView = { REPOS_MAX, PANEL_MIN, EDITOR_MIN, PANEL_DEFAULT, clampPanelWidth, fitPanelWidths, filterRepos, isOverdue, timeLabel, terminalUrl };
+  const BACKLOG_SPACES_MAX = 5; // panels beside the editor: more would leave no room to read any
+
+  // The id of a Backlog space's panel (issue #134): one panel per space. Lower case, as a space
+  // is the host name of its address.
+  function backlogPanelId(cfg) {
+    return `backlog:${String((cfg && cfg.space) || '').toLowerCase()}.${(cfg && cfg.domain) || 'com'}`;
+  }
+
+  // The panels a workspace's settings give, left to right: GitHub, each Backlog space, Slack.
+  // Shared by the renderer (which draws them) and main (which resolves a panel id to its settings).
+  function panelList(config) {
+    const c = config && typeof config === 'object' ? config : {};
+    const out = [];
+    const gh = c.github;
+    if (gh && gh.tokenKey && Array.isArray(gh.repos) && gh.repos.length) out.push({ id: 'github', provider: 'github', title: 'GitHub', cfg: gh });
+    const seen = new Set();
+    for (const b of Array.isArray(c.backlog) ? c.backlog : []) {
+      if (!b || !b.tokenKey || !b.space || seen.has(backlogPanelId(b))) continue;
+      seen.add(backlogPanelId(b));
+      out.push({ id: backlogPanelId(b), provider: 'backlog', title: `Backlog: ${b.space}`, tip: `${b.space}.backlog.${b.domain}`, cfg: b });
+    }
+    // The same name on backlog.com and backlog.jp: the titles say which is which.
+    const names = out.filter((p) => p.provider === 'backlog').map((p) => p.cfg.space.toLowerCase());
+    for (const p of out) {
+      if (p.provider === 'backlog' && names.filter((n) => n === p.cfg.space.toLowerCase()).length > 1) p.title = `Backlog: ${p.tip}`;
+    }
+    if (c.slack && c.slack.tokenKey) out.push({ id: 'slack', provider: 'slack', title: 'Slack', cfg: c.slack });
+    return out;
+  }
+
+  const taskView = { BACKLOG_SPACES_MAX, backlogPanelId, panelList, REPOS_MAX, PANEL_MIN, EDITOR_MIN, PANEL_DEFAULT, clampPanelWidth, fitPanelWidths, filterRepos, isOverdue, timeLabel, terminalUrl };
   if (typeof module !== 'undefined' && module.exports) module.exports = taskView;
   if (typeof window !== 'undefined') window.taskView = taskView;
 })();
