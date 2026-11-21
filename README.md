@@ -176,7 +176,8 @@ set up the window looks as before. Settings are per workspace.
     review (◆).
   - Backlog: an API key and the space (`xxx` of `https://xxx.backlog.com` / `.jp`; pasting the URL
     fills both). Listed: open issues (any status but Closed) assigned to you, with status and due date.
-- Newest update first (with a note when there are more than can be fetched). Click an item to open it in the browser. ⟳ refreshes; panels also refresh
+- Newest update first (with a note when there are more than can be fetched). Click an item to open it in the browser; → on an item
+  types its URL into the focused terminal pane, without Enter (v0.44.0). ⟳ refreshes; panels also refresh
   every 5 minutes. View → *Task Panels* hides/shows them.
 
 ## Remote workspaces over ssh (v0.38.0)

@@ -378,8 +378,10 @@ body.resizing iframe { pointer-events:none; }
 .task-message.error { color:#ff7b7b; }
 .task-message.hidden { display:none; }
 .task-list { flex:1; overflow:auto; color-scheme:dark; }
-.task-item { display:block; width:100%; text-align:left; padding:6px 8px; background:transparent; border:0; border-bottom:1px solid var(--border); color:var(--text); cursor:pointer; font:inherit; }
-.task-item:hover { background:var(--hover); }
+.task-item-row { display:flex; align-items:center; border-bottom:1px solid var(--border); }
+.task-item-row:hover { background:var(--hover); }
+.task-item { display:block; flex:1 1 auto; min-width:0; text-align:left; padding:6px 8px; background:transparent; border:0; color:var(--text); cursor:pointer; font:inherit; }
+.task-insert { margin-right:4px; }
 .task-line1 { display:flex; gap:6px; align-items:center; color:var(--muted); font-size:11px; white-space:nowrap; overflow:hidden; }
 .task-ref { overflow:hidden; text-overflow:ellipsis; }
 .task-mark { flex:0 0 auto; }
@@ -393,7 +395,10 @@ body.resizing iframe { pointer-events:none; }
 .task-modal-box select, .task-modal-box input[type="text"] { width:100%; box-sizing:border-box; background:#181818; color:var(--text); border:1px solid #444; border-radius:6px; padding:6px 8px; font-size:13px; outline:none; }
 .task-modal-box select:focus, .task-modal-box input[type="text"]:focus { border-color:var(--accent); }
 .task-row { display:flex; gap:8px; }
-.task-row > :first-child { flex:1; }
+.task-row > :first-child { flex:1 1 0; min-width:0; }
+/* The rest of the row (Backlog's domain list) keeps its own width instead of the dialog-wide 100%
+   above, which squeezed the space name field to nothing (issue #129). */
+.task-row > :not(:first-child) { flex:0 0 auto; width:auto; }
 .task-repo-list { height:240px; overflow:auto; border:1px solid #444; border-radius:6px; padding:4px; background:#181818; color-scheme:dark; }
 .task-repo-list label { display:flex; gap:6px; align-items:center; padding:2px 4px; color:var(--text); font-size:12px; cursor:pointer; }
 .task-repo-list label:hover { background:var(--hover); }
