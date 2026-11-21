@@ -403,5 +403,7 @@ body.resizing iframe { pointer-events:none; }
 .task-repo-list label { display:flex; gap:6px; align-items:center; padding:2px 4px; color:var(--text); font-size:12px; cursor:pointer; }
 .task-repo-list label:hover { background:var(--hover); }
 .task-hint { color:var(--muted); font-size:12px; padding:4px; }
+.task-retry { margin:2px 4px 6px; padding:2px 10px; background:#2a2a2a; border:1px solid #444; border-radius:4px; color:var(--text); font-size:12px; cursor:pointer; }
+.task-retry:hover { background:#3a3a3a; }
 .modal-actions .task-clear { margin-right:auto; }
 .modal-actions .task-clear.hidden { display:none; }

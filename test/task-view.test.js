@@ -120,3 +120,11 @@ test('filterChannels matches the name case-insensitively (a leading # is ignored
   assert.deepEqual(view.filterChannels(chans, '', new Set(['C3'])).map((c) => c.id), ['C3', 'C1', 'C2']);
   assert.deepEqual(view.filterChannels(chans, 'zzz'), []);
 });
+
+test('filterProjects matches key or name case-insensitively and lists checked projects first', () => {
+  const ps = [{ id: 1, key: 'WEB', name: 'Website' }, { id: 2, key: 'APP', name: 'Mobile web app' }, { id: 3, key: 'OPS', name: 'Operations' }];
+  assert.deepEqual(view.filterProjects(ps, 'web').map((p) => p.id), [1, 2]);
+  assert.deepEqual(view.filterProjects(ps, 'OPS').map((p) => p.id), [3]);
+  assert.deepEqual(view.filterProjects(ps, '', new Set([3])).map((p) => p.id), [3, 1, 2]);
+  assert.deepEqual(view.filterProjects(ps, 'zzz'), []);
+});

@@ -2357,7 +2357,7 @@ ipcMain.handle('tasks:list', (event, { panel, workspace = null, fresh = false } 
     const token = taskToken(ws, cfg.tokenKey);
     if (provider === 'github') return tasksLib.fetchGithubTasks({ token, repos: cfg.repos });
     if (provider === 'slack') return slackTasksLib.fetchSlackTasks({ secret: token, channels: cfg.channels, fresh: fresh === true });
-    return tasksLib.fetchBacklogTasks({ apiKey: token, space: cfg.space, domain: cfg.domain, fresh: fresh === true });
+    return tasksLib.fetchBacklogTasks({ apiKey: token, space: cfg.space, domain: cfg.domain, projects: cfg.projects, fresh: fresh === true });
   })());
 });
 
@@ -2367,6 +2367,13 @@ ipcMain.handle('tasks:githubOwners', (event, { tokenKey, workspace = null } = {}
   const ws = secretsWorkspaceFor(event.sender, workspace);
   if (!ws || !secretsLib.isValidKey(tokenKey)) return { ok: false, error: 'workspace' };
   return taskResult((async () => tasksLib.fetchGithubOwners({ token: taskToken(ws, tokenKey) }))());
+});
+
+// Settings dialog: a Backlog space's projects, for a key and space picked but not saved yet.
+ipcMain.handle('tasks:backlogProjects', (event, { tokenKey, space, domain, workspace = null } = {}) => {
+  const ws = secretsWorkspaceFor(event.sender, workspace);
+  if (!ws || !secretsLib.isValidKey(tokenKey)) return { ok: false, error: 'workspace' };
+  return taskResult((async () => ({ projects: await tasksLib.fetchBacklogProjects({ apiKey: taskToken(ws, tokenKey), space, domain }) }))());
 });
 
 // Settings dialog: the channels the user is in, for a Slack secret picked but not saved yet.

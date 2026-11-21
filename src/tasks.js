@@ -5,7 +5,7 @@
 // Kept free of Electron so it can be unit-tested: `fetch` is injected.
 const crypto = require('crypto');
 const { isValidKey } = require('./secret-keys');
-const { backlogPanelId, BACKLOG_SPACES_MAX, SLACK_CHANNELS_MAX } = require('./task-view');
+const { backlogPanelId, BACKLOG_SPACES_MAX, BACKLOG_PROJECTS_MAX, SLACK_CHANNELS_MAX } = require('./task-view');
 
 const GITHUB_API = 'https://api.github.com';
 const REQUEST_TIMEOUT_MS = 20000;
@@ -37,7 +37,10 @@ function normalizeBacklog(raw) {
   const space = typeof raw.space === 'string' ? raw.space.trim() : '';
   if (!SPACE_RE.test(space)) return null;
   const domain = BACKLOG_DOMAINS.includes(raw.domain) ? raw.domain : 'com';
-  return { tokenKey: raw.tokenKey, space, domain };
+  // The projects whose issues are shown (issue #138), by id; none = all of the space's.
+  const projects = [...new Set((Array.isArray(raw.projects) ? raw.projects : []).filter((p) => Number.isSafeInteger(p) && p > 0))];
+  if (projects.length > BACKLOG_PROJECTS_MAX) return null;
+  return { tokenKey: raw.tokenKey, space, domain, projects };
 }
 
 // Several Backlog spaces, each shown in its own panel (issue #134). Settings saved before that
@@ -317,34 +320,50 @@ function backlogUrl(base, apiPath, apiKey, params = []) {
 }
 
 // Every status id that isn't "Closed", across the projects the user can see (projects may add
-// custom statuses). One request at a time (Backlog rate-limits per user), and a failure fails the
-// refresh: guessing would silently hide issues sitting in an unlisted custom status.
-// Cached per space and key for an hour: the per-project calls would otherwise spend the user's
-// rate limit on every refresh.
+// custom statuses) — or, with projects picked in the settings (`picked`, issue #138), across those
+// of them the user can still see. One request at a time (Backlog rate-limits per user), and a
+// failure fails the refresh: guessing would silently hide issues sitting in an unlisted custom status.
+// Cached per space, key and picked projects for an hour: the per-project calls would otherwise
+// spend the user's rate limit on every refresh.
+// → { ids, projectIds }: `projectIds` is what to ask issues of (empty = no filter: every project).
 const BACKLOG_STATUS_TTL_MS = 60 * 60 * 1000;
-const backlogStatusCache = new Map(); // `${base}\n${sha256(apiKey)}` -> { ids, at }
+const backlogStatusCache = new Map(); // `${base}\n${sha256(apiKey)}\n${picked}` -> { value, at }
 // `fresh` (a manual refresh) skips the cache, so a just-added custom status shows up on ⟳.
-async function backlogOpenStatusIds(fetchImpl, base, apiKey, cache = backlogStatusCache, fresh = false) {
-  const key = `${base}\n${crypto.createHash('sha256').update(apiKey).digest('hex')}`;
+async function backlogOpenStatuses(fetchImpl, base, apiKey, picked = [], cache = backlogStatusCache, fresh = false) {
+  const key = `${base}\n${crypto.createHash('sha256').update(apiKey).digest('hex')}\n${[...picked].sort((a, b) => a - b).join(',')}`;
   const hit = cache.get(key);
-  if (!fresh && hit && Date.now() - hit.at < BACKLOG_STATUS_TTL_MS) return hit.ids;
-  const ids = await listBacklogOpenStatusIds(fetchImpl, base, apiKey);
-  cache.set(key, { ids, at: Date.now() });
-  return ids;
+  if (!fresh && hit && Date.now() - hit.at < BACKLOG_STATUS_TTL_MS) return hit.value;
+  const value = await listBacklogOpenStatuses(fetchImpl, base, apiKey, picked);
+  cache.set(key, { value, at: Date.now() });
+  return value;
 }
 
-async function listBacklogOpenStatusIds(fetchImpl, base, apiKey) {
+async function listBacklogProjects(fetchImpl, base, apiKey) {
   const projects = await getJson(fetchImpl, 'backlog', backlogUrl(base, '/projects', apiKey, [['archived', 'false']]));
   if (!Array.isArray(projects)) throw new TaskError('bad-response');
+  return projects.filter((p) => p && Number.isInteger(p.id));
+}
+
+async function listBacklogOpenStatuses(fetchImpl, base, apiKey, picked = []) {
+  const visible = await listBacklogProjects(fetchImpl, base, apiKey);
+  // A picked project that is gone (deleted, archived, access lost) is skipped, not an error.
+  const wanted = picked.length ? visible.filter((p) => picked.includes(p.id)) : visible;
   const ids = new Set(BACKLOG_DEFAULT_OPEN_STATUSES);
-  for (const p of projects) {
-    if (!p || !Number.isInteger(p.id)) continue;
+  for (const p of wanted) {
     const list = await getJson(fetchImpl, 'backlog', backlogUrl(base, `/projects/${p.id}/statuses`, apiKey));
     for (const st of Array.isArray(list) ? list : []) {
       if (st && Number.isInteger(st.id) && st.id !== BACKLOG_CLOSED_STATUS_ID) ids.add(st.id);
     }
   }
-  return [...ids].sort((a, b) => a - b);
+  return { ids: [...ids].sort((a, b) => a - b), projectIds: picked.length ? wanted.map((p) => p.id) : [], none: picked.length > 0 && !wanted.length };
+}
+
+// The space's projects (not archived), by key, for the settings dialog → [{ id, key, name }].
+async function fetchBacklogProjects({ apiKey, space, domain, fetchImpl = fetch }) {
+  const base = backlogBase(space, domain);
+  return (await listBacklogProjects(fetchImpl, base, apiKey))
+    .map((p) => ({ id: p.id, key: String(p.projectKey || '').slice(0, 60), name: String(p.name || '').replace(/\s+/g, ' ').trim().slice(0, 120) }))
+    .sort((a, b) => a.key.localeCompare(b.key) || a.id - b.id);
 }
 
 function backlogItem(base, raw) {
@@ -361,12 +380,15 @@ function backlogItem(base, raw) {
 }
 
 // → { items, truncated } (truncated: more than the 1000 issues fetched).
-async function fetchBacklogTasks({ apiKey, space, domain, fresh = false, fetchImpl = fetch, statusCache = backlogStatusCache }) {
+// `projects`: ids of the projects picked in the settings (none = every project).
+async function fetchBacklogTasks({ apiKey, space, domain, projects = [], fresh = false, fetchImpl = fetch, statusCache = backlogStatusCache }) {
   const base = backlogBase(space, domain);
   const me = await getJson(fetchImpl, 'backlog', backlogUrl(base, '/users/myself', apiKey));
   if (!me || !Number.isInteger(me.id)) throw new TaskError('bad-response');
-  const statusIds = await backlogOpenStatusIds(fetchImpl, base, apiKey, statusCache, fresh);
-  const params = [['assigneeId[]', me.id], ...statusIds.map((id) => ['statusId[]', id]),
+  const picked = Array.isArray(projects) ? projects : [];
+  const { ids: statusIds, projectIds, none } = await backlogOpenStatuses(fetchImpl, base, apiKey, picked, statusCache, fresh);
+  if (none) return { items: [], truncated: false }; // every picked project is gone: nothing to list
+  const params = [['assigneeId[]', me.id], ...projectIds.map((id) => ['projectId[]', id]), ...statusIds.map((id) => ['statusId[]', id]),
     ['sort', 'updated'], ['order', 'desc'], ['count', 100]];
   const issues = [];
   let truncated = false;
@@ -410,6 +432,7 @@ module.exports = {
   fetchGithubRepos,
   backlogBase,
   fetchBacklogTasks,
+  fetchBacklogProjects,
   sortByUpdated,
   GITHUB_SEARCH_MAX_QUERY,
   GITHUB_SEARCH_REQUESTS_MAX,
