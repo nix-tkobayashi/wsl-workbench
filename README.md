@@ -160,13 +160,13 @@ Share a workspace's secrets with your other PCs through a folder synced by **Goo
 - Merge is per key, newest edit wins; a deletion or rename on one PC removes the key on the others (copies handed out there are removed too).
 - **Stop Sharing on This PC** keeps both the local secrets and the shared file. Changing the passphrase does not re-encrypt existing files.
 
-## Task panels: GitHub / Backlog (v0.43.0)
+## Task panels: GitHub / Backlog / Slack (v0.43.0)
 
-Open tasks assigned to you, in resizable panels to the right of the editor (GitHub, then Backlog;
-the terminal keeps the full width below). A panel appears only once it is set up, so with neither
+Open tasks assigned to you, in resizable panels to the right of the editor (GitHub, then one panel
+per Backlog space, then Slack; the terminal keeps the full width below). A panel appears only once it is set up, so with neither
 set up the window looks as before. Settings are per workspace.
 
-- **Set up**: View → *GitHub Tasks Settings…* / *Backlog Tasks Settings…* (or ⚙ on a panel). The
+- **Set up**: View → *GitHub Tasks Settings…* / *Backlog Tasks Settings…* / *Slack To-dos Settings…* (or ⚙ on a panel). The
   token is one of the workspace's secrets, picked by name — its value stays in the main process and
   is never shown or written anywhere else.
   - GitHub: a personal access token (classic: `repo`, `read:org`; fine-grained: Issues and Pull
@@ -176,6 +176,15 @@ set up the window looks as before. Settings are per workspace.
     review (◆).
   - Backlog: an API key and the space (`xxx` of `https://xxx.backlog.com` / `.jp`; pasting the URL
     fills both). Listed: open issues (any status but Closed) assigned to you, with status and due date.
+    Several spaces (v0.45.0): each has its own panel and its own API key. In the dialog, *Space to
+    set up* picks the space to edit or *+ Add a space…*; *Remove* drops only that space.
+  - Slack To-dos (v0.45.0): your open to-dos (the list formerly called *Later*), soonest due first,
+    with the channel and the start of the message; an item opens the message. Slack has no official
+    API for To-dos, so this uses the web client's own, with your signed-in browser session: store
+    **both** the token (`xoxc-…`) and the value of the cookie named `d` (`xoxd-…`) in one secret
+    (e.g. on two lines). That pair can do anything you can do in Slack — treat it accordingly; it
+    stops working when you sign out, and the panel may break whenever Slack changes its client API
+    (it then shows an error; nothing else is affected).
 - Newest update first (with a note when there are more than can be fetched). Click an item to open it in the browser; → on an item
   types its URL into the focused terminal pane, without Enter (v0.44.0). ⟳ refreshes; panels also refresh
   every 5 minutes. View → *Task Panels* hides/shows them.

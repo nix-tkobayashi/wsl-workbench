@@ -1,10 +1,11 @@
 // Task panels (issue #127): open GitHub issues/PRs and Backlog issues assigned to the user, shown
-// to the right of the editor. Runs in the main process only — the token is a workspace secret read
+// to the right of the editor (Slack To-dos: src/slack-tasks.js). Runs in the main process only — the token is a workspace secret read
 // here by key name and never crosses to the renderer.
 //
 // Kept free of Electron so it can be unit-tested: `fetch` is injected.
 const crypto = require('crypto');
 const { isValidKey } = require('./secret-keys');
+const { backlogPanelId, BACKLOG_SPACES_MAX } = require('./task-view');
 
 const GITHUB_API = 'https://api.github.com';
 const REQUEST_TIMEOUT_MS = 20000;
@@ -38,9 +39,31 @@ function normalizeBacklog(raw) {
   return { tokenKey: raw.tokenKey, space, domain };
 }
 
+// Several Backlog spaces, each shown in its own panel (issue #134). Settings saved before that
+// held one space as an object. A space listed twice is kept once.
+function normalizeBacklogList(raw) {
+  const list = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+  const out = [];
+  const seen = new Set();
+  for (const item of list) {
+    const b = normalizeBacklog(item);
+    if (!b || seen.has(backlogPanelId(b))) continue;
+    seen.add(backlogPanelId(b));
+    out.push(b);
+    if (out.length === BACKLOG_SPACES_MAX) break;
+  }
+  return out;
+}
+
+// Slack To-dos (issue #133): only the secret that holds the session token and cookie.
+function normalizeSlack(raw) {
+  if (!raw || typeof raw !== 'object' || !isValidKey(raw.tokenKey)) return null;
+  return { tokenKey: raw.tokenKey };
+}
+
 function normalizeConfig(raw) {
   const src = raw && typeof raw === 'object' ? raw : {};
-  return { github: normalizeGithub(src.github), backlog: normalizeBacklog(src.backlog) };
+  return { github: normalizeGithub(src.github), backlog: normalizeBacklogList(src.backlog), slack: normalizeSlack(src.slack) };
 }
 
 // A provider is shown only once it has everything needed to list tasks.
@@ -48,7 +71,37 @@ function isConfigured(provider, cfg) {
   if (!cfg) return false;
   if (provider === 'github') return !!cfg.tokenKey && Array.isArray(cfg.repos) && cfg.repos.length > 0;
   if (provider === 'backlog') return !!cfg.tokenKey && !!cfg.space;
+  if (provider === 'slack') return !!cfg.tokenKey;
   return false;
+}
+
+// The settings dialog's Save / Remove applied to a workspace's (normalized) settings →
+// { config } or { error }. GitHub and Slack have one entry each. Backlog has a list: `target` is
+// the panel id of the space being edited (null = a space being added); a `value` of null removes it.
+function applyConfigChange(config, provider, value, target = null) {
+  const cur = normalizeConfig(config);
+  if (provider === 'github' || provider === 'slack') {
+    const next = provider === 'github' ? normalizeGithub(value) : normalizeSlack(value);
+    if (value != null && !next) return { error: 'invalid' };
+    return { config: { ...cur, [provider]: next } };
+  }
+  if (provider !== 'backlog') return { error: 'invalid' };
+  const list = [...cur.backlog];
+  const idx = typeof target === 'string' ? list.findIndex((b) => backlogPanelId(b) === target) : -1;
+  if (value == null) {
+    if (idx >= 0) list.splice(idx, 1); // already gone (removed in another window): nothing to do
+    return { config: { ...cur, backlog: list } };
+  }
+  const next = normalizeBacklog(value);
+  if (!next) return { error: 'invalid' };
+  // The space being edited was removed or renamed in another window meanwhile: saving would bring
+  // it back beside whatever replaced it.
+  if (typeof target === 'string' && idx < 0) return { error: 'stale' };
+  if (list.some((b, i) => i !== idx && backlogPanelId(b) === backlogPanelId(next))) return { error: 'duplicate' };
+  if (idx >= 0) list[idx] = next;
+  else if (list.length >= BACKLOG_SPACES_MAX) return { error: 'too-many' };
+  else list.push(next);
+  return { config: { ...cur, backlog: list } };
 }
 
 // --- HTTP ---
@@ -342,6 +395,9 @@ module.exports = {
   normalizeConfig,
   normalizeGithub,
   normalizeBacklog,
+  normalizeBacklogList,
+  normalizeSlack,
+  applyConfigChange,
   isConfigured,
   githubSearchQueries,
   mergeGithubResults,

@@ -23,13 +23,15 @@ function fakeFetch(routes) {
 }
 
 test('normalizeConfig keeps only well-formed settings', () => {
-  assert.deepEqual(tasks.normalizeConfig(null), { github: null, backlog: null });
+  assert.deepEqual(tasks.normalizeConfig(null), { github: null, backlog: [], slack: null });
   const cfg = tasks.normalizeConfig({
     github: { tokenKey: 'GH_TOKEN', repos: ['a/b', 'a/b', 'bad repo', 'x/../y', 5, 'org/r.e-p_o'] },
     backlog: { tokenKey: 'BL_KEY', space: ' myspace ', domain: 'jp' }
   });
   assert.deepEqual(cfg.github, { tokenKey: 'GH_TOKEN', repos: ['a/b', 'org/r.e-p_o'] });
-  assert.deepEqual(cfg.backlog, { tokenKey: 'BL_KEY', space: 'myspace', domain: 'jp' });
+  // Settings saved before issue #134 hold one space as an object: it becomes a list of one.
+  assert.deepEqual(cfg.backlog, [{ tokenKey: 'BL_KEY', space: 'myspace', domain: 'jp' }]);
+  assert.equal(cfg.slack, null);
   assert.equal(tasks.normalizeGithub({ tokenKey: '../x', repos: ['a/b'] }), null);
   assert.equal(tasks.normalizeBacklog({ tokenKey: 'K', space: 'evil.com/x' }), null);
   assert.equal(tasks.normalizeBacklog({ tokenKey: 'K', space: 's', domain: 'evil' }).domain, 'com');
@@ -271,4 +273,60 @@ test('truncation is reported only when there really is more than the cap', async
   ]);
   assert.equal((await tasks.fetchBacklogTasks({ apiKey: 'k', space: 's', domain: 'com', fetchImpl: routes(false), statusCache: new Map() })).truncated, false);
   assert.equal((await tasks.fetchBacklogTasks({ apiKey: 'k', space: 's', domain: 'com', fetchImpl: routes(true), statusCache: new Map() })).truncated, true);
+});
+
+test('normalizeConfig keeps several Backlog spaces (each once, up to the cap) and the Slack secret', () => {
+  const cfg = tasks.normalizeConfig({
+    backlog: [
+      { tokenKey: 'K1', space: 'one', domain: 'com' },
+      { tokenKey: 'K2', space: 'ONE', domain: 'com' }, // the same space again
+      { tokenKey: 'K3', space: 'one', domain: 'jp' },  // another space: a different domain
+      { tokenKey: 'K4', space: 'bad space' },
+      null
+    ],
+    slack: { tokenKey: 'SLACK', extra: 1 }
+  });
+  assert.deepEqual(cfg.backlog, [{ tokenKey: 'K1', space: 'one', domain: 'com' }, { tokenKey: 'K3', space: 'one', domain: 'jp' }]);
+  assert.deepEqual(cfg.slack, { tokenKey: 'SLACK' });
+  assert.equal(tasks.normalizeSlack({ tokenKey: '../x' }), null);
+  const many = Array.from({ length: 20 }, (_, i) => ({ tokenKey: 'K', space: `s${i}`, domain: 'com' }));
+  assert.equal(tasks.normalizeConfig({ backlog: many }).backlog.length, 5);
+  assert.equal(tasks.isConfigured('slack', { tokenKey: 'SLACK' }), true);
+  assert.equal(tasks.isConfigured('slack', null), false);
+});
+
+test('applyConfigChange adds, edits and removes one Backlog space without touching the others', () => {
+  const a = { tokenKey: 'KA', space: 'alpha', domain: 'com' };
+  const b = { tokenKey: 'KB', space: 'beta', domain: 'jp' };
+  let cfg = tasks.applyConfigChange(null, 'backlog', a).config;
+  cfg = tasks.applyConfigChange(cfg, 'backlog', b).config;
+  assert.deepEqual(cfg.backlog, [a, b]);
+  // The same space again (any case) is refused, whether added or renamed onto.
+  assert.deepEqual(tasks.applyConfigChange(cfg, 'backlog', { ...a, space: 'ALPHA' }), { error: 'duplicate' });
+  assert.deepEqual(tasks.applyConfigChange(cfg, 'backlog', { ...a, tokenKey: 'KB' }, 'backlog:beta.jp'), { error: 'duplicate' });
+  // Editing keeps the position; saving a space unchanged is not a duplicate of itself.
+  const edited = tasks.applyConfigChange(cfg, 'backlog', { ...a, tokenKey: 'KA2' }, 'backlog:alpha.com').config;
+  assert.deepEqual(edited.backlog, [{ ...a, tokenKey: 'KA2' }, b]);
+  const renamed = tasks.applyConfigChange(cfg, 'backlog', { tokenKey: 'KA', space: 'gamma', domain: 'com' }, 'backlog:alpha.com').config;
+  assert.deepEqual(renamed.backlog.map((x) => x.space), ['gamma', 'beta']);
+  // Removing one leaves the other; removing one that is already gone changes nothing.
+  assert.deepEqual(tasks.applyConfigChange(cfg, 'backlog', null, 'backlog:alpha.com').config.backlog, [b]);
+  assert.deepEqual(tasks.applyConfigChange(cfg, 'backlog', null, 'backlog:gone.com').config.backlog, [a, b]);
+  assert.deepEqual(tasks.applyConfigChange(cfg, 'backlog', { tokenKey: 'K', space: 'bad space' }), { error: 'invalid' });
+  // An edit of a space another window removed meanwhile does not bring it back.
+  assert.deepEqual(tasks.applyConfigChange(cfg, 'backlog', a, 'backlog:gone.com'), { error: 'stale' });
+  const full = { backlog: Array.from({ length: 5 }, (_, i) => ({ tokenKey: 'K', space: `s${i}`, domain: 'com' })) };
+  assert.deepEqual(tasks.applyConfigChange(full, 'backlog', a), { error: 'too-many' });
+  assert.equal(tasks.applyConfigChange(full, 'backlog', a, 'backlog:s0.com').config.backlog[0].space, 'alpha'); // an edit still fits
+});
+
+test('applyConfigChange sets and clears GitHub and Slack, leaving the rest alone', () => {
+  const base = { backlog: [{ tokenKey: 'KA', space: 'alpha', domain: 'com' }] };
+  const withSlack = tasks.applyConfigChange(base, 'slack', { tokenKey: 'SLACK' }).config;
+  assert.deepEqual(withSlack.slack, { tokenKey: 'SLACK' });
+  assert.equal(withSlack.backlog.length, 1);
+  assert.equal(tasks.applyConfigChange(withSlack, 'slack', null).config.slack, null);
+  assert.deepEqual(tasks.applyConfigChange(base, 'slack', { tokenKey: '' }), { error: 'invalid' });
+  assert.deepEqual(tasks.applyConfigChange(base, 'github', { tokenKey: 'T', repos: ['a/b'] }).config.github, { tokenKey: 'T', repos: ['a/b'] });
+  assert.deepEqual(tasks.applyConfigChange(base, 'other', {}), { error: 'invalid' });
 });

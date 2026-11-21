@@ -76,3 +76,39 @@ test('terminalUrl passes a one-line http(s) URL and refuses anything that could 
   assert.equal(view.terminalUrl(''), '');
   assert.equal(view.terminalUrl(null), '');
 });
+
+test('panelList gives one panel per Backlog space, between GitHub and Slack', () => {
+  assert.deepEqual(view.panelList(null), []);
+  assert.deepEqual(view.panelList({ github: null, backlog: [], slack: null }), []);
+  const cfg = {
+    github: { tokenKey: 'T', repos: ['a/b'] },
+    backlog: [{ tokenKey: 'K1', space: 'Alpha', domain: 'com' }, { tokenKey: 'K2', space: 'beta', domain: 'jp' }, { tokenKey: 'K3', space: 'alpha', domain: 'com' }],
+    slack: { tokenKey: 'S' }
+  };
+  const list = view.panelList(cfg);
+  assert.deepEqual(list.map((p) => p.id), ['github', 'backlog:alpha.com', 'backlog:beta.jp', 'slack']);
+  assert.deepEqual(list.map((p) => p.provider), ['github', 'backlog', 'backlog', 'slack']);
+  assert.deepEqual(list.map((p) => p.title), ['GitHub', 'Backlog: Alpha', 'Backlog: beta', 'Slack']);
+  assert.equal(list[1].cfg, cfg.backlog[0]);
+  // Not set up enough to list anything: no panel.
+  assert.deepEqual(view.panelList({ github: { tokenKey: 'T', repos: [] }, backlog: [{ tokenKey: '', space: 'x' }], slack: {} }), []);
+});
+
+test('many panels never squeeze the editor below its minimum in a row with room for it', () => {
+  // GitHub + 5 Backlog spaces + Slack in a 1200px row: 7 × 180 would leave the editor nothing.
+  const w = view.fitPanelWidths(Array(7).fill(280), 1200);
+  assert.ok(w.every((x) => x === w[0] && x > 0), String(w));
+  assert.ok(1200 - w.reduce((a, b) => a + b, 0) - w.length >= view.EDITOR_MIN, String(w));
+  // Six panels whose minimums fit the row but not beside the editor: the same rule.
+  const six = view.fitPanelWidths(Array(6).fill(280), 1200);
+  assert.ok(1200 - six.reduce((a, b) => a + b, 0) - six.length >= view.EDITOR_MIN, String(six));
+  // Dragging one of them can't take the editor's minimum either.
+  const others = w.slice(1).reduce((a, b) => a + b + 1, 0);
+  assert.ok(view.clampPanelWidth(900, 1200, others) <= 1200 - others - 1 - view.EDITOR_MIN);
+});
+
+test('panelList tells apart two spaces of the same name on backlog.com and backlog.jp', () => {
+  const list = view.panelList({ backlog: [{ tokenKey: 'K1', space: 'acme', domain: 'com' }, { tokenKey: 'K2', space: 'Acme', domain: 'jp' }, { tokenKey: 'K3', space: 'other', domain: 'jp' }] });
+  assert.deepEqual(list.map((p) => p.title), ['Backlog: acme.backlog.com', 'Backlog: Acme.backlog.jp', 'Backlog: other']);
+  assert.deepEqual(list.map((p) => p.tip), ['acme.backlog.com', 'Acme.backlog.jp', 'other.backlog.jp']);
+});

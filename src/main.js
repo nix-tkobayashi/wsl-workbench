@@ -1009,6 +1009,7 @@ function buildAppMenu() {
         { label: tr('menu.toggleTaskPanels'), click: () => sendToFocusedWindow('menu:toggleTaskPanels') },
         { label: tr('menu.githubTasksSettings'), click: () => sendToFocusedWindow('menu:taskSettingsGithub') },
         { label: tr('menu.backlogTasksSettings'), click: () => sendToFocusedWindow('menu:taskSettingsBacklog') },
+        { label: tr('menu.slackTasksSettings'), click: () => sendToFocusedWindow('menu:taskSettingsSlack') },
         { type: 'separator' },
         { label: tr('menu.freeWslMemory'), click: () => { const { win, state } = getFocusedWindowAndState(); freeWslMemory(win, state).catch((err) => console.warn('free WSL memory failed', err)); } },
         { type: 'separator' },
@@ -2303,11 +2304,13 @@ ipcMain.handle('secrets:import', async (event) => {
 
 // The terminal strip's key button: insert a secret's path (or, confirmed, its value) into the
 // focused pane. Clicking sends the choice back; the renderer then calls insertPath / pasteValue.
-// --- Task panels (src/tasks.js, issue #127): GitHub / Backlog tasks assigned to the user, beside
+// --- Task panels (src/tasks.js, issue #127): GitHub / Backlog / Slack tasks of the user, beside
 // the editor. Settings are per workspace (like its secrets); the token is a secret of that
 // workspace, read here by key name — the renderer never sees its value. ---
 const tasksLib = require('./tasks');
-const TASK_PROVIDERS = ['github', 'backlog'];
+const slackTasksLib = require('./slack-tasks');
+const taskView = require('./task-view');
+const TASK_PROVIDERS = ['github', 'backlog', 'slack'];
 const tasksSettingsKey = (ws) => `${ws.distro}:${ws.wslPath}`;
 function readTaskConfig(ws) {
   return tasksLib.normalizeConfig((readSettings().tasks || {})[tasksSettingsKey(ws)]);
@@ -2327,29 +2330,34 @@ ipcMain.handle('tasks:getConfig', (event) => {
   return { config: readTaskConfig(ws), secretKeys: getSecretStore().list(ws).map((i) => i.key) };
 });
 
-ipcMain.handle('tasks:setConfig', (event, { provider, value = null, workspace = null } = {}) => {
+// `target` (Backlog only): the panel id of the space being edited or removed; none = add a space.
+ipcMain.handle('tasks:setConfig', (event, { provider, value = null, workspace = null, target = null } = {}) => {
   const ws = secretsWorkspaceFor(event.sender, workspace);
   if (!ws || !TASK_PROVIDERS.includes(provider)) return { ok: false, error: 'workspace' };
-  const next = provider === 'github' ? tasksLib.normalizeGithub(value) : tasksLib.normalizeBacklog(value);
-  if (value != null && !next) return { ok: false, error: 'invalid' };
+  const res = tasksLib.applyConfigChange(readTaskConfig(ws), provider, value, target);
+  if (res.error) return { ok: false, error: res.error };
   const all = { ...(readSettings().tasks || {}) };
-  const entry = { ...(all[tasksSettingsKey(ws)] || {}) };
-  if (next) entry[provider] = next; else delete entry[provider];
+  const entry = {};
+  if (res.config.github) entry.github = res.config.github;
+  if (res.config.backlog.length) entry.backlog = res.config.backlog;
+  if (res.config.slack) entry.slack = res.config.slack;
   if (Object.keys(entry).length) all[tasksSettingsKey(ws)] = entry; else delete all[tasksSettingsKey(ws)];
   if (!writeSettings({ tasks: all })) return { ok: false, error: 'save-failed' };
   return { ok: true, config: readTaskConfig(ws) };
 });
 
-ipcMain.handle('tasks:list', (event, { provider, workspace = null, fresh = false } = {}) => {
+// `panel`: a panel id of task-view's panelList ('github', 'backlog:<space>.<domain>', 'slack').
+ipcMain.handle('tasks:list', (event, { panel, workspace = null, fresh = false } = {}) => {
   const ws = secretsWorkspaceFor(event.sender, workspace);
-  if (!ws || !TASK_PROVIDERS.includes(provider)) return { ok: false, error: 'workspace' };
-  const cfg = readTaskConfig(ws)[provider];
-  if (!tasksLib.isConfigured(provider, cfg)) return { ok: false, error: 'not-configured' };
+  if (!ws || typeof panel !== 'string') return { ok: false, error: 'workspace' };
+  const found = taskView.panelList(readTaskConfig(ws)).find((p) => p.id === panel);
+  if (!found) return { ok: false, error: 'not-configured' };
+  const { provider, cfg } = found;
   return taskResult((async () => {
     const token = taskToken(ws, cfg.tokenKey);
-    return provider === 'github'
-      ? tasksLib.fetchGithubTasks({ token, repos: cfg.repos })
-      : tasksLib.fetchBacklogTasks({ apiKey: token, space: cfg.space, domain: cfg.domain, fresh: fresh === true });
+    if (provider === 'github') return tasksLib.fetchGithubTasks({ token, repos: cfg.repos });
+    if (provider === 'slack') return slackTasksLib.fetchSlackTasks({ secret: token, fresh: fresh === true });
+    return tasksLib.fetchBacklogTasks({ apiKey: token, space: cfg.space, domain: cfg.domain, fresh: fresh === true });
   })());
 });
 

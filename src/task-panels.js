@@ -1,46 +1,49 @@
-// Task panels (issue #127): GitHub and Backlog tasks assigned to the user, each in its own
-// resizable panel to the right of the editor. Loaded after renderer.js and uses its globals
-// (config, t, secretsWs, activeTerminal). The main process holds the tokens and makes the API calls; this side
-// only names the secret that holds a token.
+// Task panels (issues #127, #133, #134): GitHub tasks, the tasks of each Backlog space and Slack
+// To-dos, each in its own resizable panel to the right of the editor. Loaded after renderer.js and
+// uses its globals (config, t, secretsWs, activeTerminal). The main process holds the tokens and
+// makes the API calls; this side only names the secret that holds a token.
 (function () {
-  const PROVIDERS = ['github', 'backlog'];
+  const PROVIDERS = ['github', 'backlog', 'slack'];
   const REFRESH_MS = 5 * 60 * 1000;
   const HIDDEN_KEY = 'taskPanelsHidden';
   const view = window.taskView;
   const row = document.getElementById('editorRow');
-  const pane = (p) => document.getElementById(`taskPane-${p}`);
-  const resizer = (p) => document.getElementById(`taskResizer-${p}`);
+  const emptyConfig = () => ({ github: null, backlog: [], slack: null });
 
-  let taskConfig = { github: null, backlog: null };
+  let taskConfig = emptyConfig();
   let gen = 0; // bumped on every workspace change: results for the previous one are dropped
   const freshState = () => ({ loading: false, items: null, truncated: false, error: null, at: null });
-  const state = { github: freshState(), backlog: freshState() };
+  // The panels on screen, left to right (view.panelList of the settings): id -> { id, provider,
+  // title, cfg, root, handle, state }. A Backlog space has its own panel ('backlog:<space>.<domain>').
+  const panels = new Map();
+  const shownPanels = () => (config && !readHidden() ? [...panels.values()] : []);
 
   function readHidden() { try { return localStorage.getItem(HIDDEN_KEY) === '1'; } catch { return false; } }
   function writeHidden(on) { try { localStorage.setItem(HIDDEN_KEY, on ? '1' : '0'); } catch {} }
   function readWidth(p) {
-    try { const n = parseInt(localStorage.getItem(`taskPaneWidth:${p}`), 10); return Number.isFinite(n) ? n : view.PANEL_DEFAULT; } catch { return view.PANEL_DEFAULT; }
+    const read = (key) => { const n = parseInt(localStorage.getItem(key), 10); return Number.isFinite(n) ? n : null; };
+    try {
+      // A Backlog space without a width of its own starts at the one saved before spaces had
+      // their own panels.
+      const own = read(`taskPaneWidth:${p.id}`);
+      if (own != null) return own;
+      const legacy = p.provider === 'backlog' ? read('taskPaneWidth:backlog') : null;
+      return legacy != null ? legacy : view.PANEL_DEFAULT;
+    } catch { return view.PANEL_DEFAULT; }
   }
-  function writeWidth(p, w) { try { localStorage.setItem(`taskPaneWidth:${p}`, String(w)); } catch {} }
+  function writeWidth(p, w) { try { localStorage.setItem(`taskPaneWidth:${p.id}`, String(w)); } catch {} }
 
-  function configured(p) {
-    const c = taskConfig[p];
-    if (!c || !c.tokenKey) return false;
-    return p === 'github' ? Array.isArray(c.repos) && c.repos.length > 0 : !!c.space;
-  }
-  const isShown = (p) => !!config && !readHidden() && configured(p);
-
-  // Show the configured panels (none configured = just the editor) at their saved widths, fitted
-  // so the editor keeps its minimum width.
+  // Show the panels (none set up = just the editor) at their saved widths, fitted so the editor
+  // keeps its minimum width.
   function layoutPanels() {
     const rowWidth = row.getBoundingClientRect().width;
-    const shown = PROVIDERS.filter(isShown);
-    for (const p of PROVIDERS) {
-      pane(p).classList.toggle('hidden', !shown.includes(p));
-      resizer(p).classList.toggle('hidden', !shown.includes(p));
+    const shown = shownPanels();
+    for (const p of panels.values()) {
+      p.root.classList.toggle('hidden', !shown.includes(p));
+      p.handle.classList.toggle('hidden', !shown.includes(p));
     }
     const widths = rowWidth > 0 ? view.fitPanelWidths(shown.map(readWidth), rowWidth) : shown.map(readWidth);
-    shown.forEach((p, i) => { pane(p).style.width = `${widths[i]}px`; });
+    shown.forEach((p, i) => { p.root.style.width = `${widths[i]}px`; });
   }
 
   function errorText(code) {
@@ -71,11 +74,10 @@
     return btn;
   }
 
-  function backlogItemEl(item) {
+  // Backlog issues and Slack to-dos: [ref] / title / [status] [due].
+  function plainItemEl(item) {
     const btn = el('button', 'task-item');
     btn.title = item.url;
-    const line1 = el('div', 'task-line1');
-    line1.appendChild(el('span', 'task-ref', item.ref));
     const meta = el('div', 'task-meta');
     if (item.status) meta.appendChild(el('span', 'task-status', item.status));
     if (item.due) {
@@ -83,7 +85,12 @@
       if (view.isOverdue(item.due)) due.classList.add('overdue');
       meta.appendChild(due);
     }
-    btn.append(line1, el('div', 'task-item-title', item.title), meta);
+    if (item.ref) {
+      const line1 = el('div', 'task-line1');
+      line1.appendChild(el('span', 'task-ref', item.ref));
+      btn.appendChild(line1);
+    }
+    btn.append(el('div', 'task-item-title', item.title || t('tasks.untitled')), meta);
     return btn;
   }
 
@@ -100,7 +107,7 @@
   // One list row: the task itself (click = open in the browser) and its → button.
   function itemRowEl(p, item) {
     const wrap = el('div', 'task-item-row');
-    const node = p === 'github' ? githubItemEl(item) : backlogItemEl(item);
+    const node = p.provider === 'github' ? githubItemEl(item) : plainItemEl(item);
     node.dataset.id = item.id;
     node.addEventListener('click', () => window.api.openExternal(item.url));
     const insert = el('button', 'task-btn task-insert', '→');
@@ -113,17 +120,24 @@
   }
 
   function render(p) {
-    const root = pane(p);
-    const st = state[p];
+    const root = p.root;
+    const st = p.state;
+    p.handle.title = t('ui.dragToResize');
+    const title = root.querySelector('.task-title');
+    title.textContent = p.title;
+    title.title = p.tip || p.title;
     root.classList.toggle('loading', st.loading);
-    root.querySelector('.task-refresh').disabled = st.loading;
+    const refreshBtn = root.querySelector('.task-refresh');
+    refreshBtn.disabled = st.loading;
+    refreshBtn.title = t('tasks.refresh');
+    root.querySelector('.task-settings').title = t('tasks.settings');
     root.querySelector('.task-count').textContent = st.items ? `(${st.items.length})` : '';
     root.querySelector('.task-updated').textContent = st.at ? t('tasks.updatedAt').replace('{time}', view.timeLabel(st.at)) : '';
     const msg = root.querySelector('.task-message');
     let text = '';
     if (st.error) text = errorText(st.error);
     else if (st.items && st.truncated) text = t('tasks.truncated'); // before "empty": an empty partial list proves nothing
-    else if (st.items && !st.items.length) text = t('tasks.empty');
+    else if (st.items && !st.items.length) text = t(p.provider === 'slack' ? 'tasks.emptyTodos' : 'tasks.empty');
     else if (!st.items && st.loading) text = t('tasks.loading');
     msg.textContent = text;
     msg.classList.toggle('hidden', !text);
@@ -141,21 +155,72 @@
     }
   }
 
-  // `fresh`: a manual ⟳ — skip cached lookups (Backlog's status list).
+  // `fresh`: a manual ⟳ — skip cached lookups (Backlog's status list, Slack's message texts).
   async function refresh(p, fresh = false) {
-    if (!isShown(p)) return;
-    const st = state[p];
+    if (!shownPanels().includes(p)) return;
+    const st = p.state;
     if (st.loading) return;
     const myGen = gen;
     st.loading = true;
     render(p);
     let res;
-    try { res = await window.api.tasksList(p, secretsWs(), fresh); } catch { res = { ok: false, error: 'network' }; }
-    if (myGen !== gen) return; // the workspace changed meanwhile; its own refresh is under way
+    try { res = await window.api.tasksList(p.id, secretsWs(), fresh); } catch { res = { ok: false, error: 'network' }; }
+    // The workspace changed meanwhile (its own refresh is under way), or the panel's settings did.
+    if (myGen !== gen || panels.get(p.id) !== p || p.state !== st) return;
     st.loading = false;
     if (res && res.ok) { st.items = res.items || []; st.truncated = !!res.truncated; st.error = null; st.at = new Date(); }
     else st.error = (res && res.error) || 'network';
     render(p);
+  }
+
+  function createPanel(desc) {
+    const handle = el('div', 'resizer vertical task-resizer');
+    const root = el('section', 'task-pane');
+    root.dataset.panel = desc.id;
+    const head = el('div', 'task-head');
+    const refreshBtn = el('button', 'task-btn task-refresh', '⟳');
+    const settingsBtn = el('button', 'task-btn task-settings', '⚙');
+    head.append(el('span', 'task-title'), el('span', 'task-count'), el('span', 'task-updated'), refreshBtn, settingsBtn);
+    root.append(head, el('div', 'task-message hidden'), el('div', 'task-list'));
+    const p = { ...desc, root, handle, state: freshState() };
+    refreshBtn.addEventListener('click', () => refreshOne(p.id));
+    settingsBtn.addEventListener('click', () => openSettings(p.provider, p.id));
+    initResizer(p);
+    return p;
+  }
+
+  // Make the panels on screen those of `next` settings: new ones are created, removed ones go,
+  // and one whose settings changed drops its list (it belongs to the old settings).
+  function applyConfig(next) {
+    taskConfig = next || emptyConfig();
+    const wanted = view.panelList(taskConfig);
+    const ids = new Set(wanted.map((d) => d.id));
+    // Panels added, removed or in another order (a space removed and added again elsewhere).
+    const changed = [...panels.keys()].join('\n') !== wanted.map((d) => d.id).join('\n');
+    // A resize under way ends first, while every panel is still in place to be measured: the
+    // handles are about to move, which drops the pointer capture.
+    if (changed) for (const p of panels.values()) if (p.endDrag) p.endDrag();
+    for (const [id, p] of panels) {
+      if (ids.has(id)) continue;
+      p.root.remove();
+      p.handle.remove();
+      panels.delete(id);
+    }
+    for (const desc of wanted) {
+      const p = panels.get(desc.id);
+      if (!p) { panels.set(desc.id, createPanel(desc)); continue; }
+      if (JSON.stringify(p.cfg) !== JSON.stringify(desc.cfg)) { p.cfg = desc.cfg; p.state = freshState(); }
+      p.title = desc.title;
+      p.tip = desc.tip;
+    }
+    // Put them in order only when needed: moving a node drops the keyboard focus in it.
+    if (changed) {
+      const ordered = wanted.map((d) => panels.get(d.id));
+      panels.clear();
+      for (const p of ordered) { panels.set(p.id, p); row.append(p.handle, p.root); }
+    }
+    for (const p of panels.values()) render(p);
+    layoutPanels();
   }
 
   // Re-read the settings first: another window on the same workspace may have changed them
@@ -166,46 +231,42 @@
     let res;
     try { res = await window.api.tasksGetConfig(); } catch { return false; }
     if (myGen !== gen || !res) return false;
-    const next = res.config || { github: null, backlog: null };
-    for (const p of PROVIDERS) {
-      if (JSON.stringify(next[p]) !== JSON.stringify(taskConfig[p])) { taskConfig[p] = next[p]; resetState(p); }
-    }
-    layoutPanels();
+    applyConfig(res.config);
     return true;
   }
 
   async function refreshAll() {
-    if (await reloadConfig()) PROVIDERS.forEach((p) => refresh(p));
+    if (await reloadConfig()) for (const p of panels.values()) refresh(p);
   }
-  async function refreshOne(p) {
-    if (await reloadConfig()) refresh(p, true);
+  // The reload may also have brought in a panel set up in another window, or emptied one whose
+  // settings changed there: those load too.
+  async function refreshOne(id) {
+    if (!(await reloadConfig())) return;
+    if (panels.has(id)) refresh(panels.get(id), true);
+    refreshMissing();
   }
-
-  function resetState(p) {
-    state[p] = freshState();
-    render(p);
+  // Every panel that has neither a list nor an error to show yet.
+  function refreshMissing() {
+    for (const p of panels.values()) if (!p.state.items && !p.state.error) refresh(p);
   }
 
   // After a workspace is applied: its own settings, panels and a first fetch.
   async function applyWorkspace() {
     const myGen = ++gen;
     if (closeDialog) closeDialog();
-    taskConfig = { github: null, backlog: null };
-    PROVIDERS.forEach(resetState);
-    layoutPanels();
+    applyConfig(emptyConfig());
     if (!config) return;
     let res;
     try { res = await window.api.tasksGetConfig(); } catch { return; }
     if (myGen !== gen || !res) return;
-    taskConfig = res.config || { github: null, backlog: null };
-    layoutPanels();
-    PROVIDERS.forEach((p) => refresh(p));
+    applyConfig(res.config);
+    for (const p of panels.values()) refresh(p);
   }
 
   function toggleVisible() {
     if (!config) return;
     // Nothing to show or hide: don't store a "hidden" that would swallow the first panel set up.
-    if (!PROVIDERS.some(configured)) { alert(t('tasks.noneConfigured')); return; }
+    if (!panels.size) { alert(t('tasks.noneConfigured')); return; }
     if (readHidden()) {
       writeHidden(false);
       layoutPanels();
@@ -219,34 +280,36 @@
   // Drag the bar on a panel's left edge: the panel's width follows the pointer (pointer capture,
   // as the other resizers, so an iframe preview can't swallow the release).
   function initResizer(p) {
-    const handle = resizer(p);
+    const handle = p.handle;
     handle.addEventListener('pointerdown', (event) => {
       if (event.button !== 0) return;
       event.preventDefault();
       try { handle.setPointerCapture(event.pointerId); } catch {}
       document.body.classList.add('resizing');
-      const target = pane(p);
+      const target = p.root;
       const right = target.getBoundingClientRect().right;
       const rowWidth = row.getBoundingClientRect().width;
-      const others = PROVIDERS.filter((o) => o !== p && isShown(o))
-        .reduce((sum, o) => sum + pane(o).getBoundingClientRect().width + 1, 0);
+      const others = () => shownPanels().filter((o) => o !== p);
+      const othersWidth = others().reduce((sum, o) => sum + o.root.getBoundingClientRect().width + 1, 0);
       let width = target.getBoundingClientRect().width;
       const onMove = (moveEvent) => {
         if (moveEvent.buttons === 0) { onEnd(); return; }
-        width = view.clampPanelWidth(right - moveEvent.clientX, rowWidth, others);
+        width = view.clampPanelWidth(right - moveEvent.clientX, rowWidth, othersWidth);
         target.style.width = `${width}px`;
       };
       const onEnd = () => {
+        p.endDrag = null;
         handle.removeEventListener('pointermove', onMove);
         handle.removeEventListener('pointerup', onEnd);
         handle.removeEventListener('pointercancel', onEnd);
         try { handle.releasePointerCapture(event.pointerId); } catch {}
         document.body.classList.remove('resizing');
-        // Save what is on screen for every shown panel (the other may be fitted below its saved
-        // width), so the next layout reproduces it instead of re-fitting the drag away.
+        // Save what is on screen for every shown panel (the others may be fitted below their saved
+        // widths), so the next layout reproduces it instead of re-fitting the drag away.
         writeWidth(p, Math.round(width));
-        for (const o of PROVIDERS) if (o !== p && isShown(o)) writeWidth(o, Math.round(pane(o).getBoundingClientRect().width));
+        for (const o of others()) writeWidth(o, Math.round(o.root.getBoundingClientRect().width));
       };
+      p.endDrag = onEnd;
       handle.addEventListener('pointermove', onMove);
       handle.addEventListener('pointerup', onEnd);
       handle.addEventListener('pointercancel', onEnd);
@@ -424,27 +487,57 @@
     };
   }
 
+  const NEW_SPACE = 'new';
   let settingsSeq = 0; // only the latest open request builds the dialog
-  async function openSettings(p) {
-    if (!config) return;
+  // `target` (Backlog): the panel id of the space to edit, or NEW_SPACE to add one. From the menu
+  // (no target) the dialog opens on the first space, or on a new one when there is none.
+  async function openSettings(provider, target = null) {
+    if (!config || !PROVIDERS.includes(provider)) return;
     const my = ++settingsSeq;
     const ws = secretsWs();
     let res;
     try { res = await window.api.tasksGetConfig(); } catch { return; }
     if (my !== settingsSeq || !res || !sameSecretsWs(ws)) return;
     if (closeDialog) closeDialog(); // one dialog at a time (its Escape handler goes with it)
-    const current = (res.config || {})[p] || null;
+    const cfg = res.config || emptyConfig();
     const keys = res.secretKeys || [];
+    const spaces = Array.isArray(cfg.backlog) ? cfg.backlog : [];
+    let current;
+    if (provider === 'backlog') {
+      const found = target && target !== NEW_SPACE ? spaces.find((b) => view.backlogPanelId(b) === target) : null;
+      // The space asked for is gone (removed or renamed in another window): no dialog on some other
+      // space — the panels catch up with the settings instead.
+      if (target && target !== NEW_SPACE && !found) { applyConfig(cfg); refreshMissing(); return; }
+      // Asked for a new space: a blank form even when the list has filled up meanwhile (saving
+      // then says so) — never some existing space's form to overwrite.
+      current = found || (target === NEW_SPACE ? null : spaces[0]) || null;
+    } else {
+      current = cfg[provider] || null;
+    }
+    const editing = provider === 'backlog' && current ? view.backlogPanelId(current) : null;
 
-    modalTitle.textContent = t(`tasks.settingsTitle.${p}`);
+    modalTitle.textContent = t(`tasks.settingsTitle.${provider}`);
     modalBody.textContent = '';
     modalError.textContent = '';
     clearBtn.classList.toggle('hidden', !current);
     saveBtn.disabled = false;
 
+    let focusFirst = null;
+    // Backlog with spaces set up: which one this dialog edits, or a new one.
+    if (provider === 'backlog' && spaces.length) {
+      const options = spaces.map((b) => [view.backlogPanelId(b), `${b.space}.backlog.${b.domain}`]);
+      if (spaces.length < view.BACKLOG_SPACES_MAX || !current) options.push([NEW_SPACE, t('tasks.addSpace')]);
+      const which = select(options, editing || NEW_SPACE);
+      // Close first: until the other space's form is up, Save / Remove must not act on this one.
+      which.addEventListener('change', () => { const next = which.value; close(); openSettings('backlog', next); });
+      modalBody.appendChild(field(t('tasks.whichSpace'), which));
+      focusFirst = which;
+    }
     const tokenSel = select([['', t('tasks.chooseSecret')], ...keys.map((k) => [k, k])], current ? current.tokenKey : '');
-    modalBody.appendChild(field(t('tasks.token'), tokenSel, keys.length ? t(`tasks.tokenHint.${p}`) : t('tasks.noSecrets')));
-    const getValue = p === 'github' ? githubForm(current, tokenSel, ws) : backlogForm(current);
+    modalBody.appendChild(field(t('tasks.token'), tokenSel, keys.length ? t(`tasks.tokenHint.${provider}`) : t('tasks.noSecrets')));
+    const getValue = provider === 'github' ? githubForm(current, tokenSel, ws)
+      : provider === 'backlog' ? backlogForm(current)
+        : () => ({ value: { tokenKey: null } });
 
     const close = () => {
       modal.classList.add('hidden');
@@ -458,7 +551,7 @@
     const apply = async (value) => {
       saveBtn.disabled = true;
       let out;
-      try { out = await window.api.tasksSetConfig({ provider: p, value, workspace: ws }); } catch { out = { ok: false, error: 'network' }; }
+      try { out = await window.api.tasksSetConfig({ provider, value, workspace: ws, target: editing }); } catch { out = { ok: false, error: 'network' }; }
       saveBtn.disabled = false;
       const open = closeDialog === close; // the dialog may have been closed while saving
       if (!out || !out.ok) { if (open) modalError.textContent = errorText((out && out.error) || 'network'); return; }
@@ -466,15 +559,14 @@
       // Saved: apply it even if the dialog was closed meanwhile (the workspace is still this one).
       if (!sameSecretsWs(ws)) return;
       if (value) writeHidden(false); // a panel just set up is shown
-      // Adopt the saved settings; a panel whose settings another window changed meanwhile drops
-      // its old list too.
-      for (const q of PROVIDERS) {
-        if (q === p || JSON.stringify(out.config[q]) !== JSON.stringify(taskConfig[q])) resetState(q);
-      }
-      taskConfig = out.config;
+      applyConfig(out.config);
+      // The saved panel starts over even with unchanged settings (its secret may have a new value).
+      const savedId = !value ? null : provider === 'backlog' ? view.backlogPanelId(value) : provider;
+      const saved = savedId ? panels.get(savedId) : null;
+      if (saved) { saved.state = freshState(); render(saved); }
       layoutPanels();
-      // This panel, and the other one if it just became visible without a list yet.
-      PROVIDERS.forEach((q) => { if (q === p || !state[q].items) refresh(q); });
+      // That panel, and any other shown without a list yet.
+      for (const p of panels.values()) if (p === saved || !p.state.items) refresh(p);
     };
 
     saveBtn.onclick = () => {
@@ -484,24 +576,18 @@
       apply({ ...r.value, tokenKey: tokenSel.value });
     };
     clearBtn.onclick = () => {
-      if (!confirm(t(`tasks.confirmClear.${p}`))) return;
+      if (!confirm(t(`tasks.confirmClear.${provider}`))) return;
       apply(null);
     };
     cancelBtn.onclick = close;
     modal.addEventListener('keydown', onKey);
     modal.classList.remove('hidden');
-    tokenSel.focus();
+    (focusFirst || tokenSel).focus();
   }
 
   function init() {
-    for (const p of PROVIDERS) {
-      initResizer(p);
-      pane(p).querySelector('.task-refresh').addEventListener('click', () => refreshOne(p));
-      pane(p).querySelector('.task-settings').addEventListener('click', () => openSettings(p));
-      render(p);
-    }
     window.api.onMenuToggleTaskPanels(toggleVisible);
-    window.api.onMenuTaskSettings(openSettings);
+    window.api.onMenuTaskSettings((provider) => openSettings(provider));
     // Re-fit on any change of the editor row's width: window resize, or the tree divider drag.
     let fitQueued = false;
     new ResizeObserver(() => {
@@ -509,12 +595,12 @@
       fitQueued = true;
       requestAnimationFrame(() => { fitQueued = false; layoutPanels(); });
     }).observe(row);
-    window.api.onLangChanged(() => PROVIDERS.forEach(render)); // runs after renderer's handler switched currentLang
+    window.api.onLangChanged(() => { for (const p of panels.values()) render(p); }); // runs after renderer's handler switched currentLang
     setInterval(() => { if (!document.hidden) refreshAll(); }, REFRESH_MS);
     // Back from minimized: catch up if the last refresh is stale.
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) return;
-      const stale = PROVIDERS.some((p) => isShown(p) && (!state[p].at || Date.now() - state[p].at.getTime() >= REFRESH_MS));
+      const stale = shownPanels().some((p) => !p.state.at || Date.now() - p.state.at.getTime() >= REFRESH_MS);
       if (stale) refreshAll();
     });
   }
