@@ -28,13 +28,38 @@ const saved = (items, cursor = '') => ({ ok: true, saved_items: items, response_
 const todo = (over = {}) => ({ item_id: 'C0AAA', item_type: 'message', ts: '1700000000.000100', state: 'in_progress', todo_state: 'to_do', is_archived: false, date_due: 0, date_created: 100, ...over });
 
 test('parseSlackSecret finds the token and the cookie in any layout, and needs both', () => {
-  assert.deepEqual(slack.parseSlackSecret(SECRET), { token: 'xoxc-111-222-abc', cookie: 'xoxd-AbC%2Bdef%3D' });
-  assert.deepEqual(slack.parseSlackSecret('{"d":"xoxd-zz%2F1","token":"xoxc-9-8"}'), { token: 'xoxc-9-8', cookie: 'xoxd-zz%2F1' });
+  assert.deepEqual(slack.parseSlackSecret(SECRET), { token: 'xoxc-111-222-abc', cookie: 'xoxd-AbC%2Bdef%3D', cookieHeader: 'd=xoxd-AbC%2Bdef%3D' });
+  assert.deepEqual(slack.parseSlackSecret('{"d":"xoxd-zz%2F1","token":"xoxc-9-8"}'), { token: 'xoxc-9-8', cookie: 'xoxd-zz%2F1', cookieHeader: 'd=xoxd-zz%2F1' });
   for (const bad of ['', 'xoxc-1-2', 'xoxd-abc', 'xoxp-1-2 xoxd-abc', null]) {
     assert.throws(() => slack.parseSlackSecret(bad), (err) => err.code === 'slack-secret');
   }
   // Nothing after the cookie value (a line break, a quote, a `;`) leaks into the Cookie header.
   assert.equal(slack.parseSlackSecret('xoxc-1-2\r\nxoxd-abc;\r\nX-Evil: 1').cookie, 'xoxd-abc');
+  assert.equal(slack.parseSlackSecret('xoxc-1-2\r\nxoxd-abc;\r\nX-Evil: 1').cookieHeader, 'd=xoxd-abc');
+});
+
+test('parseSlackSecret sends the whole Cookie header when the secret holds one', () => {
+  const header = (secret) => slack.parseSlackSecret(secret).cookieHeader;
+  // As copied from the browser's request headers, with or without the name in front.
+  assert.equal(header('xoxc-1-2\nCookie: b=.abc; d=xoxd-AbC%2B; dbd=eyJ.x_y-z==; d-s=1700000000; x=abc.123; ec=v1:a/b'),
+    'b=.abc; d=xoxd-AbC%2B; dbd=eyJ.x_y-z==; d-s=1700000000; x=abc.123; ec=v1:a/b');
+  assert.equal(header('d=xoxd-abc; dbd=one\ntoken: xoxc-1-2'), 'd=xoxd-abc; dbd=one');
+  // Only that line; the token is never a cookie; what isn't a pair is dropped. A name may repeat
+  // (cookies of different paths), but there is one `d`. Quoted values are sent as they are.
+  assert.equal(header('xoxc-1-2\nother=line\ncookie: token=xoxc-1-2; d=xoxd-abc; dbd=one; dbd=two; d=xoxd-second; junk; sp ace=1; q="x; =v; r="y"'), 'd=xoxd-abc; dbd=one; dbd=two; r="y"');
+  assert.deepEqual(slack.parseSlackSecret('xoxc-1-2\nCookie: d="xoxd-abc"; dbd=one'), { token: 'xoxc-1-2', cookie: 'xoxd-abc', cookieHeader: 'd="xoxd-abc"; dbd=one' });
+  // A `d=` inside another cookie's value is not the d cookie: the real one is, wherever it is.
+  assert.deepEqual(slack.parseSlackSecret('xoxc-1-2\na=prefix:d=xoxd-old; dbd=stale\nd=xoxd-real; dbd=one'), { token: 'xoxc-1-2', cookie: 'xoxd-real', cookieHeader: 'd=xoxd-real; dbd=one' });
+  // The token is the one outside the cookie line, when there is one; else the one on it.
+  assert.equal(slack.parseSlackSecret('Cookie: d=xoxd-abc; ref=xoxc-not-the-token\nxoxc-1-2').token, 'xoxc-1-2');
+  assert.deepEqual(slack.parseSlackSecret('token=xoxc-1-2; d=xoxd-abc; dbd=one'), { token: 'xoxc-1-2', cookie: 'xoxd-abc', cookieHeader: 'd=xoxd-abc; dbd=one' });
+  // Layouts without a cookie line: `d` alone, as before.
+  assert.equal(header('xoxd=xoxd-abc; dbd=one xoxc-1-2'), 'd=xoxd-abc');
+  assert.equal(header('{"d":"xoxd-abc","dbd":"one","token":"xoxc-1-2"}'), 'd=xoxd-abc');
+  // Nothing that could end the header or start another one.
+  assert.equal(header('xoxc-1-2\nd=xoxd-abc; a=b\u0001c; e=f,g; h=i\\j; k=l\tm; n=\u00e9\r\nX-Evil: 1'), 'd=xoxd-abc');
+  // An absurdly long one falls back to `d` alone.
+  assert.equal(header(`xoxc-1-2\nd=xoxd-abc; big=${'x'.repeat(9000)}`), 'd=xoxd-abc');
 });
 
 test('slackPlainText turns Slack markup into one plain line', () => {
@@ -114,6 +139,10 @@ test('fetchSlackTasks lists open to-dos with channel, text, due date and link; t
     assert.equal(call.params.token, 'xoxc-111-222-abc');
     assert.equal(call.headers.Cookie, 'd=xoxd-AbC%2Bdef%3D');
   }
+  // With the whole Cookie header in the secret, every request carries all of it.
+  const full = fakeSlack({ 'auth.test': AUTH, 'saved.list': saved([]) });
+  await slack.fetchSlackTasks({ secret: 'xoxc-1-2\nCookie: d=xoxd-abc; dbd=one; d-s=2', fetchImpl: full, cache: new Map() });
+  assert.deepEqual(full.calls.map((c) => c.headers.Cookie), ['d=xoxd-abc; dbd=one; d-s=2', 'd=xoxd-abc; dbd=one; d-s=2']);
 });
 
 test('fetchSlackTasks reuses message texts and channel names until a manual refresh', async () => {

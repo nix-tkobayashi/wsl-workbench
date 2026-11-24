@@ -84,6 +84,7 @@ contextBridge.exposeInMainWorld('api', {
   onMenuToggleTaskPanels: (cb) => ipcRenderer.on('menu:toggleTaskPanels', () => cb()),
   onMenuTaskSettings: (cb) => {
     ipcRenderer.on('menu:taskSettingsGithub', () => cb('github'));
+    ipcRenderer.on('menu:taskSettingsGitlab', () => cb('gitlab'));
     ipcRenderer.on('menu:taskSettingsBacklog', () => cb('backlog'));
     ipcRenderer.on('menu:taskSettingsSlack', () => cb('slack'));
   },
