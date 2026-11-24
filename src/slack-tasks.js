@@ -23,12 +23,52 @@ class SlackError extends Error {
 
 // The secret holds both values, in any layout (two lines, `key=value`, JSON…): they are found by
 // their prefixes. The cookie is used as copied from the browser (already percent-encoded).
+//
+// Some workspaces answer 403 unless the session's other cookies come along with `d` (`dbd`, `d-s`,
+// `x`, `ec`…): when the secret holds the browser's whole Cookie header (`d=xoxd-…; dbd=…; …`, with
+// or without the `Cookie:` in front), all of it is sent. Otherwise `d` alone, as before.
+const COOKIE_HEADER_MAX = 8192;
+// A value may be quoted, as RFC 6265 allows.
+const COOKIE_VALUE = "[\\x21\\x23-\\x2B\\x2D-\\x3A\\x3C-\\x5B\\x5D-\\x7E]*";
+const COOKIE_PAIR_RE = new RegExp(`^([!#$%&'*+\\-.^_\`|~0-9A-Za-z]+)=(${COOKIE_VALUE}|"${COOKIE_VALUE}")$`);
+const D_VALUE_RE = /^xoxd-[A-Za-z0-9%+/=_.~-]+$/;
+
+// The first line that is a cookie header with a `d` pair of its own (not `xoxd=xoxd-…`, not JSON's
+// `"d":"…"`, not a `d=` inside another cookie's value) → { d, header }, or null.
+function cookieLine(text) {
+  for (const line of text.split(/[\r\n]+/)) {
+    const pairs = [];
+    let d = null;
+    for (const piece of line.replace(/^\s*cookie\s*:/i, '').split(';')) {
+      const m = COOKIE_PAIR_RE.exec(piece.trim());
+      // Never the token: it goes in the request body only.
+      if (!m || /^"?xoxc-/.test(m[2])) continue;
+      if (m[1] === 'd') {
+        // One `d`, the first; quoted or not. Other names may repeat (same name, different paths).
+        const bare = m[2].replace(/^"(.*)"$/, '$1');
+        if (d || !D_VALUE_RE.test(bare)) continue;
+        d = bare;
+      }
+      pairs.push(`${m[1]}=${m[2]}`);
+    }
+    const header = pairs.join('; ');
+    // An absurdly long one: `d` alone (the line is still the cookie line, for the token search).
+    if (d) return { d, header: header.length <= COOKIE_HEADER_MAX ? header : `d=${d}`, line };
+  }
+  return null;
+}
+
 function parseSlackSecret(value) {
   const text = String(value || '');
-  const token = /xoxc-[A-Za-z0-9-]+/.exec(text);
-  const cookie = /xoxd-[A-Za-z0-9%+/=_.~-]+/.exec(text);
+  const line = cookieLine(text);
+  // The token is looked for outside the cookie line first: a cookie's value may happen to hold
+  // an `xoxc-` of its own. (All on one line — `token=xoxc-…; d=xoxd-…` — still works.)
+  const TOKEN_RE = /xoxc-[A-Za-z0-9-]+/;
+  const token = (line && TOKEN_RE.exec(text.split(/[\r\n]+/).filter((l) => l !== line.line).join('\n'))) || TOKEN_RE.exec(text);
+  // The `d` of a cookie line goes with the cookies beside it; otherwise it is found by its prefix.
+  const cookie = line ? [line.d] : /xoxd-[A-Za-z0-9%+/=_.~-]+/.exec(text);
   if (!token || !cookie) throw new SlackError('slack-secret');
-  return { token: token[0], cookie: cookie[0] };
+  return { token: token[0], cookie: cookie[0], cookieHeader: line ? line.header : `d=${cookie[0]}` };
 }
 
 const isTimeout = (err) => !!err && (err.name === 'TimeoutError' || err.name === 'AbortError');
@@ -40,7 +80,7 @@ async function slackCall(fetchImpl, creds, method, params = {}) {
   try {
     res = await fetchImpl(`${SLACK_API}/${method}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8', Cookie: `d=${creds.cookie}`, 'User-Agent': 'wsl-workbench' },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8', Cookie: creds.cookieHeader, 'User-Agent': 'wsl-workbench' },
       body,
       redirect: 'error', // never re-send the session token to wherever a redirect points
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)

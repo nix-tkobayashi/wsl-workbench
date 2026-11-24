@@ -117,13 +117,16 @@
     return `backlog:${String((cfg && cfg.space) || '').toLowerCase()}.${(cfg && cfg.domain) || 'com'}`;
   }
 
-  // The panels a workspace's settings give, left to right: GitHub, each Backlog space, Slack.
+  // The panels a workspace's settings give, left to right: GitHub, GitLab, each Backlog space, Slack.
   // Shared by the renderer (which draws them) and main (which resolves a panel id to its settings).
   function panelList(config) {
     const c = config && typeof config === 'object' ? config : {};
     const out = [];
     const gh = c.github;
     if (gh && gh.tokenKey && Array.isArray(gh.repos) && gh.repos.length) out.push({ id: 'github', provider: 'github', title: 'GitHub', cfg: gh });
+    const gl = c.gitlab;
+    // The host is in the title only when it isn't gitlab.com (a self-managed instance).
+    if (gl && gl.tokenKey && gl.host) out.push({ id: 'gitlab', provider: 'gitlab', title: gl.host === 'gitlab.com' ? 'GitLab' : `GitLab: ${gl.host}`, tip: gl.host, cfg: gl });
     const seen = new Set();
     for (const b of Array.isArray(c.backlog) ? c.backlog : []) {
       if (!b || !b.tokenKey || !b.space || seen.has(backlogPanelId(b))) continue;

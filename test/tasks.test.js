@@ -23,7 +23,7 @@ function fakeFetch(routes) {
 }
 
 test('normalizeConfig keeps only well-formed settings', () => {
-  assert.deepEqual(tasks.normalizeConfig(null), { github: null, backlog: [], slack: null });
+  assert.deepEqual(tasks.normalizeConfig(null), { github: null, gitlab: null, backlog: [], slack: null });
   const cfg = tasks.normalizeConfig({
     github: { tokenKey: 'GH_TOKEN', repos: ['a/b', 'a/b', 'bad repo', 'x/../y', 5, 'org/r.e-p_o'] },
     backlog: { tokenKey: 'BL_KEY', space: ' myspace ', domain: 'jp' }
@@ -403,4 +403,92 @@ test('fetchBacklogProjects lists the space\'s projects by key', async () => {
   assert.ok(f.calls[0].url.startsWith('https://myspace.backlog.jp/api/v2/projects?apiKey=k%26y&archived=false'));
   await assert.rejects(tasks.fetchBacklogProjects({ apiKey: 'k', space: 'x.evil.com/', domain: 'com', fetchImpl: f }), { code: 'bad-space' });
   await assert.rejects(tasks.fetchBacklogProjects({ apiKey: 'k', space: 's', domain: 'com', fetchImpl: fakeFetch([{ match: '/projects', status: 401 }]) }), { code: 'auth' });
+});
+
+test('normalizeGitlab keeps the secret and a well-formed host (gitlab.com when empty)', () => {
+  assert.deepEqual(tasks.normalizeGitlab({ tokenKey: 'GL' }), { tokenKey: 'GL', host: 'gitlab.com' });
+  assert.deepEqual(tasks.normalizeGitlab({ tokenKey: 'GL', host: '  ' }), { tokenKey: 'GL', host: 'gitlab.com' });
+  assert.deepEqual(tasks.normalizeGitlab({ tokenKey: 'GL', host: 'GitLab.Example.com', extra: 1 }), { tokenKey: 'GL', host: 'gitlab.example.com' });
+  // A pasted address leaves its host; the https port is dropped.
+  assert.equal(tasks.gitlabHost('https://gitlab.example.com:8443/group/project/-/issues'), 'gitlab.example.com:8443');
+  assert.equal(tasks.gitlabHost('gitlab.example.com:443'), 'gitlab.example.com');
+  assert.equal(tasks.gitlabHost('localhost'), 'localhost');
+  for (const bad of ['http://gitlab.example.com', 'user@gitlab.example.com', 'gitlab.example.com?x', 'a b', '-x.com', 'x-.com', 'a..b', 'host:0', 'host:99999', 'host:', '[::1]', `${'a'.repeat(64)}.com`, 5]) {
+    assert.equal(tasks.normalizeGitlab({ tokenKey: 'GL', host: bad }), null, String(bad));
+  }
+  assert.equal(tasks.normalizeGitlab({ tokenKey: '../x' }), null);
+  assert.equal(tasks.isConfigured('gitlab', { tokenKey: 'GL', host: 'gitlab.com' }), true);
+  assert.equal(tasks.isConfigured('gitlab', null), false);
+  // Set and cleared like GitHub and Slack, leaving the rest alone.
+  const base = tasks.normalizeConfig({ slack: { tokenKey: 'S' } });
+  const withGitlab = tasks.applyConfigChange(base, 'gitlab', { tokenKey: 'GL', host: 'https://GitLab.example.com/' }).config;
+  assert.deepEqual(withGitlab.gitlab, { tokenKey: 'GL', host: 'gitlab.example.com' });
+  assert.deepEqual(withGitlab.slack, { tokenKey: 'S', channels: [] });
+  assert.equal(tasks.applyConfigChange(withGitlab, 'gitlab', null).config.gitlab, null);
+  assert.deepEqual(tasks.applyConfigChange(base, 'gitlab', { tokenKey: 'GL', host: 'bad host' }), { error: 'invalid' });
+  for (const bad of ['https://', '/gitlab', 'https:///x']) assert.equal(tasks.gitlabHost(bad), null, bad);
+  // A secret about to go to a host other than gitlab.com is confirmed, unless that pair is already saved.
+  const own = { tokenKey: 'GL', host: 'gitlab.example.com' };
+  assert.equal(tasks.gitlabNeedsConfirm(null, { tokenKey: 'GL', host: 'gitlab.com' }), false);
+  assert.equal(tasks.gitlabNeedsConfirm(own, { tokenKey: 'OTHER', host: 'gitlab.com' }), false);
+  assert.equal(tasks.gitlabNeedsConfirm(null, own), true);
+  assert.equal(tasks.gitlabNeedsConfirm(own, { ...own }), false);
+  assert.equal(tasks.gitlabNeedsConfirm(own, { ...own, tokenKey: 'OTHER' }), true);
+  assert.equal(tasks.gitlabNeedsConfirm(own, { ...own, host: 'evil.example' }), true);
+  assert.equal(tasks.gitlabNeedsConfirm({ tokenKey: 'GL', host: 'gitlab.com' }, own), true);
+  assert.equal(tasks.gitlabNeedsConfirm(own, null), false);
+});
+
+const glIssue = (over = {}) => ({ iid: 1, title: 'An issue', web_url: 'https://gitlab.example.com/g/p/-/issues/1', references: { full: 'g/p#1' }, updated_at: '2026-11-01T00:00:00Z', ...over });
+const glMr = (over = {}) => ({ iid: 5, title: 'A merge request', web_url: 'https://gitlab.example.com/g/p/-/merge_requests/5', references: { full: 'g/p!5' }, updated_at: '2026-11-02T00:00:00Z', ...over });
+
+test('fetchGitlabTasks lists issues and merge requests assigned to the user, and those to review', async () => {
+  const f = fakeFetch([
+    { match: '/api/v4/user', body: { id: 42, username: 'me' } },
+    { match: '/api/v4/issues?', body: [glIssue(), glIssue({ iid: 2, web_url: 'javascript:alert(1)' }), glIssue({ iid: 3, web_url: 'https://u:p@gitlab.example.com/x' }), null] },
+    { match: 'merge_requests?scope=assigned_to_me', body: [glMr(), glMr({ iid: 6, draft: true, web_url: 'https://gitlab.example.com/g/p/-/merge_requests/6', references: null, updated_at: '2026-11-05T00:00:00Z' })] },
+    { match: 'reviewer_id=42', body: [glMr(), glMr({ iid: 7, work_in_progress: true, web_url: 'https://gitlab.example.com/g/q/-/merge_requests/7', references: { full: 'g/q!7' }, updated_at: '2026-11-03T00:00:00Z' })] }
+  ]);
+  const res = await tasks.fetchGitlabTasks({ token: 'glpat-x', host: 'gitlab.example.com', fetchImpl: f });
+  assert.equal(res.truncated, false);
+  // Newest update first; one entry per merge request, with both roles when it matched both.
+  assert.deepEqual(res.items.map((i) => [i.ref, i.kind, i.draft, i.roles, i.title]), [
+    ['!6', 'mr', true, ['assignee'], 'A merge request'],
+    ['g/q!7', 'mr', true, ['reviewer'], 'A merge request'],
+    ['g/p!5', 'mr', false, ['assignee', 'reviewer'], 'A merge request'],
+    ['g/p#1', 'issue', false, ['assignee'], 'An issue']
+  ]);
+  assert.equal(res.items[3].url, 'https://gitlab.example.com/g/p/-/issues/1');
+  assert.deepEqual(f.calls.map((c) => c.url), [
+    'https://gitlab.example.com/api/v4/user',
+    'https://gitlab.example.com/api/v4/issues?scope=assigned_to_me&state=opened&order_by=updated_at&sort=desc&per_page=100&page=1',
+    'https://gitlab.example.com/api/v4/merge_requests?scope=assigned_to_me&state=opened&order_by=updated_at&sort=desc&per_page=100&page=1',
+    'https://gitlab.example.com/api/v4/merge_requests?scope=all&reviewer_id=42&state=opened&order_by=updated_at&sort=desc&per_page=100&page=1'
+  ]);
+  for (const call of f.calls) {
+    assert.equal(call.opts.headers['PRIVATE-TOKEN'], 'glpat-x');
+    assert.equal(call.opts.redirect, 'error'); // the token is never sent on to a redirect target
+  }
+});
+
+test('fetchGitlabTasks follows pages, reports a list cut short, and maps errors', async () => {
+  const page = (url) => Array.from({ length: 100 }, (_, i) => glIssue({ iid: i, web_url: `https://gitlab.com/g/p/-/issues/${/&page=(\d+)/.exec(url)[1]}-${i}` }));
+  const f = fakeFetch([
+    { match: '/api/v4/user', body: { id: 1 } },
+    { match: '/api/v4/issues?', body: page },
+    { match: 'merge_requests', body: [] }
+  ]);
+  const res = await tasks.fetchGitlabTasks({ token: 't', host: 'gitlab.com', fetchImpl: f });
+  assert.equal(res.items.length, tasks.GITLAB_PAGES_MAX * 100);
+  assert.equal(res.truncated, true);
+  assert.equal(f.calls.filter((c) => c.url.includes('/issues?')).length, tasks.GITLAB_PAGES_MAX);
+  const code = (routes, host = 'gitlab.com') => tasks.fetchGitlabTasks({ token: 't', host, fetchImpl: fakeFetch(routes) }).then(() => null, (err) => err.code);
+  assert.equal(await code([{ match: '/user', status: 401 }]), 'auth');
+  assert.equal(await code([{ match: '/user', status: 403 }]), 'forbidden');
+  assert.equal(await code([{ match: '/user', status: 429 }]), 'rate-limit');
+  assert.equal(await code([{ match: '/user', body: { message: 'x' } }]), 'bad-response');
+  assert.equal(await code([{ match: '/user', body: { id: 1 } }, { match: '/issues', body: { message: 'x' } }]), 'bad-response');
+  assert.equal(await code([{ match: '/user', throws: new Error('redirect') }]), 'network');
+  // Only a host as the settings hold it: nothing is asked of anything else.
+  for (const bad of ['evil.example/x', 'https://gitlab.com', 'GitLab.com', '', null]) assert.equal(await code([], bad), 'bad-host');
 });

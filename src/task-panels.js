@@ -1,14 +1,14 @@
-// Task panels (issues #127, #133, #134): GitHub tasks, the tasks of each Backlog space and Slack
+// Task panels (issues #127, #133, #134): GitHub tasks, GitLab tasks, the tasks of each Backlog space and Slack
 // To-dos, each in its own resizable panel to the right of the editor. Loaded after renderer.js and
 // uses its globals (config, t, secretsWs, activeTerminal). The main process holds the tokens and
 // makes the API calls; this side only names the secret that holds a token.
 (function () {
-  const PROVIDERS = ['github', 'backlog', 'slack'];
+  const PROVIDERS = ['github', 'gitlab', 'backlog', 'slack'];
   const REFRESH_MS = 5 * 60 * 1000;
   const HIDDEN_KEY = 'taskPanelsHidden';
   const view = window.taskView;
   const row = document.getElementById('editorRow');
-  const emptyConfig = () => ({ github: null, backlog: [], slack: null });
+  const emptyConfig = () => ({ github: null, gitlab: null, backlog: [], slack: null });
 
   let taskConfig = emptyConfig();
   let gen = 0; // bumped on every workspace change: results for the previous one are dropped
@@ -59,6 +59,12 @@
     return e;
   }
 
+  // GitHub issues / PRs and GitLab issues / merge requests: [roles] [kind] [ref] / title.
+  function kindLabel(item) {
+    if (item.kind === 'mr') return item.draft ? t('tasks.kind.draftMr') : 'MR';
+    return item.kind === 'pr' ? (item.draft ? t('tasks.kind.draft') : 'PR') : 'Issue';
+  }
+
   function githubItemEl(item) {
     const btn = el('button', 'task-item');
     btn.title = item.url;
@@ -68,7 +74,7 @@
       mark.title = t(`tasks.role.${role}`);
       line1.appendChild(mark);
     }
-    line1.appendChild(el('span', 'task-kind', item.kind === 'pr' ? (item.draft ? t('tasks.kind.draft') : 'PR') : 'Issue'));
+    line1.appendChild(el('span', 'task-kind', kindLabel(item)));
     line1.appendChild(el('span', 'task-ref', item.ref));
     btn.append(line1, el('div', 'task-item-title', item.title));
     return btn;
@@ -107,7 +113,7 @@
   // One list row: the task itself (click = open in the browser) and its → button.
   function itemRowEl(p, item) {
     const wrap = el('div', 'task-item-row');
-    const node = p.provider === 'github' ? githubItemEl(item) : plainItemEl(item);
+    const node = p.provider === 'github' || p.provider === 'gitlab' ? githubItemEl(item) : plainItemEl(item);
     node.dataset.id = item.id;
     node.addEventListener('click', () => window.api.openExternal(item.url));
     const insert = el('button', 'task-btn task-insert', '→');
@@ -459,6 +465,25 @@
     };
   }
 
+  // GitLab: the host (gitlab.com, or a self-managed instance). A pasted URL leaves its host.
+  function gitlabForm(current) {
+    const HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:\d{1,5})?$/;
+    const host = document.createElement('input');
+    host.type = 'text';
+    host.spellcheck = false;
+    host.placeholder = 'gitlab.com';
+    host.value = current && current.host !== 'gitlab.com' ? current.host : '';
+    const tidy = () => host.value.trim().toLowerCase().replace(/^https:\/\//, '').replace(/\/.*$/, '');
+    host.addEventListener('change', () => { if (tidy()) host.value = tidy(); });
+    modalBody.append(field(t('tasks.gitlabHost'), host, t('tasks.gitlabHostHint')));
+    return () => {
+      const name = tidy();
+      // Something typed that leaves no host (`https://`, `/gitlab`) is an error, not gitlab.com.
+      if (host.value.trim() && !HOST_RE.test(name)) return { error: t('tasks.err.host') };
+      return { value: { tokenKey: null, host: name } };
+    };
+  }
+
   // Backlog: the space, then the projects whose issues are shown (issue #138; none checked = all).
   function backlogForm(current, tokenSel, ws) {
     const SPACE_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/;
@@ -687,6 +712,7 @@
     const tokenSel = select([['', t('tasks.chooseSecret')], ...keys.map((k) => [k, k])], current ? current.tokenKey : '');
     modalBody.appendChild(field(t('tasks.token'), tokenSel, keys.length ? t(`tasks.tokenHint.${provider}`) : t('tasks.noSecrets')));
     const getValue = provider === 'github' ? githubForm(current, tokenSel, ws)
+      : provider === 'gitlab' ? gitlabForm(current)
       : provider === 'backlog' ? backlogForm(current, tokenSel, ws)
         : slackForm(current, tokenSel, ws);
 

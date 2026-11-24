@@ -1008,6 +1008,7 @@ function buildAppMenu() {
         { label: tr('menu.toggleSecrets'), accelerator: 'CmdOrCtrl+Shift+K', click: () => sendToFocusedWindow('menu:toggleSecrets') },
         { label: tr('menu.toggleTaskPanels'), click: () => sendToFocusedWindow('menu:toggleTaskPanels') },
         { label: tr('menu.githubTasksSettings'), click: () => sendToFocusedWindow('menu:taskSettingsGithub') },
+        { label: tr('menu.gitlabTasksSettings'), click: () => sendToFocusedWindow('menu:taskSettingsGitlab') },
         { label: tr('menu.backlogTasksSettings'), click: () => sendToFocusedWindow('menu:taskSettingsBacklog') },
         { label: tr('menu.slackTasksSettings'), click: () => sendToFocusedWindow('menu:taskSettingsSlack') },
         { type: 'separator' },
@@ -2304,13 +2305,13 @@ ipcMain.handle('secrets:import', async (event) => {
 
 // The terminal strip's key button: insert a secret's path (or, confirmed, its value) into the
 // focused pane. Clicking sends the choice back; the renderer then calls insertPath / pasteValue.
-// --- Task panels (src/tasks.js, issue #127): GitHub / Backlog / Slack tasks of the user, beside
+// --- Task panels (src/tasks.js, issue #127): GitHub / GitLab / Backlog / Slack tasks of the user, beside
 // the editor. Settings are per workspace (like its secrets); the token is a secret of that
 // workspace, read here by key name — the renderer never sees its value. ---
 const tasksLib = require('./tasks');
 const slackTasksLib = require('./slack-tasks');
 const taskView = require('./task-view');
-const TASK_PROVIDERS = ['github', 'backlog', 'slack'];
+const TASK_PROVIDERS = ['github', 'gitlab', 'backlog', 'slack'];
 const tasksSettingsKey = (ws) => `${ws.distro}:${ws.wslPath}`;
 function readTaskConfig(ws) {
   return tasksLib.normalizeConfig((readSettings().tasks || {})[tasksSettingsKey(ws)]);
@@ -2331,14 +2332,38 @@ ipcMain.handle('tasks:getConfig', (event) => {
 });
 
 // `target` (Backlog only): the panel id of the space being edited or removed; none = add a space.
-ipcMain.handle('tasks:setConfig', (event, { provider, value = null, workspace = null, target = null } = {}) => {
+ipcMain.handle('tasks:setConfig', async (event, { provider, value = null, workspace = null, target = null } = {}) => {
   const ws = secretsWorkspaceFor(event.sender, workspace);
   if (!ws || !TASK_PROVIDERS.includes(provider)) return { ok: false, error: 'workspace' };
-  const res = tasksLib.applyConfigChange(readTaskConfig(ws), provider, value, target);
+  let before = readTaskConfig(ws);
+  let res = tasksLib.applyConfigChange(before, provider, value, target);
   if (res.error) return { ok: false, error: res.error };
+  // A self-managed GitLab: the secret would go to a host typed in the dialog. Asked here, in a
+  // dialog of main's own, whenever that secret and host were not already saved together.
+  if (provider === 'gitlab' && tasksLib.gitlabNeedsConfirm(before.gitlab, res.config.gitlab)) {
+    const asked = res.config.gitlab;
+    const win = windowForSender(event.sender);
+    const opts = {
+      type: 'warning',
+      buttons: [tr('tasks.gitlabConfirmSend'), tr('prompt.cancel')],
+      defaultId: 1,
+      cancelId: 1,
+      message: tr('tasks.gitlabConfirmTitle').replace('{host}', asked.host),
+      detail: tr('tasks.gitlabConfirmDetail').replace('{key}', asked.tokenKey).replace('{host}', asked.host)
+    };
+    const { response } = win && !win.isDestroyed() ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+    if (response !== 0) return { ok: false, error: 'cancelled' };
+    // The settings may have changed while the question was up: apply to what they are now, and
+    // save only what was agreed to.
+    before = readTaskConfig(ws);
+    res = tasksLib.applyConfigChange(before, provider, value, target);
+    if (res.error) return { ok: false, error: res.error };
+    if (!res.config.gitlab || res.config.gitlab.host !== asked.host || res.config.gitlab.tokenKey !== asked.tokenKey) return { ok: false, error: 'invalid' };
+  }
   const all = { ...(readSettings().tasks || {}) };
   const entry = {};
   if (res.config.github) entry.github = res.config.github;
+  if (res.config.gitlab) entry.gitlab = res.config.gitlab;
   if (res.config.backlog.length) entry.backlog = res.config.backlog;
   if (res.config.slack) entry.slack = res.config.slack;
   if (Object.keys(entry).length) all[tasksSettingsKey(ws)] = entry; else delete all[tasksSettingsKey(ws)];
@@ -2346,7 +2371,7 @@ ipcMain.handle('tasks:setConfig', (event, { provider, value = null, workspace = 
   return { ok: true, config: readTaskConfig(ws) };
 });
 
-// `panel`: a panel id of task-view's panelList ('github', 'backlog:<space>.<domain>', 'slack').
+// `panel`: a panel id of task-view's panelList ('github', 'gitlab', 'backlog:<space>.<domain>', 'slack').
 ipcMain.handle('tasks:list', (event, { panel, workspace = null, fresh = false } = {}) => {
   const ws = secretsWorkspaceFor(event.sender, workspace);
   if (!ws || typeof panel !== 'string') return { ok: false, error: 'workspace' };
@@ -2356,6 +2381,7 @@ ipcMain.handle('tasks:list', (event, { panel, workspace = null, fresh = false } 
   return taskResult((async () => {
     const token = taskToken(ws, cfg.tokenKey);
     if (provider === 'github') return tasksLib.fetchGithubTasks({ token, repos: cfg.repos });
+    if (provider === 'gitlab') return tasksLib.fetchGitlabTasks({ token, host: cfg.host });
     if (provider === 'slack') return slackTasksLib.fetchSlackTasks({ secret: token, channels: cfg.channels, fresh: fresh === true });
     return tasksLib.fetchBacklogTasks({ apiKey: token, space: cfg.space, domain: cfg.domain, projects: cfg.projects, fresh: fresh === true });
   })());

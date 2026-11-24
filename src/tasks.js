@@ -1,4 +1,4 @@
-// Task panels (issue #127): open GitHub issues/PRs and Backlog issues assigned to the user, shown
+// Task panels (issue #127): open GitHub issues/PRs, GitLab issues/merge requests and Backlog issues assigned to the user, shown
 // to the right of the editor (Slack To-dos: src/slack-tasks.js). Runs in the main process only — the token is a workspace secret read
 // here by key name and never crosses to the renderer.
 //
@@ -16,6 +16,8 @@ const GITHUB_SEARCH_REQUESTS_MAX = 20; // per refresh: stays under the 30 search
 const BACKLOG_ISSUE_PAGES_MAX = 10;
 const BACKLOG_CLOSED_STATUS_ID = 4;    // Backlog's built-in "Closed" (完了) status; it can't be deleted
 const BACKLOG_DEFAULT_OPEN_STATUSES = [1, 2, 3];
+const GITLAB_PAGES_MAX = 5;            // × 100 per list (issues, MRs assigned, MRs to review)
+const GITLAB_DEFAULT_HOST = 'gitlab.com';
 const REPOS_MAX = 200; // the settings dialog refuses more, so nothing checked is dropped silently
 
 const REPO_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
@@ -23,6 +25,8 @@ const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const SPACE_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})$/;
 const BACKLOG_DOMAINS = ['com', 'jp'];
 const SLACK_CHANNEL_RE = /^[CG][A-Z0-9]{2,20}$/;
+// A GitLab host name, with an optional port: gitlab.com or a self-managed instance. Always https.
+const GITLAB_HOST_RE = /^(?=.{1,253}(?::|$))[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?::[1-9]\d{0,4})?$/;
 
 // Only well-formed settings survive; anything else is dropped (= that provider is "not set").
 function normalizeGithub(raw) {
@@ -41,6 +45,35 @@ function normalizeBacklog(raw) {
   const projects = [...new Set((Array.isArray(raw.projects) ? raw.projects : []).filter((p) => Number.isSafeInteger(p) && p > 0))];
   if (projects.length > BACKLOG_PROJECTS_MAX) return null;
   return { tokenKey: raw.tokenKey, space, domain, projects };
+}
+
+// The host as typed or pasted (a URL's host is taken; case is dropped) → 'host[:port]', or null.
+// Empty = gitlab.com.
+function gitlabHost(raw) {
+  let s = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (!s) return GITLAB_DEFAULT_HOST;
+  s = s.replace(/^https:\/\//, '').replace(/\/.*$/, '');
+  if (!GITLAB_HOST_RE.test(s)) return null;
+  const port = s.includes(':') ? Number(s.split(':')[1]) : null;
+  if (port != null && port > 65535) return null;
+  return port === 443 ? s.split(':')[0] : s;
+}
+
+// GitLab (gitlab.com or a self-managed instance): the token's secret and the host.
+function normalizeGitlab(raw) {
+  if (!raw || typeof raw !== 'object' || !isValidKey(raw.tokenKey)) return null;
+  if (raw.host != null && typeof raw.host !== 'string') return null;
+  const host = gitlabHost(raw.host || '');
+  if (!host) return null;
+  return { tokenKey: raw.tokenKey, host };
+}
+
+// A token is about to be sent to a host other than gitlab.com (any host can be typed): whether
+// that pairing of secret and host is new, so main asks the user before saving it. The renderer
+// only names both — the question is main's own.
+function gitlabNeedsConfirm(prev, next) {
+  if (!next || next.host === GITLAB_DEFAULT_HOST) return false;
+  return !prev || prev.host !== next.host || prev.tokenKey !== next.tokenKey;
 }
 
 // Several Backlog spaces, each shown in its own panel (issue #134). Settings saved before that
@@ -70,25 +103,26 @@ function normalizeSlack(raw) {
 
 function normalizeConfig(raw) {
   const src = raw && typeof raw === 'object' ? raw : {};
-  return { github: normalizeGithub(src.github), backlog: normalizeBacklogList(src.backlog), slack: normalizeSlack(src.slack) };
+  return { github: normalizeGithub(src.github), gitlab: normalizeGitlab(src.gitlab), backlog: normalizeBacklogList(src.backlog), slack: normalizeSlack(src.slack) };
 }
 
 // A provider is shown only once it has everything needed to list tasks.
 function isConfigured(provider, cfg) {
   if (!cfg) return false;
   if (provider === 'github') return !!cfg.tokenKey && Array.isArray(cfg.repos) && cfg.repos.length > 0;
+  if (provider === 'gitlab') return !!cfg.tokenKey && !!cfg.host;
   if (provider === 'backlog') return !!cfg.tokenKey && !!cfg.space;
   if (provider === 'slack') return !!cfg.tokenKey;
   return false;
 }
 
 // The settings dialog's Save / Remove applied to a workspace's (normalized) settings →
-// { config } or { error }. GitHub and Slack have one entry each. Backlog has a list: `target` is
+// { config } or { error }. GitHub, GitLab and Slack have one entry each. Backlog has a list: `target` is
 // the panel id of the space being edited (null = a space being added); a `value` of null removes it.
 function applyConfigChange(config, provider, value, target = null) {
   const cur = normalizeConfig(config);
-  if (provider === 'github' || provider === 'slack') {
-    const next = provider === 'github' ? normalizeGithub(value) : normalizeSlack(value);
+  if (provider === 'github' || provider === 'gitlab' || provider === 'slack') {
+    const next = provider === 'github' ? normalizeGithub(value) : provider === 'gitlab' ? normalizeGitlab(value) : normalizeSlack(value);
     if (value != null && !next) return { error: 'invalid' };
     return { config: { ...cur, [provider]: next } };
   }
@@ -126,10 +160,11 @@ function httpErrorCode(provider, status, headers) {
   return `http-${status}`;
 }
 
-async function getJson(fetchImpl, provider, url, headers = {}) {
+// `extra`: more fetch options (GitLab: `redirect: 'error'`).
+async function getJson(fetchImpl, provider, url, headers = {}, extra = {}) {
   let res;
   try {
-    res = await fetchImpl(url, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    res = await fetchImpl(url, { headers, ...extra, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   } catch (err) {
     throw new TaskError(err && (err.name === 'TimeoutError' || err.name === 'AbortError') ? 'timeout' : 'network');
   }
@@ -306,6 +341,78 @@ async function fetchGithubRepos({ token, owner, login, fetchImpl = fetch }) {
   return [...new Set(repos)].sort((a, b) => a.localeCompare(b));
 }
 
+// --- GitLab ---
+
+function gitlabBase(host) {
+  const h = gitlabHost(typeof host === 'string' ? host : null);
+  if (!h || h !== host) throw new TaskError('bad-host');
+  return `https://${h}`;
+}
+
+// A redirect is an error: `PRIVATE-TOKEN` is a header of ours, which fetch would send on to
+// wherever the redirect points.
+function gitlabGet(fetchImpl, base, token, apiPath) {
+  return getJson(fetchImpl, 'gitlab', `${base}/api/v4${apiPath}`, { 'PRIVATE-TOKEN': token, 'User-Agent': 'wsl-workbench' }, { redirect: 'error' });
+}
+
+// An item's own page, as GitLab reports it: an http(s) address on one line, without credentials.
+function gitlabWebUrl(url) {
+  if (typeof url !== 'string' || /[\s\u0000-\u001f\u007f-\u009f]/.test(url)) return '';
+  let u;
+  try { u = new URL(url); } catch { return ''; }
+  return (u.protocol === 'https:' || u.protocol === 'http:') && !u.username && !u.password ? u.href : '';
+}
+
+function gitlabItem(raw, kind, role) {
+  const url = gitlabWebUrl(raw && raw.web_url);
+  if (!url) return null;
+  const full = raw.references && typeof raw.references.full === 'string' ? raw.references.full : '';
+  return {
+    id: url,
+    url,
+    ref: (full || `${kind === 'mr' ? '!' : '#'}${raw.iid}`).slice(0, 200),
+    title: String(raw.title || ''),
+    kind,
+    draft: kind === 'mr' && !!(raw.draft || raw.work_in_progress),
+    roles: [role],
+    updated: raw.updated_at || null
+  };
+}
+
+// One list (issues, or merge requests), newest update first, across pages → { items, truncated }.
+async function gitlabList(fetchImpl, base, token, apiPath, kind, role) {
+  const items = [];
+  for (let page = 1; page <= GITLAB_PAGES_MAX; page++) {
+    const data = await gitlabGet(fetchImpl, base, token, `${apiPath}&state=opened&order_by=updated_at&sort=desc&per_page=100&page=${page}`);
+    if (!Array.isArray(data)) throw new TaskError('bad-response');
+    for (const raw of data) { const item = gitlabItem(raw, kind, role); if (item) items.push(item); }
+    if (data.length < 100) return { items, truncated: false };
+  }
+  return { items, truncated: true }; // a full last page: there may be more
+}
+
+// → { items, truncated }: open issues and merge requests assigned to the user, and open merge
+// requests awaiting the user's review, across every project of the host the token can see.
+async function fetchGitlabTasks({ token, host, fetchImpl = fetch }) {
+  const base = gitlabBase(host);
+  const me = await gitlabGet(fetchImpl, base, token, '/user');
+  if (!me || !Number.isSafeInteger(me.id) || me.id <= 0) throw new TaskError('bad-response');
+  // One request at a time, as for the other providers.
+  const lists = [
+    await gitlabList(fetchImpl, base, token, '/issues?scope=assigned_to_me', 'issue', 'assignee'),
+    await gitlabList(fetchImpl, base, token, '/merge_requests?scope=assigned_to_me', 'mr', 'assignee'),
+    await gitlabList(fetchImpl, base, token, `/merge_requests?scope=all&reviewer_id=${me.id}`, 'mr', 'reviewer')
+  ];
+  // One entry per issue / merge request, with every role it matched.
+  const byUrl = new Map();
+  for (const item of lists.flatMap((l) => l.items)) {
+    const existing = byUrl.get(item.id);
+    if (existing) { if (!existing.roles.includes(item.roles[0])) existing.roles.push(item.roles[0]); continue; }
+    byUrl.set(item.id, item);
+  }
+  return { items: sortByUpdated([...byUrl.values()]), truncated: lists.some((l) => l.truncated) };
+}
+
 // --- Backlog ---
 
 function backlogBase(space, domain) {
@@ -420,6 +527,11 @@ module.exports = {
   TaskError,
   normalizeConfig,
   normalizeGithub,
+  normalizeGitlab,
+  gitlabNeedsConfirm,
+  gitlabHost,
+  fetchGitlabTasks,
+  GITLAB_PAGES_MAX,
   normalizeBacklog,
   normalizeBacklogList,
   normalizeSlack,

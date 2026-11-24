@@ -91,7 +91,12 @@ test('panelList gives one panel per Backlog space, between GitHub and Slack', ()
   assert.deepEqual(list.map((p) => p.title), ['GitHub', 'Backlog: Alpha', 'Backlog: beta', 'Slack']);
   assert.equal(list[1].cfg, cfg.backlog[0]);
   // Not set up enough to list anything: no panel.
-  assert.deepEqual(view.panelList({ github: { tokenKey: 'T', repos: [] }, backlog: [{ tokenKey: '', space: 'x' }], slack: {} }), []);
+  assert.deepEqual(view.panelList({ github: { tokenKey: 'T', repos: [] }, gitlab: { tokenKey: 'G' }, backlog: [{ tokenKey: '', space: 'x' }], slack: {} }), []);
+  // GitLab comes after GitHub; a self-managed host is named in the title.
+  const gl = view.panelList({ ...cfg, gitlab: { tokenKey: 'G', host: 'gitlab.com' } });
+  assert.deepEqual(gl.map((p) => p.id), ['github', 'gitlab', 'backlog:alpha.com', 'backlog:beta.jp', 'slack']);
+  assert.equal(gl[1].title, 'GitLab');
+  assert.equal(view.panelList({ gitlab: { tokenKey: 'G', host: 'gitlab.example.com' } })[0].title, 'GitLab: gitlab.example.com');
 });
 
 test('many panels never squeeze the editor below its minimum in a row with room for it', () => {
