@@ -136,7 +136,6 @@ function applyLanguage() {
   renderUnsupportedText();
   refreshEditorTabs(); // the read-only tooltip on force-opened tabs is localized
   refreshUpdateBtn(); // its tooltip is built manually (has a {version} slot), not via data-i18n
-  renderShareBadges();
   if (!secretsPanel.classList.contains('hidden')) renderSecrets();
 }
 
@@ -189,11 +188,6 @@ const PANE_MIN_WIDTH = 120; // keep in step with .term-pane { min-width } in sty
 const DIVIDER_WIDTH = 3;    // keep in step with .term-divider { flex-basis } in style.css
 const TERMINAL_SCROLLBACK = 10000; // lines kept per terminal pane (xterm default is 1000)
 const splitTerminalBtn = document.getElementById('splitTerminalBtn');
-// Declared up here (not with the rest of the dots-integration code below) because pane focus
-// changes call renderShareBadges() as soon as the first terminal exists.
-const shareTerminalBtn = document.getElementById('shareTerminalBtn');
-const termShareBadge = document.getElementById('termShareBadge');
-let paneShareState = new Map(); // pane id -> { state, shared, input, capture, ... } (pushed by main)
 
 function splitAvailabilityFor(group) {
   if (!group) return 'limit';
@@ -234,7 +228,6 @@ function activateTerminal(groupId) {
     g.tab.classList.toggle('active', on);
   }
   updateSplitButton();
-  renderShareBadges();
   setTimeout(() => {
     fitGroupPanes(group);
     const focus = terminals.get(group.activePaneId);
@@ -280,7 +273,6 @@ function setActivePane(group, paneId) {
   group.activePaneId = paneId;
   refreshPaneChrome(group);
   refreshTabSegmentFocus(group);
-  renderShareBadges(); // the tab-strip badge follows the focused pane
 }
 
 // Every PANE has its own name (Cursor-style): custom when set, else localized "Terminal <pane id>".
@@ -332,7 +324,6 @@ function renderTermTab(group) {
     });
     label.appendChild(el);
   });
-  renderShareBadges(); // rebuilt segments lose their sharing marks
 }
 
 // Double-click a tab segment to rename that pane (empty input restores the default name).
@@ -719,7 +710,6 @@ function disposeAllTerminals() {
   terminals.clear();
   termGroups.clear();
   activeGroupId = null;
-  renderShareBadges();
 }
 
 window.api.onTerminalData(({ id, data }) => {
@@ -744,69 +734,6 @@ document.getElementById('newTerminalBtn').addEventListener('click', () => {
   createTerminal({ cwd: (from && from.cwd) || '' });
 });
 document.getElementById('splitTerminalBtn').addEventListener('click', () => splitActiveTerminal());
-
-// --- dots integration: the main process owns sharing (grants, confirmation dialogs, expiry). The
-// renderer only opens main's per-pane menu for the focused pane and mirrors the state it pushes. ---
-
-// One badge at the right end of the terminal tab strip, always naming the focused pane's two
-// switches: "共有OFF" / "読取ON・入力OFF" / "読取ON・入力ON" (plus capture paused / AI input paused /
-// confirm pending). It used to overlay each pane's top-right corner and hid terminal text. Shared
-// panes that aren't focused keep a coloured mark on their tab segment instead.
-function renderShareBadges() {
-  for (const group of termGroups.values()) {
-    const label = group.tab && group.tab.querySelector('.term-tab-label');
-    if (!label) continue;
-    for (const el of label.querySelectorAll('.term-tab-seg')) {
-      const mark = window.terminalActions.shareSegmentMark(paneShareState.get(Number(el.dataset.paneId)));
-      el.classList.toggle('share-read', mark === 'read');
-      el.classList.toggle('share-input', mark === 'input');
-      el.classList.toggle('share-auto', mark === 'auto');
-    }
-  }
-  const entry = activeTerminal();
-  const model = entry ? window.terminalActions.shareBadgeModel(paneShareState.get(entry.id)) : null;
-  termShareBadge.hidden = !model;
-  termShareBadge.textContent = '';
-  if (model) {
-    for (const cls of ['off', 'paused', 'input', 'pending', 'auto']) termShareBadge.classList.toggle(cls, model[cls]);
-    const text = document.createElement('span');
-    text.className = 'term-share-text';
-    text.textContent = model.parts.map((p) => t(p.key).replace('{v}', p.v == null ? '' : p.v)).join(' · ');
-    termShareBadge.title = text.textContent;
-    termShareBadge.appendChild(text);
-    if (model.auto) {
-      // Sends run without Workbench's confirmation: one click turns input OFF for this pane.
-      const stop = document.createElement('button');
-      stop.type = 'button';
-      stop.className = 'term-share-stop';
-      stop.textContent = t('integration.badgeStopInput');
-      const id = entry.id;
-      stop.addEventListener('click', (event) => { event.stopPropagation(); window.api.integrationStopInput({ id }); });
-      termShareBadge.appendChild(stop);
-    }
-  }
-  updateShareButton();
-}
-
-function updateShareButton() {
-  const entry = activeTerminal();
-  const st = entry && paneShareState.get(entry.id);
-  shareTerminalBtn.classList.toggle('shared', !!(st && st.shared));
-}
-
-function applyPaneShareState(panes) {
-  paneShareState = new Map((Array.isArray(panes) ? panes : []).map((p) => [p.id, p]));
-  renderShareBadges();
-}
-
-shareTerminalBtn.addEventListener('click', () => {
-  const entry = activeTerminal();
-  if (!entry) return;
-  const rect = shareTerminalBtn.getBoundingClientRect();
-  window.api.integrationPaneMenu({ id: entry.id, label: entry.name || '', x: rect.left, y: rect.bottom });
-});
-window.api.onIntegrationPaneState(applyPaneShareState);
-window.api.integrationPaneState().then(applyPaneShareState).catch(() => {});
 
 // Paths of the tree items currently being dragged within the app (the whole multi-selection when
 // the dragged row is part of it). This is the authoritative internal-origin signal: it is only set

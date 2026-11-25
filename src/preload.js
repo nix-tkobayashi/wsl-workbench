@@ -47,11 +47,6 @@ contextBridge.exposeInMainWorld('api', {
   onTerminalData: (cb) => ipcRenderer.on('terminal:data', (_event, payload) => cb(payload)),
   onTerminalRemote: (cb) => ipcRenderer.on('terminal:remote', (_event, payload) => cb(payload || {})),
   onTerminalExit: (cb) => ipcRenderer.on('terminal:exit', (_event, payload) => cb(payload && payload.id)),
-  // dots integration: per-pane sharing menu (main decides and confirms) and the badges' state.
-  integrationPaneMenu: (payload) => ipcRenderer.send('integration:paneMenu', payload),
-  integrationPaneState: () => ipcRenderer.invoke('integration:paneState'),
-  integrationStopInput: (payload) => ipcRenderer.send('integration:stopInput', payload),
-  onIntegrationPaneState: (cb) => ipcRenderer.on('integration:paneState', (_event, panes) => cb(panes)),
   // Workspace secrets: only key names cross from here; main resolves the workspace from the sender
   // (`workspace`, when given, is the one the action started in — main refuses it after a switch).
   secretsList: () => ipcRenderer.invoke('secrets:list'),
