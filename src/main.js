@@ -39,8 +39,6 @@ const { workspaceLabel } = require('./recent-filter');
 const { remoteHostOf, isRemoteDistro, remoteDistro, parseRemoteSpec, agentSshArgs, RemoteAgentPool } = require('./remote-workspace');
 const remoteFs = require('./remote-fs');
 const { tabTitleForWorkspace, classifyTabDrop, nextActiveTab, shellWindowTitle } = require('./tab-shell');
-const { IntegrationController } = require('./integration');
-const { TunnelRunner } = require('./integration/tunnel-runner');
 
 // --- Tabbed windows: every BrowserWindow is a thin shell (its own webContents renders only the
 // tab strip + window controls), and each open workspace is a WebContentsView child. A view keeps
@@ -54,10 +52,6 @@ const viewState = new Map();   // view webContents id -> { view, workspace, term
 // for it when a tab drop lands where two windows' strips overlap (classifyTabDrop picks the first
 // hit, which must be the front-most strip).
 const windowFocusOrder = [];
-// dots integration (src/integration): created at app ready; null until then. Off unless the user
-// turned it on; terminals behave exactly as before while it is off.
-let integration = null;
-let tunnel = null; // tunnel-client runner (Secure MCP Tunnel); runs only while the integration is on
 
 // --- Language / settings persistence ---
 let currentLang = 'en';
@@ -431,9 +425,6 @@ function createWorkspaceView(initialWorkspace = defaultWorkspace(), { showLandin
     winId: null
   });
   hardenWebContents(wc);
-  // dots integration: a reload drops the renderer's panes (and the user's view of what is shared),
-  // so every grant of this view ends. The first load has none, so this is a no-op then.
-  wc.on('did-start-loading', () => { if (integration) integration.viewReset(wc.id); });
   // Views created after the startup update check completed still get the notification (the
   // pre-load webContents.send from checkForUpdatesInBackground is lost if the page isn't ready).
   wc.on('did-finish-load', () => {
@@ -449,7 +440,6 @@ function destroyView(id) {
   for (const ptyProc of state.terminals.values()) {
     try { ptyProc.kill(); } catch {}
   }
-  if (integration) integration.viewGone(id);
   viewState.delete(id);
   try { state.view.webContents.close(); } catch {}
 }
@@ -1043,10 +1033,6 @@ function buildAppMenu() {
       ]
     },
     {
-      label: tr('menu.integration'),
-      submenu: integrationMenuItems()
-    },
-    {
       label: tr('menu.help'),
       submenu: [
         {
@@ -1086,7 +1072,6 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     initLanguage();
-    initIntegration();
     localSecretsReady = restoreLocalSecretCopies();
     checkForUpdatesInBackground('startup'); // fire-and-forget; windows are notified when a newer release exists
     const periodic = setInterval(() => checkForUpdatesInBackground('periodic'), updateSchedule.PERIOD_MS);
@@ -1363,8 +1348,7 @@ ipcMain.on('window:close', (event) => {
 
 // Pop a top-level application menu's submenu at a screen position, so the in-app toolbar buttons
 // can show the real menus (the native menu bar itself is hidden via autoHideMenuBar). index maps
-// to the application menu's top-level order: 0 Workspace, 1 Edit, 2 View, 3 Language,
-// 4 Integration, 5 Help.
+// to the application menu's top-level order: 0 Workspace, 1 Edit, 2 View, 3 Language, 4 Help.
 // A workspace view's coordinates are view-relative, so its strip-height offset is added back.
 ipcMain.on('menu:popup', (event, { index, x, y } = {}) => {
   const win = windowForSender(event.sender);
@@ -1789,17 +1773,12 @@ ipcMain.on('terminal:start', async (event, { id, distro, wslPath, command = '', 
     env: process.env
   });
   state.terminals.set(id, ptyProc);
-  // dots integration ledger: a new pty in this slot is a new generation (ends any grant on it).
-  if (integration) integration.ptyStarted(wc.id, id, { distro: workspace.distro, wslPath: workspace.wslPath, initialCwd: cd ? cwd : workspace.wslPath });
   ptyProc.onData((data) => {
     if (state.terminals.get(id) !== ptyProc) return; // ignore output from a superseded pty
-    // A copy goes to the integration first; it only stores anything while the pane is shared.
-    if (integration) integration.ptyData(wc.id, id, data);
     if (!wc.isDestroyed()) wc.send('terminal:data', { id, data });
   });
   ptyProc.onExit(() => {
     if (state.terminals.get(id) !== ptyProc) return; // superseded by a newer pty for this id; ignore its late exit
-    if (integration) integration.ptyExited(wc.id, id);
     state.terminals.delete(id);
     if (!wc.isDestroyed()) {
       wc.send('terminal:data', { id, data: `\r\n\x1b[90m${tr('terminal.exited')}\x1b[0m\r\n` });
@@ -1812,9 +1791,6 @@ ipcMain.on('terminal:write', (event, { id, data }) => {
   const state = viewState.get(event.sender.id);
   const ptyProc = state && state.terminals.get(id);
   if (ptyProc) {
-    // Human input is registered BEFORE it reaches the pty, so a pending AI input operation on this
-    // pane stops first (the human always wins) and state_revision moves.
-    if (integration) integration.userInput(event.sender.id, id, data);
     ptyProc.write(data);
   }
 });
@@ -1837,7 +1813,6 @@ ipcMain.on('terminal:close', (event, { id }) => {
     try { ptyProc.kill(); } catch {}
   }
   state.terminals.delete(id);
-  if (integration) integration.ptyClosed(event.sender.id, id);
 });
 
 // --- Workspace secrets (src/secrets.js): stored encrypted under userData, handed to the terminal
@@ -2480,157 +2455,6 @@ function restoreLocalSecretCopies() {
   return Promise.allSettled(jobs);
 }
 
-// --- dots integration (stage A, read-only). Everything that grants access happens here, from an
-// explicit user action with a confirmation dialog; nothing a tool call or terminal output says can
-// share a pane, extend a grant, or turn the integration on. ---
-
-function initIntegration() {
-  tunnel = createTunnelRunner();
-  integration = new IntegrationController({
-    userDataDir: app.getPath('userData'),
-    appVersion: app.getVersion(),
-    readSettings,
-    writeSettings,
-    notifyView: (viewId, panes) => {
-      const state = viewState.get(viewId);
-      if (state && !state.view.webContents.isDestroyed()) state.view.webContents.send('integration:paneState', panes);
-    },
-    // Stage B: the arbiter's only way into a pty. Returns false when the pane's pty is gone.
-    writePty: (viewId, termId, data) => {
-      const state = viewState.get(viewId);
-      const ptyProc = state && state.terminals.get(termId);
-      if (!ptyProc) return false;
-      ptyProc.write(data);
-      return true;
-    },
-    requestConfirmation: (req) => { showInputConfirmation(req); },
-    cancelConfirmation: (opId) => {
-      const pending = inputConfirmations.get(opId);
-      if (pending) { inputConfirmations.delete(opId); pending.abort(); }
-    },
-    journalKey: loadJournalKey,
-    tunnel
-  });
-  integration.start().then(() => buildAppMenu()).catch(() => {});
-}
-
-// tunnel-client next to Workbench. Settings (paths, auto start) live under settings.integration.tunnel;
-// the runtime key only in integration/tunnel.key.enc (DPAPI) — see tunnel-runner.js.
-function createTunnelRunner() {
-  const pairing = require('./integration/pairing');
-  const dir = pairing.integrationDir(app.getPath('userData'));
-  const readTunnelSettings = () => {
-    const i = readSettings().integration;
-    return i && typeof i === 'object' && i.tunnel && typeof i.tunnel === 'object' ? i.tunnel : {};
-  };
-  return new TunnelRunner({
-    dir,
-    readConfig: readTunnelSettings,
-    writeConfig: (next) => {
-      const i = readSettings().integration;
-      writeSettings({ integration: { ...(i && typeof i === 'object' ? i : {}), tunnel: next } });
-    },
-    keyStore: {
-      available: () => safeStorage.isEncryptionAvailable(),
-      encrypt: (text) => safeStorage.encryptString(text),
-      decrypt: (buf) => safeStorage.decryptString(buf)
-    },
-    restrictAcl: async (file) => {
-      if (process.platform === 'win32') await pairing.restrictWindowsAcl(file, await pairing.currentUserSid());
-      else fs.chmodSync(file, 0o600);
-    },
-    audit: { record: (e) => { if (integration) integration.audit.record(e); } },
-    onChange: () => { if (!appQuitting) buildAppMenu(); },
-    canRun: () => !!(integration && integration.enabled)
-  });
-}
-
-// HMAC key of the operation journal, protected by the OS (DPAPI via Electron safeStorage). Without
-// OS protection the journal stays unavailable and input cannot be used.
-function loadJournalKey() {
-  if (!safeStorage.isEncryptionAvailable()) return null;
-  const file = path.join(integration.dir, 'journal.key.enc');
-  try {
-    return Buffer.from(safeStorage.decryptString(fs.readFileSync(file)), 'hex');
-  } catch (error) {
-    if (error.code !== 'ENOENT') return null; // unreadable / other user / corrupted: never replace silently
-  }
-  const key = require('crypto').randomBytes(32);
-  fs.mkdirSync(integration.dir, { recursive: true });
-  fs.writeFileSync(file, safeStorage.encryptString(key.toString('hex')), { mode: 0o600, flag: 'wx' });
-  return key;
-}
-
-// --- Stage B local confirmation: one dialog per step, bound to the operation; closes itself when
-// the operation stops (takeover, revoke, 60 s expiry). The answer is one-shot. ---
-const inputConfirmations = new Map(); // op id -> AbortController
-
-// A modal window that shows the WHOLE text (scrollable, invisible characters marked) — a native
-// message box would have to truncate it. Resolves true only on an explicit click of the OK button.
-function showConfirmWindow(parent, page, signal) {
-  const { buildConfirmHtml, APPROVE, CANCEL } = require('./integration/confirm-page');
-  return new Promise((resolve) => {
-    const w = new BrowserWindow({
-      parent, modal: true, show: false, width: 680, height: 540, minWidth: 420, minHeight: 300,
-      minimizable: false, maximizable: false, autoHideMenuBar: true, title: page.title, backgroundColor: '#1e1e1e',
-      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false }
-    });
-    let done = false;
-    const finish = (value) => {
-      if (done) return;
-      done = true;
-      resolve(value);
-      if (!w.isDestroyed()) w.destroy();
-    };
-    w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    w.webContents.on('will-navigate', (event) => event.preventDefault());
-    w.webContents.on('page-title-updated', (event, title) => {
-      event.preventDefault();
-      if (title === APPROVE) finish(true);
-      else if (title === CANCEL) finish(false);
-    });
-    w.on('closed', () => finish(false));
-    if (signal) signal.addEventListener('abort', () => finish(false), { once: true });
-    w.once('ready-to-show', () => { if (!done) w.show(); });
-    w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildConfirmHtml({ lang: currentLang, ...page }))}`);
-  });
-}
-
-async function showInputConfirmation(req) {
-  const state = viewState.get(req.viewId);
-  const win = state && state.winId != null ? BrowserWindow.fromId(state.winId) : null;
-  if (!win || win.isDestroyed()) { integration.confirmOperation(req.opId, req.stage, 'declined'); return; }
-  activateTab(win, req.viewId); // the pane the input goes to must be the one on screen
-  const session = integration.registry.sessions.get(req.sessionId);
-  const label = session ? integration.registry.displayLabel(session) : '-';
-  const seconds = Math.max(1, Math.round((req.deadline - Date.now()) / 1000));
-  const action = req.kind === 'key' ? tr('integration.confirmActionKey').replace('{key}', req.key)
-    : req.submit ? tr('integration.confirmActionTextEnter') : tr('integration.confirmActionText');
-  const details = [
-    [tr('integration.confirmTerminal'), label],
-    [tr('integration.confirmSession'), `${req.sessionId.slice(0, 8)}… (gen ${req.generation})`],
-    [tr('integration.confirmProfile'), `${req.profile.cli_name} ${req.profile.cli_version} (${req.profile.id})`],
-    [tr('integration.confirmAction'), action]
-  ];
-  if (req.text != null) details.push([tr('integration.confirmSize'), `${req.lines} ${tr('integration.confirmLines')}, ${req.bytes} bytes`]);
-  const controller = new AbortController();
-  inputConfirmations.set(req.opId, controller);
-  const approved = await showConfirmWindow(win, {
-    title: tr('integration.confirmTitle'),
-    heading: req.stage === 'submit' ? tr('integration.confirmSubmitMessage') : tr('integration.confirmMessage'),
-    details,
-    text: req.text,
-    markedNote: tr('integration.confirmMarked'),
-    note: `${req.stage === 'submit' ? tr('integration.confirmCheckSubmit') : tr('integration.confirmCheckPrompt')} ${tr('integration.confirmExpires').replace('{s}', String(seconds))}`,
-    okLabel: req.stage === 'submit' ? tr('integration.confirmSendEnter') : tr('integration.confirmType'),
-    cancelLabel: tr('integration.cancel')
-  }, controller.signal);
-  const ours = inputConfirmations.get(req.opId) === controller;
-  inputConfirmations.delete(req.opId);
-  if (!ours || controller.signal.aborted) return; // closed because the operation already stopped
-  integration.confirmOperation(req.opId, req.stage, approved ? 'approved' : 'declined');
-}
-
 let appQuitting = false;
 let remoteSecretsCleaned = false;
 app.on('will-quit', (event) => {
@@ -2655,543 +2479,4 @@ app.on('will-quit', (event) => {
   appQuitting = true;
   remoteAgents.disposeAll();
   removeAllSecretCopies();
-  if (integration) integration.shutdown();
-  else if (tunnel) tunnel.stop('app_exit');
 });
-
-// What an MCP client must run to reach this Workbench: the app's own executable in Node mode and
-// the adapter script shipped inside the app (works for both `npm start` and the installed build).
-function adapterLaunchSpec() {
-  return {
-    command: process.execPath,
-    args: [path.join(__dirname, 'mcp', 'adapter.js')],
-    env: { ELECTRON_RUN_AS_NODE: '1', WSLWB_INTEGRATION_DIR: integration ? integration.dir : '' }
-  };
-}
-
-function formatTime(ms) {
-  if (!ms) return tr('integration.never');
-  return new Date(ms).toLocaleString(currentLang === 'ja' ? 'ja-JP' : 'en-US');
-}
-
-function focusedWindow() { return BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || null; }
-
-async function confirmEnableIntegration(win) {
-  const opts = {
-    type: 'warning',
-    title: tr('integration.enableTitle'),
-    message: tr('integration.enableMessage'),
-    detail: tr('integration.enableDetail'),
-    buttons: [tr('integration.enableConfirm'), tr('integration.cancel')],
-    defaultId: 1,
-    cancelId: 1,
-    noLink: true
-  };
-  const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
-  if (response !== 0) return false;
-  try {
-    await integration.enable();
-  } catch (error) {
-    dialog.showErrorBox(tr('integration.enableFailed'), error.message || String(error));
-    return false;
-  } finally {
-    buildAppMenu();
-  }
-  return true;
-}
-
-async function showIntegrationStatus(win) {
-  if (!integration) return;
-  const st = integration.status();
-  const spec = adapterLaunchSpec();
-  const lines = [
-    `${tr('integration.statusState')}: ${st.enabled ? tr('integration.on') : tr('integration.off')}`,
-    `${tr('integration.statusConnections')}: ${st.connections}`,
-    `${tr('integration.statusLastConnected')}: ${formatTime(st.lastConnectedAt)}`,
-    `${tr('integration.statusLastCall')}: ${formatTime(st.lastCallAt)}`,
-    `${tr('integration.statusLastAuthFailure')}: ${formatTime(st.lastAuthFailureAt)}`,
-    `${tr('integration.statusGrants')}: ${st.activeGrants}`,
-    `${tr('integration.statusTools')}: workbench_capabilities, workbench_list_sessions, workbench_get_session, workbench_read_output`,
-    `${tr('integration.statusTransport')}: ${st.transportGate === 'reviewed' ? tr('integration.transportVerified') : tr('integration.transportBlocked')}${st.transportNote ? ` — ${st.transportNote}` : ''}`,
-    `${tr('integration.statusInput')}: ${st.inputGateOpen ? tr('integration.on') : tr('integration.off')} (${tr('integration.statusInputSetting')}: ${st.inputEnabled ? tr('integration.on') : tr('integration.off')}, journal: ${st.journalHealthy ? 'ok' : (st.journalError || 'unavailable')})`,
-    `${tr('integration.statusPrincipal')}: ${st.principal || '-'}`,
-    `${tr('integration.statusEndpoint')}: ${st.endpoint || '-'}`,
-    '',
-    tr('integration.statusAdapter'),
-    `  command: ${spec.command}`,
-    `  args: ${spec.args.join(' ')}`,
-    `  env: ELECTRON_RUN_AS_NODE=1, WSLWB_INTEGRATION_DIR=${spec.env.WSLWB_INTEGRATION_DIR}`,
-    ...tunnelStatusLines()
-  ];
-  if (st.operations.length) {
-    lines.push('', tr('integration.statusOperations'));
-    for (const op of st.operations) {
-      lines.push(`  ${formatTime(op.acceptedAt)}  ${op.id.slice(0, 8)}  ${op.kind}${op.submit ? '+Enter' : ''}  ${op.status}/${op.phase}${op.code ? ` (${op.code})` : ''}`);
-    }
-  }
-  if (st.lastError) lines.push('', `${tr('integration.statusError')}: ${st.lastError}`);
-  const opts = {
-    type: 'info',
-    title: tr('integration.statusTitle'),
-    message: tr('integration.statusTitle'),
-    detail: lines.join('\n'),
-    buttons: [tr('integration.copyAdapterConfig'), tr('integration.close')],
-    defaultId: 1,
-    cancelId: 1,
-    noLink: true
-  };
-  const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
-  if (response === 0) {
-    // Not a secret: the adapter reads the pairing key from the protected file itself.
-    clipboard.writeText(JSON.stringify({ mcpServers: { 'wsl-workbench': spec } }, null, 2));
-  }
-}
-
-function integrationMenuItems() {
-  const enabled = !!(integration && integration.enabled);
-  return [
-    {
-      label: tr('integration.menuEnable'),
-      type: 'checkbox',
-      checked: enabled,
-      enabled: !!integration,
-      click: async () => {
-        const win = focusedWindow();
-        if (integration.enabled) {
-          const { tunnelStopped } = await integration.disable();
-          buildAppMenu();
-          if (!tunnelStopped) dialog.showErrorBox(tr('tunnel.menu'), tunnel.status().lastError || '');
-        } else { await confirmEnableIntegration(win); }
-      }
-    },
-    { label: tr('integration.menuStatus'), enabled: !!integration, click: () => showIntegrationStatus(focusedWindow()) },
-    { label: tr('integration.menuSharePreset'), enabled: !!integration, click: () => chooseSharePreset(focusedWindow()) },
-    { type: 'separator' },
-    {
-      label: tr('integration.menuInput'),
-      type: 'checkbox',
-      checked: !!(integration && integration.inputEnabled),
-      // Only offered when the user-restricted pipe is up and verified (transport gate).
-      enabled: enabled && integration.transportGate === 'reviewed',
-      click: async () => {
-        const win = focusedWindow();
-        if (integration.inputEnabled) { await integration.setInputEnabled(false); buildAppMenu(); return; }
-        const opts = { type: 'warning', title: tr('integration.menuInput'), message: tr('integration.inputEnableMessage'), detail: tr('integration.inputEnableDetail'), buttons: [tr('integration.enableConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
-        const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
-        if (response === 0) {
-          try { await integration.setInputEnabled(true); } catch (error) { dialog.showErrorBox(tr('integration.menuInput'), error.message || String(error)); }
-        }
-        buildAppMenu();
-      }
-    },
-    { type: 'separator' },
-    { label: tr('tunnel.menu'), enabled: !!tunnel, submenu: tunnel ? tunnelMenuItems(enabled) : [] },
-    { type: 'separator' },
-    { label: tr('integration.menuRevokeAll'), enabled, click: () => integration.revokeAll() },
-    {
-      label: tr('integration.menuResetPairing'),
-      enabled: !!integration,
-      click: async () => {
-        const win = focusedWindow();
-        const opts = { type: 'warning', title: tr('integration.menuResetPairing'), message: tr('integration.resetMessage'), buttons: [tr('integration.resetConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
-        const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
-        if (response !== 0) return;
-        try { await integration.resetPairing(); } catch (error) { dialog.showErrorBox(tr('integration.enableFailed'), error.message || String(error)); }
-        buildAppMenu();
-      }
-    }
-  ];
-}
-
-function tunnelMenuItems(integrationOn) {
-  const st = tunnel.status();
-  const ready = !!(st.exePath && st.profileFile && st.hasKey);
-  const showError = (error) => dialog.showErrorBox(tr('tunnel.menu'), error.message || String(error));
-  const startNow = () => { if (!tunnel.start('user')) showError(new Error(tunnel.status().lastError || '')); };
-  return [
-    {
-      label: tr('tunnel.menuAutoStart'),
-      type: 'checkbox',
-      checked: st.autoStart,
-      enabled: st.autoStart || ready,
-      click: () => {
-        const on = !st.autoStart;
-        tunnel.setConfig({ autoStart: on });
-        if (on && integrationOn && !tunnel.running) startNow();
-      }
-    },
-    tunnel.running
-      ? { label: tr('tunnel.menuStop'), click: () => { if (!tunnel.stop('user')) showError(new Error(tunnel.status().lastError || '')); } }
-      : { label: tr('tunnel.menuStart'), enabled: integrationOn && ready, click: startNow },
-    { type: 'separator' },
-    {
-      label: st.hasKey ? tr('tunnel.menuReplaceKey') : tr('tunnel.menuSetKey'),
-      enabled: st.encryptionAvailable,
-      click: async () => {
-        const value = await showKeyInputWindow(focusedWindow());
-        if (value == null) return;
-        try { await tunnel.setKey(value); } catch (error) { showError(error); }
-      }
-    },
-    {
-      label: tr('tunnel.menuDeleteKey'),
-      enabled: st.hasKey,
-      click: async () => {
-        const win = focusedWindow();
-        const opts = { type: 'warning', title: tr('tunnel.menuDeleteKey'), message: tr('tunnel.deleteKeyMessage'), buttons: [tr('tunnel.deleteKeyConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
-        const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
-        if (response !== 0) return;
-        try { tunnel.deleteKey(); } catch (error) { showError(error); }
-      }
-    },
-    { type: 'separator' },
-    {
-      label: tr('tunnel.menuChooseExe'),
-      click: async () => {
-        const win = focusedWindow();
-        const result = await dialog.showOpenDialog(win, {
-          title: tr('tunnel.menuChooseExe'),
-          defaultPath: st.exePath || path.join(os.homedir(), 'wswb-mcp', 'tunnel-client.exe'),
-          filters: [{ name: 'tunnel-client', extensions: ['exe'] }],
-          properties: ['openFile']
-        });
-        if (!result.canceled && result.filePaths[0]) tunnel.setConfig({ exePath: result.filePaths[0] });
-      }
-    },
-    {
-      label: tr('tunnel.menuChooseProfile'),
-      click: async () => {
-        const win = focusedWindow();
-        const result = await dialog.showOpenDialog(win, {
-          title: tr('tunnel.menuChooseProfile'),
-          defaultPath: st.profileFile || path.join(app.getPath('appData'), 'tunnel-client', 'wsl-workbench.yaml'),
-          filters: [{ name: 'YAML', extensions: ['yaml', 'yml'] }],
-          properties: ['openFile']
-        });
-        if (!result.canceled && result.filePaths[0]) tunnel.setConfig({ profileFile: result.filePaths[0] });
-      }
-    },
-    { type: 'separator' },
-    { label: tr('tunnel.menuOpenLog'), enabled: fs.existsSync(st.logPath), click: () => shell.openPath(st.logPath) }
-  ];
-}
-
-// Ask for the tunnel-client runtime key in a small sandboxed window. The value comes back over a
-// one-shot IPC message accepted only from that window; resolves null when cancelled or closed.
-function showKeyInputWindow(parent) {
-  const { buildKeyInputHtml } = require('./integration/key-input-page');
-  return new Promise((resolve) => {
-    const w = new BrowserWindow({
-      parent: parent || undefined, modal: !!parent, show: false, width: 520, height: 260, resizable: false,
-      minimizable: false, maximizable: false, autoHideMenuBar: true, title: tr('tunnel.keyTitle'), backgroundColor: '#1e1e1e',
-      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'integration', 'key-input-preload.js') }
-    });
-    const wcId = w.webContents.id;
-    let done = false;
-    const finish = (value) => {
-      if (done) return;
-      done = true;
-      ipcMain.removeListener('tunnel-key:submit', onSubmit);
-      ipcMain.removeListener('tunnel-key:cancel', onCancel);
-      resolve(value);
-      if (!w.isDestroyed()) w.destroy();
-    };
-    const onSubmit = (event, value) => { if (event.sender.id === wcId) finish(typeof value === 'string' ? value : null); };
-    const onCancel = (event) => { if (event.sender.id === wcId) finish(null); };
-    ipcMain.on('tunnel-key:submit', onSubmit);
-    ipcMain.on('tunnel-key:cancel', onCancel);
-    w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    w.webContents.on('will-navigate', (event) => event.preventDefault());
-    w.on('closed', () => finish(null));
-    w.once('ready-to-show', () => { if (!done) w.show(); });
-    w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildKeyInputHtml({
-      lang: currentLang,
-      title: tr('tunnel.keyTitle'),
-      heading: tr('tunnel.keyHeading'),
-      note: tr('tunnel.keyNote'),
-      placeholder: 'sk-...',
-      okLabel: tr('tunnel.keySave'),
-      cancelLabel: tr('integration.cancel')
-    }))}`);
-  });
-}
-
-function tunnelStatusLines() {
-  if (!tunnel) return [];
-  const st = tunnel.status();
-  const state = st.state === 'running' ? `${tr('tunnel.stateRunning')} (pid ${st.pid}, ${formatTime(st.startedAt)})` : tr(`tunnel.state_${st.state}`);
-  const lines = [
-    '',
-    `${tr('tunnel.menu')}: ${state}`,
-    `  ${tr('tunnel.statusAutoStart')}: ${st.autoStart ? tr('integration.on') : tr('integration.off')}`,
-    `  ${tr('tunnel.statusKey')}: ${st.hasKey ? tr('tunnel.keyStored') : tr('tunnel.keyMissing')}${st.encryptionAvailable ? '' : ` (${tr('tunnel.noEncryption')})`}`,
-    `  exe: ${st.exePath || '-'}`,
-    `  profile: ${st.profileFile || '-'}`,
-    `  log: ${st.logPath}`
-  ];
-  if (st.lastExit && st.state !== 'running' && st.state !== 'starting') lines.push(`  ${tr('tunnel.statusLastExit')}: ${formatTime(st.lastExit.at)} (code ${st.lastExit.code == null ? st.lastExit.signal : st.lastExit.code})`);
-  if (st.lastError) lines.push(`  ${tr('integration.statusError')}: ${st.lastError}`);
-  return lines;
-}
-
-// Ask before turning read sharing ON: who receives it, which pane (label + stable id), what is
-// sent, and that it has NO time limit (on until turned off, the pane ends, the integration is
-// turned off, or the app exits; never restored after a restart).
-async function confirmShare(win, viewId, termId, label) {
-  const session = integration.sessionFor(viewId, termId);
-  if (!session) return;
-  // Snapshot the incarnation the user is shown: the session object is mutated in place on restart.
-  const approvedId = session.sessionId;
-  const approvedGeneration = session.generation;
-  const detail = tr('integration.shareDetail')
-    .replace('{principal}', integration.principal || '-')
-    .replace('{label}', integration.registry.displayLabel({ ...session, label: String(label || '').slice(0, 80) || session.label }))
-    .replace('{session}', `${session.sessionId} (gen ${session.generation})`);
-  const opts = {
-    type: 'warning',
-    title: tr('integration.shareTitle'),
-    message: tr('integration.shareMessage'),
-    detail,
-    buttons: [tr('integration.shareConfirm'), tr('integration.cancel')],
-    defaultId: 1,
-    cancelId: 1,
-    noLink: true
-  };
-  const { response } = await dialog.showMessageBox(win, opts);
-  if (response !== 0) return;
-  // The pane may have been restarted while the dialog was open: share only the same incarnation.
-  const now = integration.sessionFor(viewId, termId);
-  if (!now || now.sessionId !== approvedId || now.generation !== approvedGeneration) return;
-  try { integration.share(viewId, termId, { label }); } catch (error) {
-    dialog.showErrorBox(tr('integration.shareTitle'), error.message || String(error));
-  }
-}
-
-function cliName(family) { return family === 'claude-code' ? 'Claude Code' : family === 'codex' ? 'Codex' : family; }
-
-// "Claude Code 2.1.289（ペインの起動表示）— 未検証・互換方針 2.x で許可" etc.
-function cliLine(pane) {
-  if (!pane.cli) return `${tr('integration.cliUnknown')} — ${tr('integration.cliStatus_unknown')}`;
-  const version = pane.cli.version || tr('integration.cliVersionUnknown');
-  const status = pane.cliStatus === 'compat_approved' && pane.cliBasis === 'policy'
-    ? tr('integration.cliStatus_compat_policy').replace('{line}', pane.cliLine)
-    : tr(`integration.cliStatus_${pane.cliStatus}`);
-  return `${cliName(pane.cli.family)} ${version}（${tr(`integration.cliSource_${pane.cli.source}`)}） — ${status}`;
-}
-
-// Allow compatible behaviour for a whole compatibility line (major; 0.x: minor) of the CLI in this
-// pane — risk explained here once. Turns nothing on by itself (only an already-shared pane with the
-// saved default gets that default).
-async function confirmApproveCompat(win, viewId, termId) {
-  const pane = integration.paneState(viewId).find((p) => p.id === termId);
-  if (!pane || !pane.cli || !pane.cliLine || !['compat_pending', 'major_changed'].includes(pane.cliStatus)) return;
-  const { findProfile } = require('./integration/input-profiles');
-  const profile = findProfile(pane.profileId);
-  const major = pane.cliStatus === 'major_changed';
-  const detail = tr(major ? 'integration.compatMajorDetail' : 'integration.compatLineDetail')
-    .replace(/\{cli\}/g, cliName(pane.cli.family))
-    .replace(/\{line\}/g, pane.cliLine)
-    .replace('{version}', pane.cli.version)
-    .replace('{verified}', profile ? profile.verified_versions.join(', ') : '-');
-  const title = tr(major ? 'integration.paneApproveMajor' : 'integration.paneApproveLine').replace('{cli}', cliName(pane.cli.family)).replace('{line}', pane.cliLine);
-  const opts = { type: 'warning', title, message: title, detail, buttons: [tr('integration.compatConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
-  const { response } = await dialog.showMessageBox(win, opts);
-  if (response !== 0) return;
-  const now = integration.paneState(viewId).find((p) => p.id === termId);
-  if (!now || !now.cli || now.cli.family !== pane.cli.family || now.cliLine !== pane.cliLine) return;
-  try { integration.approveCompatLine(pane.cli.family, pane.cliLine); } catch (error) { dialog.showErrorBox(title, error.message || String(error)); }
-}
-
-// The CLI's version is unknown (started before Workbench saw it, or its banner changed): the user
-// confirms which CLI is running in the pane; input is then allowed for THIS run only.
-async function confirmAllowUnknownVersion(win, viewId, termId) {
-  const pane = integration.paneState(viewId).find((p) => p.id === termId);
-  if (!pane) return;
-  const { verifiedProfiles } = require('./integration/input-profiles');
-  const families = [...new Set(verifiedProfiles().map((p) => p.cli_family))].filter((f) => !pane.cli || !pane.cli.family || pane.cli.family === f);
-  if (!families.length) return;
-  const expect = integration.inputTarget(viewId, termId);
-  const opts = { type: 'warning', title: tr('integration.paneAllowUnknown'), message: tr('integration.allowUnknownMessage'), detail: tr('integration.allowUnknownDetail'), buttons: [...families.map((f) => tr('integration.allowUnknownButton').replace('{cli}', cliName(f))), tr('integration.cancel')], defaultId: families.length, cancelId: families.length, noLink: true };
-  const { response } = await dialog.showMessageBox(win, opts);
-  if (response < 0 || response >= families.length) return;
-  try { integration.allowUnknownVersion(viewId, termId, families[response], expect); } catch (error) { dialog.showErrorBox(tr('integration.paneAllowUnknown'), error.message || String(error)); }
-}
-
-// Opt-in per pane: explain once that sends to THIS pane then run without Workbench's confirmation.
-async function confirmAutoConfirm(win, viewId, termId) {
-  const session = integration.sessionFor(viewId, termId);
-  const pane = integration.paneState(viewId).find((p) => p.id === termId);
-  if (!session || !pane || !pane.input) return;
-  const expect = integration.inputTarget(viewId, termId);
-  const detail = tr('integration.autoConfirmDetail')
-    .replace('{label}', integration.registry.displayLabel(session))
-    .replace('{session}', `${session.sessionId.slice(0, 8)}… (gen ${session.generation})`)
-    .replace('{profile}', pane.profileId || '-');
-  const opts = { type: 'warning', title: tr('integration.paneAutoConfirm'), message: tr('integration.autoConfirmMessage'), detail, buttons: [tr('integration.autoConfirmConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
-  const { response } = await dialog.showMessageBox(win, opts);
-  if (response !== 0) return;
-  try { integration.enableAutoConfirm(viewId, termId, expect); } catch (error) { dialog.showErrorBox(tr('integration.paneAutoConfirm'), error.message || String(error)); }
-}
-
-// The badge's "Stop input" button (shown while confirmations are skipped). Resolves the pane from the sender.
-ipcMain.on('integration:stopInput', (event, { id } = {}) => {
-  const viewId = event.sender.id;
-  if (!integration || !viewState.has(viewId) || !Number.isInteger(id)) return;
-  integration.revokeInput(viewId, id);
-});
-
-async function confirmAllowInput(win, viewId, termId) {
-  const session = integration.sessionFor(viewId, termId);
-  const pane = integration.paneState(viewId).find((p) => p.id === termId);
-  if (!session || !pane || !pane.shared) return;
-  const expect = integration.inputTarget(viewId, termId); // what the dialog shows
-  const detail = tr('integration.allowInputDetail')
-    .replace('{principal}', integration.principal || '-')
-    .replace('{label}', integration.registry.displayLabel(session))
-    .replace('{session}', `${session.sessionId.slice(0, 8)}… (gen ${session.generation})`)
-    .replace('{profile}', pane.profileId || '-');
-  const opts = { type: 'warning', title: tr('integration.paneAllowInput'), message: tr('integration.allowInputMessage'), detail, buttons: [tr('integration.allowInputConfirm'), tr('integration.cancel')], defaultId: 1, cancelId: 1, noLink: true };
-  const { response } = await dialog.showMessageBox(win, opts);
-  if (response !== 0) return;
-  try { integration.grantInput(viewId, termId, expect); } catch (error) { dialog.showErrorBox(tr('integration.paneAllowInput'), error.message || String(error)); }
-}
-
-// Per-pane sharing menu (terminal toolbar button). The view (event.sender) owns the pane id; main
-// resolves the slot itself and never takes a session id from the renderer.
-ipcMain.on('integration:paneMenu', (event, { id, label = '', x = 0, y = 0 } = {}) => {
-  const viewId = event.sender.id;
-  const win = windowForSender(event.sender);
-  if (!win || !integration || !viewState.has(viewId) || !Number.isInteger(id)) return;
-  const pane = integration.paneState(viewId).find((p) => p.id === id && integration.sessionFor(viewId, id));
-  const items = [];
-  if (!integration.enabled) {
-    items.push({ label: tr('integration.paneEnableFirst'), click: async () => { if (await confirmEnableIntegration(win)) shareOn(win, viewId, id, label); } });
-  } else if (!pane) {
-    items.push({ label: tr('integration.paneNotRunning'), enabled: false });
-  } else {
-    const preset = integration.sharePreset();
-    items.push({ label: `${tr('integration.paneState')}: ${tr(`integration.state_${pane.state}`)}${pane.autoConfirm ? ` · ${tr('integration.stateAuto')}` : ''}`, enabled: false });
-    items.push({ type: 'separator' });
-    // The one everyday switch: Sharing ON/OFF with the saved default (read / input / skip confirmation).
-    items.push({
-      label: `${tr('integration.paneShareSwitch')}（${presetLabel(preset)}）`,
-      type: 'checkbox',
-      checked: pane.shared,
-      click: () => { if (pane.shared) integration.stopSharing(viewId, id); else shareOn(win, viewId, id, label); }
-    });
-    // Only what needs the user now: an unverified version to allow, or an unknown version to confirm.
-    if (pane.shared && (pane.presetInput || pane.profileId)) {
-      items.push({ label: `CLI: ${cliLine(pane)}`, enabled: false });
-      if ((pane.cliStatus === 'compat_pending' || pane.cliStatus === 'major_changed') && pane.cli && pane.cliLine) {
-        const key = pane.cliStatus === 'major_changed' ? 'integration.paneApproveMajor' : 'integration.paneApproveLine';
-        items.push({ label: tr(key).replace('{cli}', cliName(pane.cli.family)).replace('{line}', pane.cliLine), click: () => confirmApproveCompat(win, viewId, id) });
-      }
-      if (pane.cliStatus === 'unknown' && (!pane.cli || !pane.cli.version)) {
-        items.push({ label: tr('integration.paneAllowUnknown'), click: () => confirmAllowUnknownVersion(win, viewId, id) });
-      }
-    }
-    if (pane.input) {
-      items.push(pane.inputPaused
-        ? { label: tr('integration.paneResumeInput'), click: () => integration.resumeInput(viewId, id) }
-        : { label: tr('integration.paneTakeover'), click: () => integration.takeover(viewId, id) });
-      items.push({ label: tr('integration.badgeStopInput'), click: () => integration.revokeInput(viewId, id) });
-    }
-    items.push({ type: 'separator' }, { label: tr('integration.paneAdvanced'), submenu: advancedPaneItems(win, viewId, id, label, pane) });
-  }
-  items.push({ type: 'separator' }, { label: tr('integration.menuSharePreset'), enabled: !!integration, click: () => chooseSharePreset(win) });
-  items.push({ label: tr('integration.menuStatus'), click: () => showIntegrationStatus(win) });
-  Menu.buildFromTemplate(items).popup({ window: win, x: Math.round(x), y: Math.round(y + TABSTRIP_H) });
-});
-
-function presetLabel(preset) {
-  if (!preset) return tr('integration.presetUnset');
-  if (!preset.input) return tr('integration.presetRead');
-  return preset.skipConfirm ? tr('integration.presetReadInputAuto') : tr('integration.presetReadInput');
-}
-
-// Sharing ON with the saved default. The first time, the default is chosen (and consented to) first.
-async function shareOn(win, viewId, termId, label) {
-  if (!integration.sharePreset() && !(await chooseSharePreset(win))) return;
-  try { integration.shareWithPreset(viewId, termId, { label }); } catch (error) {
-    dialog.showErrorBox(tr('integration.shareTitle'), error.message || String(error));
-  }
-}
-
-// The saved default for "Sharing ON" — chosen once, with the full explanation (consent).
-async function chooseSharePreset(win) {
-  const current = integration.sharePreset();
-  const choices = [
-    { input: false, skipConfirm: false, label: tr('integration.presetRead') },
-    { input: true, skipConfirm: false, label: tr('integration.presetReadInput') },
-    { input: true, skipConfirm: true, label: tr('integration.presetReadInputAuto') }
-  ];
-  const currentIdx = current ? choices.findIndex((c) => c.input === current.input && c.skipConfirm === current.skipConfirm) : 2;
-  const opts = {
-    type: 'warning',
-    title: tr('integration.menuSharePreset'),
-    message: tr('integration.presetMessage'),
-    detail: tr('integration.presetDetail').replace('{principal}', integration.principal || '-'),
-    buttons: [...choices.map((c) => c.label), tr('integration.cancel')],
-    defaultId: currentIdx >= 0 ? currentIdx : 2,
-    cancelId: choices.length,
-    noLink: true
-  };
-  const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
-  if (response < 0 || response >= choices.length) return false;
-  integration.setSharePreset(choices[response]);
-  buildAppMenu();
-  return true;
-}
-
-// The individual switches (rarely needed now that "Sharing ON" applies the saved default).
-function advancedPaneItems(win, viewId, id, label, pane) {
-  const items = [];
-  items.push({
-    label: tr('integration.paneReadSwitch'),
-    type: 'checkbox',
-    checked: pane.shared,
-    click: () => { if (pane.shared) integration.stopSharing(viewId, id); else confirmShare(win, viewId, id, label); }
-  });
-  const gateOpen = integration.inputGate().open;
-  if (gateOpen || pane.input) {
-    const { verifiedProfiles } = require('./integration/input-profiles');
-    const cliUsable = pane.cliStatus === 'verified' || pane.cliStatus === 'compat_approved';
-    items.push({
-      label: tr('integration.paneInputSwitch'),
-      type: 'checkbox',
-      checked: pane.input,
-      enabled: pane.input || (pane.shared && gateOpen && !!pane.profileId && cliUsable),
-      click: () => { if (pane.input) integration.revokeInput(viewId, id); else confirmAllowInput(win, viewId, id); }
-    });
-    items.push({
-      label: tr('integration.paneProfile'),
-      enabled: pane.shared,
-      submenu: [
-        { label: tr('integration.paneProfileNone'), type: 'radio', checked: !pane.profileId, click: () => integration.selectProfile(viewId, id, null) },
-        ...verifiedProfiles().map((p) => ({
-          label: `${p.cli_name} — ${p.mode}${p.multiline ? '' : ' (single-line)'}`,
-          type: 'radio',
-          checked: pane.profileId === p.id,
-          click: () => integration.selectProfile(viewId, id, p.id)
-        }))
-      ]
-    });
-    items.push({
-      label: tr('integration.paneAutoConfirm'),
-      type: 'checkbox',
-      checked: !!pane.autoConfirm,
-      enabled: pane.input,
-      click: () => { if (pane.autoConfirm) integration.disableAutoConfirm(viewId, id); else confirmAutoConfirm(win, viewId, id); }
-    });
-  }
-  if (pane.shared) {
-    items.push({ type: 'separator' });
-    items.push(pane.capture === 'paused'
-      ? { label: tr('integration.paneResume'), click: () => integration.resume(viewId, id) }
-      : { label: tr('integration.panePause'), click: () => integration.pause(viewId, id) });
-    items.push({ label: tr('integration.paneClear'), click: () => integration.clearBuffer(viewId, id) });
-  }
-  return items;
-}
-
-ipcMain.handle('integration:paneState', (event) => (integration ? integration.paneState(event.sender.id) : []));
